@@ -156,7 +156,7 @@ fn valid_crc_but_forged_reference_count_is_rejected_by_graph_oracle() {
     let (mut device, first, _, _) = index_header(fs.into_device().power_loss());
     let mut block = [0; BLOCK_SIZE];
     device.read_block(first, &mut block).unwrap();
-    assert_eq!(&block[..8], b"BFSREF5\0");
+    assert_eq!(&block[..8], b"BFSRLF6\0");
     let refs = u16::from_le_bytes(block[40..42].try_into().unwrap());
     block[40..42].copy_from_slice(&(refs + 1).to_le_bytes());
     block[24..28].fill(0);
