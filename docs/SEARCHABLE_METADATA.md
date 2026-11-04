@@ -1,8 +1,8 @@
 # Searchable metadata: BFS-NG architecture and benchmark plan
 
-**Status: design proposal, not implemented or exposed as filesystem APIs.**
+**Status (2026-11-04):** The **bounded F4 persistent attribute catalog and indexed query APIs are implemented** on disposable v9 filesystem images. This document's **per-attribute incremental CoW B+tree, richer fluent query API, authorization-aware planner and live changefeed are proposals**, not implemented interfaces. For actual F4 behavior see [F4 durable attributes](F4_DURABLE_ATTRIBUTES.md) and the [current architecture](ARCHITECTURE.md).
 
-BFS-NG's distinguishing capability should be **transactionally indexed, typed file attributes** with snapshot-consistent queries. This follows the spirit of BeFS/Haiku BFS attribute indices while avoiding treating a directory tree and external search database as independent sources of truth. This proposal presumes a checksummed copy-on-write metadata store and independently tested root publication/recovery; the current repository has **neither persistent indexing nor filesystem mounts**.
+BFS-NG's distinguishing capability is **transactionally indexed, typed file attributes** with snapshot-consistent queries. This follows the spirit of BeFS/Haiku BFS indices without requiring a separately synchronized search database. **Already implemented:** F4 stores stable-inode-keyed typed rows and canonical ordered secondary postings in a private CoW catalog file, publishes that catalog and the namespace with the same F0 root, checks postings against independently reconstructed rows, and supports historical snapshot queries. **Not implemented:** mount adapters, a page-local CoW posting tree, a live changefeed, and a production authorization-aware query surface.
 
 ## 1. Model
 
@@ -62,7 +62,7 @@ Queries could find \`asset.kind='shader' AND asset.renderer='vulkan'\`, or rever
 
 ## 2. CoW index structure
 
-For a first implementation, favor a copy-on-write B+ tree per indexed attribute with **bytewise sortable canonical keys**:
+**Proposed replacement for F4's current whole-catalog rewrite:** use an incremental copy-on-write B+ tree (or a composite-key tree partitioned by attribute) with **bytewise sortable canonical keys**:
 
 \`\`\`text
 IndexEntry = (attribute_schema_id, type_tag, canonical_value, file_id)
@@ -84,7 +84,9 @@ No reader may mix an inode at generation \(g\) with an index root at generation 
 
 **Space and write amplification caveat:** Indexing every attribute is expensive. Start with explicit opt-in indexed schema IDs and hard limits on string length, postings, and total attributes per inode. Measure CoW path copying, shared-node retention, and checkpoint/snapshot pressure. Later compare B+ trees, log-structured indexes and compressed posting lists under the same crash correctness constraints.
 
-## 3. Query API (illustrative; not code that exists)
+## 3. Query API: current bounded implementation versus proposed fluent API
+
+**Exists now:** `FileSystem::search_attributes(&[Predicate], limit)`, `search_snapshot_attributes(generation, ...)`, `file_attributes(path)`, `schema()`, and transaction operations `install_schema` / `set_attributes`. The sorted postings and full-scan differential oracle are persisted/tested under the F4 private catalog. The following fluent/pinned-view sketch is **not** an implemented API:
 
 \`\`\`rust
 let view = filesystem.snapshot()?; // pins a committed root
@@ -100,7 +102,7 @@ for entry in query.execute()? {
 
 A typed planner should reject mismatched schema types, excessive limits, unauthorized attributes, unsupported predicates and ambiguous collation. Query results carry \`file_id\` and \`snapshot_generation\` so later reads can use the same view. ACL checks must not leak private files via result counts, error timing or unfiltered index scans; authorization and namespace visibility belong in the query engine and its tests.
 
-### Live queries after durable storage exists
+### Live queries after a durable changefeed exists
 
 Live queries require a monotonically ordered commit/change feed, with \`(volume, sequence, transaction_id, changed_file_id, old/new index keys)\` for atomic updates and reconnect/resume. Watch notifications alone are not a durable change log. Define retention, overflow, compaction, security and duplicate delivery rules before advertising exactly-once behavior. A practical first contract is at-least-once delivery with a resume cursor, duplicate suppression by the consumer, and resnapshot-required when a cursor expires.
 
@@ -127,12 +129,12 @@ Measure cold/warm p50, p95, p99, memory and CPU LLC misses where tools exist, in
 
 ## 5. Roadmap and correctness gates
 
-- **M0:** typed attribute schema, codecs, normalization/collation tests, and an independent in-memory sorted-map oracle.
-- **M1:** image-backed CoW inode and attribute storage; byte-level encoding and malformed metadata fuzzing.
-- **M2:** CoW B+ tree with stable file IDs, index mutation atomic with inode metadata; crash/recovery model checks.
-- **M3:** snapshot-consistent range/equality/membership queries; randomized differential test versus full scan.
-- **M4:** cost-based plan selection, statistics, index size budgets, cache instrumentation and real-world AxiomZig/DVE query workloads.
-- **M5:** durable live change feed, cursor resume, overflow/rebuild and ACL tests.
+- **M0 — implemented:** typed attribute schema, codecs, normalization tests and an independent in-memory sorted-map oracle.
+- **M1 — bounded implementation through F1/F4:** image-backed CoW inode and attribute storage, checked encodings, snapshots and malformed metadata rejection. This is not a production format.
+- **M2 — partially implemented:** stable inode IDs and atomic F4 catalog/namespace publication with CRC and recovery tests are implemented. **Not done:** a per-attribute incremental CoW posting B+tree; F4 currently rewrites the entire bounded catalog on change.
+- **M3 — implemented for supported bounded predicates:** historical snapshot equality/range/prefix/membership queries and independently reconstructed differential oracle. A fluent persistent view API and authorization filter are proposals.
+- **M4 — proposed:** cost-based plan selection, statistics, index size budgets, cache instrumentation and measured AxiomZig/DVE/MegaDoc queries on a disposable BFS-NG image.
+- **M5 — proposed:** durable live changefeed, reconnectable cursor, retention/overflow, resnapshot protocol and access-control tests.
 
 ### References
 
