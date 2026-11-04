@@ -2,7 +2,7 @@
 
 This add-on consumes *generated data* from [HiroSakuraba/AxiomMegadoc](https://github.com/HiroSakuraba/AxiomMegadoc), not AxiomZig. Its upstream v0.11 baseline contains 520 Scheme/ML/Prolog atomic records and a reusable builder packaged in \`axiom_megadoc_v0_11.zip\`. The v0.12 source PR adds a deterministic materializer (\`src/build_v012.py\`), with provenance and checker-observed-diagnostic constraints.
 
-**Important:** AxiomMegaDoc \`latent_diagnostic\` and \`runtime_trace\` are distinct constructions. The first v0.12 generator emits only semantically compatible, checker-grounded latent-diagnostic documents. It does **not** execute Guile, MLton or Prolog and makes no claim that runtime-trace examples have been newly validated. Wider source-pair *benchmark views* are explicitly marked nontraining.
+**Important:** AxiomMegaDoc \`latent_diagnostic\` and \`runtime_trace\` are distinct constructions. The default generator emits semantically compatible, checker-grounded latent-diagnostic documents. The optional `--runtime-traces` mode executes three representative programs through Guile, MLton, and SWI-Prolog, checks runtime outputs against ledger expectations, and records runtime versions; the end-to-end BFS-NG CI enables this option. It does **not** claim every source record has been runtime-validated. Wider source-pair *benchmark views* are explicitly marked nontraining.
 
 ## Generate the source corpus
 
@@ -13,6 +13,9 @@ git -C ../AxiomMegadoc checkout feature/v012-reproducible-megadocs
 
 python3 ../AxiomMegadoc/src/build_v012.py \
   --output benchmarks/real-world/local-data/axiommegadoc
+# To include the three separately runtime-verified documents (as in CI):
+# Install guile-3.0, mlton, and swi-prolog-nox, then use --runtime-traces
+# with an empty output directory.
 \`\`\`
 
 Do not commit local corpus data, inventories or replay outputs. The source generator's ZIP SHA256, ledger SHA256, and builder SHA256 are recorded in its \`manifest.json\`. Generated data include long \`megadocs/*.md\`, typed-provenance \`attributes/*.json\`, immutable source record blobs in \`records/*.json\`, per-split \`streams/*.jsonl\`, and broader nontraining \`benchmark-views/*.md\`.
@@ -72,3 +75,7 @@ A future BFS-NG typed attribute index can directly search by \`megadoc.construct
 The regular CI runs dependency-free fixture tests. The external [AxiomMegaDoc benchmark workflow](../../.github/workflows/megadoc-source.yml) checks out a pinned upstream source commit, regenerates the corpus, emits recorded/model traces, runs the Rust cache policies, and uploads only aggregate traces/reports. The upstream source commit is pinned to avoid silent training-data changes.
 
 The benchmark suite is separated from \`main\` until the parent AxiomZig/DVE real-world benchmark PR has merged. The new source PR and this BFS-NG benchmark PR can be independently reviewed.
+
+## Initial end-to-end corpus composition
+
+With the optional lane verification enabled, the pinned test regenerates **20 verified megadocs** (17 paper-aligned latent-diagnostic views plus 3 executed and output-checked runtime_trace views), **260 broader benchmark-only provenance views**, and **520 source-record JSON objects**. It does not synthesize additional training examples or claim the scaling/evaluation results from the megadocs research paper.
