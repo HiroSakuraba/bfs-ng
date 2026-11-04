@@ -61,3 +61,8 @@ The [F1 implementation](F1_COW_NAMESPACE.md) builds a bounded copy-on-write meta
 ## F2 snapshot retention and block recycling
 
 [F2](F2_SNAPSHOTS_RECLAMATION.md) adds persistent generation pins, historical file reads, birth-generation tags and conservative physical block recycling. Candidate free blocks are computed from reachable data and metadata across both F0 slots and all pinned snapshot roots. This is a full-scan correctness reference, not a production allocation or reclamation engine.
+
+
+## F3 incremental CoW namespace metadata
+
+[F3](F3_INCREMENTAL_COW.md) replaces whole-tree rewrite on small changes with path-copying changed leaves and ancestors, sharing unchanged physical node pages across live roots and snapshots. Initial bulk-loads remain bottom-up, while incremental commits discard superseded staged path copies. Deletion rebalancing, incremental mounted namespace queries and durable allocator acceleration remain future work.
