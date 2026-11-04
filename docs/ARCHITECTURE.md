@@ -51,3 +51,8 @@ No cache result is a proof of filesystem safety. No filesystem semantics are imp
 - S3-FIFO: https://s3fifo.com/
 - W-TinyLFU: https://github.com/ben-manes/caffeine/wiki/Efficiency
 - libCacheSim: https://github.com/1a1a11a/libCacheSim
+
+
+## F1 experimental namespace
+
+The [F1 implementation](F1_COW_NAMESPACE.md) builds a bounded copy-on-write metadata tree and immutable file extents over F0 alternating roots. Every committed generation atomically publishes the namespace and verifies data/tree checksums on reopen. The current implementation rebuilds the complete tree per commit and never reclaims allocated blocks; F2/F3 remain necessary for retention-safe allocation and efficient incremental updates.
