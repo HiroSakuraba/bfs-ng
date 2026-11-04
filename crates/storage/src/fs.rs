@@ -56,7 +56,6 @@ impl Record {
     }
 }
 
-#[derive(Clone)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SnapshotRoot {
     generation: u64,
@@ -286,7 +285,7 @@ impl Builder {
         // A file's extent is contiguous. Find a complete run in the
         // recovered free set; never merge unrelated holes into an extent.
         let mut run_start = None;
-        let mut last = 0;
+        let mut last: u64 = 0;
         let mut run_len = 0;
         for &address in &self.reusable {
             if address <= self.root_limit {
