@@ -10,6 +10,10 @@ BFS-NG aims to combine searchable, typed file attributes with transactional meta
 - **Validated by GitHub Actions:** Rust compilation, 11 tests, Clippy, and the independent LRU golden trace. Formatting is enforced from this tranche onward.
 - **Not implemented:** disk format, filesystem mounts, block-device driver, transactional engine, real metadata cache, indexed attributes, snapshots, Windows/Linux filesystem adapters.
 
+## Searchable metadata design
+
+A [typed-attribute and transactional query proposal](docs/SEARCHABLE_METADATA.md) documents the intended native indexes for AxiomZig diagnostic searches and DVE dependency discovery. **The persistent metadata index and query API are not implemented yet.**
+
 ## Real-world workload benchmarks
 
 The [AxiomZig and DVE benchmark harness](benchmarks/real-world/README.md) generates compiler-unvalidated AxiomZig fixtures, inventories checked-out corpus archives, and produces recorded or modeled page-level traces from DVE scenes and assets. It feeds the existing cache-policy simulator; **it does not mount BFS-NG or measure kernel page-cache misses**.

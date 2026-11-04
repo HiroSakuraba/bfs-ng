@@ -118,3 +118,17 @@ See [BFS-NG searchable metadata architecture](../../docs/SEARCHABLE_METADATA.md)
 ## Pinned external-source workflow
 
 The [external-source smoke workflow](../../.github/workflows/real-world-sources.yml) checks out fixed AxiomZig and DVE commits, replays their patterns, and uploads only aggregate benchmark data. External sources are not committed to BFS-NG. An opt-in workflow run can change availability and timing; the pinned source commits keep the input content stable.
+
+## First pinned-source smoke results (2026-11-04)
+
+A successful pinned-source run against AxiomZig `e22f28424bc2f7589b5779e23bd1790ad075bbb5` and DVE `f11b9dd348688c89714247806a6036be077d4d7c` produced:
+
+| Workload | Selected logical objects | Trace events | LRU hits / total at 1 MiB | S3-FIFO hits / total |
+|---|---:|---:|---:|---:|
+| AxiomZig compile-model | 8,202 | 12,572 | 3,805 / 12,572 | 3,806 / 12,572 |
+| DVE scene-record | 139 | 60 | 38 / 60 | 38 / 60 |
+| DVE hotreload-model | 139 | 318 | 240 / 318 | 240 / 318 |
+
+DVE `scene-record` completed **18 real harness file-read calls** totaling **8,692 bytes**. These figures quantify what the harness read; they do not mean 8,692 bytes came from a physical SSD. AxiomZig had one mislabeled/non-ZIP archive that was explicitly reported and treated as an opaque blob. The full policy results, including W-TinyLFU, no-cache, and request/byte miss counts, are in the [real-source workflow artifact](https://github.com/HiroSakuraba/bfs-ng/actions/runs/41776494500). This was a smoke test on highly selected access sequences, not a general benchmark of the source projects.
+
+Before making a performance claim, compare equal-size workloads at multiple capacities, include physical OS cache telemetry, and increase DVE's real dependency graph coverage. In particular, only 18 scene reads is insufficient to characterize DVE's general streaming behavior.
