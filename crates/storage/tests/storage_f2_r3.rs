@@ -99,8 +99,7 @@ fn checksum_correct_early_promotion_of_fallback_block_is_quarantined() {
     let mut fs = blank(160);
     write(&mut fs, b"first");
     write(&mut fs, b"second");
-    let (mut device, first, _, runs, generation) =
-        checkpoint_header(fs.into_device().power_loss());
+    let (mut device, first, _, runs, generation) = checkpoint_header(fs.into_device().power_loss());
     assert_eq!(generation, 2);
     assert!(runs > 0);
     let mut page = [0; BLOCK_SIZE];
@@ -116,7 +115,10 @@ fn checksum_correct_early_promotion_of_fallback_block_is_quarantined() {
     assert_eq!(recovered.generation(), 2);
     assert_eq!(recovered.read_file("/entry").unwrap(), b"second");
     let audit = recovered.allocation_report().unwrap();
-    assert!(audit.reuse_blocked, "a forged ready run overlaps the fallback");
+    assert!(
+        audit.reuse_blocked,
+        "a forged ready run overlaps the fallback"
+    );
     assert_eq!(audit.reclaimable_blocks, 0);
     write(&mut recovered, b"third");
     assert_eq!(reopen(recovered).read_file("/entry").unwrap(), b"third");
@@ -172,7 +174,12 @@ fn interrupted_journal_publication_recovers_one_whole_generation() {
             let mut fs = blank(160);
             write(&mut fs, b"old");
             let mut device = fs.into_device();
-            device.inject(Fault { operation, torn_bytes }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes,
+                })
+                .unwrap();
             let mut fs = FileSystem::open(device).unwrap();
             let mut tx = fs.begin();
             tx.write_file("/entry", b"new").unwrap();
