@@ -56,3 +56,8 @@ No cache result is a proof of filesystem safety. No filesystem semantics are imp
 ## F1 experimental namespace
 
 The [F1 implementation](F1_COW_NAMESPACE.md) builds a bounded copy-on-write metadata tree and immutable file extents over F0 alternating roots. Every committed generation atomically publishes the namespace and verifies data/tree checksums on reopen. The current implementation rebuilds the complete tree per commit and never reclaims allocated blocks; F2/F3 remain necessary for retention-safe allocation and efficient incremental updates.
+
+
+## F2 snapshot retention and block recycling
+
+[F2](F2_SNAPSHOTS_RECLAMATION.md) adds persistent generation pins, historical file reads, birth-generation tags and conservative physical block recycling. Candidate free blocks are computed from reachable data and metadata across both F0 slots and all pinned snapshot roots. This is a full-scan correctness reference, not a production allocation or reclamation engine.
