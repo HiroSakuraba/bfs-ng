@@ -2,9 +2,11 @@
 #![forbid(unsafe_code)]
 
 mod device;
+mod fs;
 mod volume;
 
 pub use device::{BlockDevice, CrashDevice, Fault, FileDevice};
+pub use fs::{FileSystem, FsTransaction, Stat};
 pub use volume::{RootInfo, Volume};
 
 pub const BLOCK_SIZE: usize = 4096;
@@ -26,6 +28,14 @@ pub enum Error {
     GenerationOverflow,
     Poisoned,
     InjectedCrash,
+    CorruptTree,
+    InvalidPath,
+    NotFound,
+    AlreadyExists,
+    NotDirectory,
+    NotEmpty,
+    IsDirectory,
+    StaleTransaction,
 }
 
 impl From<std::io::Error> for Error {
@@ -49,6 +59,14 @@ impl fmt::Display for Error {
             Self::GenerationOverflow => write!(f, "root generation overflow"),
             Self::Poisoned => write!(f, "prior failed commit; reopen device to recover"),
             Self::InjectedCrash => write!(f, "injected power failure"),
+            Self::CorruptTree => write!(f, "corrupt or inconsistent F1 metadata tree"),
+            Self::InvalidPath => write!(f, "invalid absolute filesystem path"),
+            Self::NotFound => write!(f, "filesystem entry not found"),
+            Self::AlreadyExists => write!(f, "filesystem entry already exists"),
+            Self::NotDirectory => write!(f, "parent is not a directory"),
+            Self::NotEmpty => write!(f, "directory is not empty"),
+            Self::IsDirectory => write!(f, "expected a regular file"),
+            Self::StaleTransaction => write!(f, "transaction started at a stale root generation"),
         }
     }
 }

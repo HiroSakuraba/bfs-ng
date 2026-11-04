@@ -8,7 +8,7 @@ const VERSION: u32 = 1;
 const NO_ROOT: u64 = u64::MAX;
 const CHECKSUM_OFFSET: usize = 120;
 
-fn crc32c(data: &[u8]) -> u32 {
+pub(crate) fn crc32c(data: &[u8]) -> u32 {
     let mut crc = !0_u32;
     for byte in data {
         crc ^= u32::from(*byte);
@@ -170,6 +170,109 @@ impl<D: BlockDevice> Volume<D> {
             head,
             poisoned: false,
         })
+    }
+
+    /// Validates user payloads for *each* recoverable root candidate.
+    /// A verifier may reject a checksummed F0 root whose referenced F1
+    /// metadata/data nodes are invalid; the previous slot is then tried.
+    pub(crate) fn open_verified<T>(
+        mut device: D,
+        mut verify: impl FnMut(&mut D, RootInfo, Option<&[u8]>) -> Result<Option<T>>,
+    ) -> Result<(Self, T)> {
+        if device.block_count() < 4 {
+            return Err(Error::Geometry);
+        }
+        let mut candidates = Vec::new();
+        for slot in 0..2 {
+            let mut block = [0_u8; BLOCK_SIZE];
+            device.read_block(slot, &mut block)?;
+            if let Some(candidate) = Super::decode(&block, slot, device.block_count()) {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            return Err(Error::NoValidRoot);
+        }
+        if candidates.len() == 2 {
+            let a = candidates[0];
+            let b = candidates[1];
+            if a.volume_id != b.volume_id
+                || a.blocks != b.blocks
+                || a.generation == b.generation
+                || a.generation.abs_diff(b.generation) != 1
+            {
+                return Err(Error::InconsistentVolume);
+            }
+        }
+        candidates.sort_by(|a, b| b.generation.cmp(&a.generation));
+        for head in candidates {
+            if let Some(bytes) = read_payload(&mut device, head)? {
+                let payload = head.root_block.map(|_| bytes.as_slice());
+                if let Some(state) = verify(&mut device, head.info(), payload)? {
+                    return Ok((
+                        Self {
+                            device,
+                            head,
+                            poisoned: false,
+                        },
+                        state,
+                    ));
+                }
+            }
+        }
+        Err(Error::CorruptRoot)
+    }
+
+    /// Writes new, caller-allocated immutable blocks and publishes a root
+    /// only after a successful data sync barrier. Caller must ensure these
+    /// addresses are unreferenced by all live and fallback roots.
+    pub(crate) fn commit_root_with_blocks(
+        &mut self,
+        blocks: &[(u64, [u8; BLOCK_SIZE])],
+        payload: &[u8],
+    ) -> Result<RootInfo> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
+        if payload.len() > ROOT_CAPACITY {
+            return Err(Error::TooLarge);
+        }
+        let next_generation = self
+            .head
+            .generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
+        let root_block = next_generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for (number, _) in blocks {
+            if *number <= root_block || *number >= self.head.blocks || !seen.insert(*number) {
+                return Err(Error::Geometry);
+            }
+        }
+        if root_block >= self.head.blocks {
+            return Err(Error::NoSpace);
+        }
+        // After the first write, an error makes the handle unusable until
+        // recovery: a failed write may have reached stable media.
+        self.poisoned = true;
+        for (number, bytes) in blocks {
+            self.device.write_block(*number, bytes)?;
+        }
+        self.device.sync()?;
+        // commit_root performs payload write -> sync -> root-slot write -> sync.
+        self.poisoned = false;
+        self.commit_root(payload)
+    }
+
+    pub(crate) fn read_data_block(&mut self, number: u64) -> Result<[u8; BLOCK_SIZE]> {
+        if number < 2 || number >= self.head.blocks {
+            return Err(Error::OutOfBounds(number));
+        }
+        let mut block = [0; BLOCK_SIZE];
+        self.device.read_block(number, &mut block)?;
+        Ok(block)
     }
 
     /// Reopens a volume, selecting the highest complete and checksummed root.
