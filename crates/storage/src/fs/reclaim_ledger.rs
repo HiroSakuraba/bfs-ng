@@ -55,7 +55,10 @@ fn encode_runs(
     generation: u64,
 ) -> Result<Vec<Run>> {
     let mut rows = Vec::with_capacity(
-        ready.len().saturating_add(pending.len()).saturating_add(deferred.len()),
+        ready
+            .len()
+            .saturating_add(pending.len())
+            .saturating_add(deferred.len()),
     );
     for &address in ready {
         rows.push((address, generation));
