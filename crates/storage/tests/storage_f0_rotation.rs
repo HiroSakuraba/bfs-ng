@@ -10,7 +10,15 @@ fn replace(fs: &mut FileSystem<CrashDevice>, generation: u64) {
     let mut tx = fs.begin();
     tx.write_file("/entry", format!("value-{generation}").as_bytes())
         .unwrap();
-    assert_eq!(fs.commit(tx).unwrap(), generation);
+    let result = fs.commit(tx);
+    if let Err(error) = &result {
+        panic!(
+            "commit generation {generation} failed: {error:?}; high_cursor={}, scrub={:?}",
+            fs.free_cursor(),
+            fs.allocation_report()
+        );
+    }
+    assert_eq!(result.unwrap(), generation);
 }
 
 fn crc32c(input: &[u8]) -> u32 {
