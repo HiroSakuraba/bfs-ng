@@ -66,3 +66,8 @@ The [F1 implementation](F1_COW_NAMESPACE.md) builds a bounded copy-on-write meta
 ## F3 incremental CoW namespace metadata
 
 [F3](F3_INCREMENTAL_COW.md) replaces whole-tree rewrite on small changes with path-copying changed leaves and ancestors, sharing unchanged physical node pages across live roots and snapshots. Initial bulk-loads remain bottom-up, while incremental commits discard superseded staged path copies. Deletion rebalancing, incremental mounted namespace queries and durable allocator acceleration remain future work.
+
+
+## F4 typed searchable attributes in durable roots
+
+[F4](F4_DURABLE_ATTRIBUTES.md) persists an immutable schema, typed inode-keyed attribute maps, and verified ordered secondary posting keys in a private CoW catalog file under the **same root** as the F3 namespace. Recovery compares persisted postings against independently reconstructed keys and rejects stale inode references; pinned F2 snapshots preserve their historical index. The F4 catalog remains bounded and entirely rewritten when attributes change, so the next search milestone is incremental on-disk posting pages and authorization-aware query cursors.
