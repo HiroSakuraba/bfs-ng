@@ -16,7 +16,9 @@ A [typed-attribute and transactional query proposal](docs/SEARCHABLE_METADATA.md
 
 ## Real-world workload benchmarks
 
-The [AxiomZig and DVE benchmark harness](benchmarks/real-world/README.md) generates compiler-unvalidated AxiomZig fixtures, inventories checked-out corpus archives, and produces recorded or modeled page-level traces from DVE scenes and assets. It feeds the existing cache-policy simulator; **it does not mount BFS-NG or measure kernel page-cache misses**.
+The [AxiomZig, DVE, and AxiomMegaDoc benchmark suite](benchmarks/real-world/README.md) generates compiler-unvalidated AxiomZig fixtures, inventories checked-out corpus archives, and produces recorded or modeled page-level traces from DVE scenes and assets. It feeds the existing cache-policy simulator; **it does not mount BFS-NG or measure kernel page-cache misses**.
+
+The [AxiomMegaDoc integration](benchmarks/real-world/MEGADOC.md) benchmarks generated long documents and their source-record/attribute reads without pretending to measure kernel cache misses.
 
 ## First run
 
