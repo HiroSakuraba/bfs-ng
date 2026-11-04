@@ -117,14 +117,16 @@ pub(super) fn persist(
     let runs = loop {
         let ready: BTreeSet<u64> = builder.reusable.union(promoted).copied().collect();
         if !ready.is_disjoint(pending)
+            || !ready.is_disjoint(deferred)
             || ready
                 .iter()
                 .chain(pending)
+                .chain(deferred)
                 .any(|&id| !valid_address(id, generation, builder.cursor, u64::MAX))
         {
             return Err(Error::CorruptTree);
         }
-        let rows = encode_runs(&ready, pending, generation)?;
+        let rows = encode_runs(&ready, pending, deferred, generation)?;
         if rows.len() > (MAX_PAGES * PAGE_ENTRIES) {
             return Err(Error::TooLarge);
         }
@@ -159,6 +161,7 @@ pub(super) fn persist(
         first: addresses[0],
         pages: addresses.len() as u32,
         runs: runs.len() as u32,
+        sweep_cursor,
     })
 }
 
@@ -178,12 +181,15 @@ pub(super) fn read<D: BlockDevice>(
         || header.runs as usize > header.pages as usize * PAGE_ENTRIES
         || generation == 0
         || generation == u64::MAX
+        || (header.sweep_cursor != 0
+            && (header.sweep_cursor < cursor || header.sweep_cursor > device.block_count()))
     {
         return Err(Error::CorruptTree);
     }
     let mut pages = BTreeSet::new();
     let mut ready = BTreeSet::new();
     let mut pending = BTreeSet::new();
+    let mut deferred = BTreeSet::new();
     let mut next = header.first;
     let mut previous_end = None;
     let mut total_runs = 0usize;
@@ -221,7 +227,7 @@ pub(super) fn read<D: BlockDevice>(
                 || !valid_address(start, generation, cursor, device.block_count())
                 || end > device.block_count()
                 || previous_end.is_some_and(|last| start < last)
-                || (eligible != generation && eligible != generation + 1)
+                || (eligible != 0 && eligible != generation && eligible != generation + 1)
             {
                 return Err(Error::CorruptTree);
             }
@@ -234,6 +240,8 @@ pub(super) fn read<D: BlockDevice>(
             }
             let target = if eligible == generation {
                 &mut ready
+            } else if eligible == 0 {
+                &mut deferred
             } else {
                 &mut pending
             };
@@ -248,6 +256,8 @@ pub(super) fn read<D: BlockDevice>(
             .iter()
             .any(|id| ready.contains(id) || pending.contains(id))
         || !ready.is_disjoint(&pending)
+        || !ready.is_disjoint(&deferred)
+        || !pending.is_disjoint(&deferred)
     {
         return Err(Error::CorruptTree);
     }
@@ -255,5 +265,6 @@ pub(super) fn read<D: BlockDevice>(
         pages,
         ready,
         pending,
+        deferred,
     })
 }
