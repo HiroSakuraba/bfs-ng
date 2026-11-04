@@ -121,7 +121,8 @@ fn checksum_correct_forged_separator_rejects_latest_root() {
     let key = u64::from_le_bytes(block[32..40].try_into().unwrap());
     block[32..40].copy_from_slice(&(key + 1).to_le_bytes());
     block[24..28].fill(0);
-    block[24..28].copy_from_slice(&crc32c(&block).to_le_bytes());
+    let checksum = crc32c(&block);
+    block[24..28].copy_from_slice(&checksum.to_le_bytes());
     device.write_block(root, &block).unwrap();
     device.sync().unwrap();
 
