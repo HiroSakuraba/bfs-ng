@@ -1,4 +1,4 @@
-//! F2.R3: crash-atomic, epoch-tagged free-run/reclamation checkpoint.
+//! F2.R4: crash-atomic free-run checkpoint with bounded resumption cursor.
 //!
 //! Each F0 manifest owns one immutable checked journal chain. "Ready" ranges
 //! are absent from BOTH recoverable roots after publication; "pending" ranges
@@ -14,7 +14,7 @@ use super::{
 };
 use std::collections::BTreeSet;
 
-const MAGIC: &[u8; 8] = b"BFSFRJ7\0";
+const MAGIC: &[u8; 8] = b"BFSFRJ8\0";
 const HEADER: usize = 32;
 const ENTRY: usize = 20;
 const PAGE_ENTRIES: usize = (BLOCK_SIZE - HEADER) / ENTRY;
@@ -25,6 +25,8 @@ pub(super) struct JournalHeader {
     pub first: u64,
     pub pages: u32,
     pub runs: u32,
+    /// Physical continuation address for the bounded deferred-free sweep.
+    pub sweep_cursor: u64,
 }
 
 #[derive(Debug)]
@@ -32,6 +34,7 @@ pub(super) struct Journal {
     pub pages: BTreeSet<u64>,
     pub ready: BTreeSet<u64>,
     pub pending: BTreeSet<u64>,
+    pub deferred: BTreeSet<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,15 +51,21 @@ fn valid_address(address: u64, generation: u64, cursor: u64, total: u64) -> bool
 fn encode_runs(
     ready: &BTreeSet<u64>,
     pending: &BTreeSet<u64>,
+    deferred: &BTreeSet<u64>,
     generation: u64,
 ) -> Result<Vec<Run>> {
-    let mut rows = Vec::with_capacity(ready.len().saturating_add(pending.len()));
+    let mut rows = Vec::with_capacity(
+        ready.len().saturating_add(pending.len()).saturating_add(deferred.len()),
+    );
     for &address in ready {
         rows.push((address, generation));
     }
     let next = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
     for &address in pending {
         rows.push((address, next));
+    }
+    for &address in deferred {
+        rows.push((address, 0));
     }
     rows.sort_unstable_by_key(|(address, _)| *address);
     let mut runs = Vec::<Run>::new();
@@ -90,19 +99,23 @@ fn encode_runs(
 pub(super) fn persist(
     builder: &mut Builder,
     generation: u64,
-    released_by_rotation: &BTreeSet<u64>,
+    promoted: &BTreeSet<u64>,
     pending: &BTreeSet<u64>,
+    deferred: &BTreeSet<u64>,
+    sweep_cursor: u64,
 ) -> Result<JournalHeader> {
-    if generation == 0 || generation == u64::MAX || !released_by_rotation.is_disjoint(pending) {
+    if generation == 0
+        || generation == u64::MAX
+        || !promoted.is_disjoint(pending)
+        || !promoted.is_disjoint(deferred)
+        || !pending.is_disjoint(deferred)
+        || (sweep_cursor != 0 && sweep_cursor < builder.cursor)
+    {
         return Err(Error::CorruptTree);
     }
     let mut addresses = Vec::new();
     let runs = loop {
-        let ready: BTreeSet<u64> = builder
-            .reusable
-            .union(released_by_rotation)
-            .copied()
-            .collect();
+        let ready: BTreeSet<u64> = builder.reusable.union(promoted).copied().collect();
         if !ready.is_disjoint(pending)
             || ready
                 .iter()
