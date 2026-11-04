@@ -880,6 +880,26 @@ fn load_state<D: BlockDevice>(
     }))
 }
 
+/// Read-only F2 allocation scrub: all values are recomputed from the
+/// recoverable F0 roots and their pinned F2 snapshot trees, never from an
+/// untrusted serialized free list. Counts are *physical* 4 KiB blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocationReport {
+    pub generation: u64,
+    pub image_blocks: u64,
+    pub high_watermark: u64,
+    pub root_candidates: usize,
+    pub historical_roots: usize,
+    pub referenced_blocks: usize,
+    pub shared_blocks: usize,
+    pub reclaimable_blocks: usize,
+    pub fresh_blocks_for_next_commit: u64,
+    pub root_generations_remaining: u64,
+    /// A structurally valid F0 root failed F2/F4 graph verification.
+    /// Its unknown block ownership quarantines the entire reuse pool.
+    pub reuse_blocked: bool,
+}
+
 /// F2 image namespace with pinned historical roots and reachability-checked
 /// allocation reuse. Still a single-writer disposable test-image prototype.
 pub struct FileSystem<D: BlockDevice> {
@@ -1028,37 +1048,89 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// If even one checksummed candidate has damaged F1 metadata, fail
     /// *closed* for reclamation: use fresh blocks only on this commit.
-    fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
+    fn allocation_state(&mut self) -> Result<(AllocationReport, BTreeSet<u64>)> {
         let candidates = self.volume.candidate_roots()?;
-        let mut protected = BTreeSet::new();
+        let mut counts = BTreeMap::<u64, usize>::new();
+        let mut visited_roots = BTreeSet::new();
+        let mut suspect = false;
+        let mut historical = 0;
+        let total = self.volume.block_count();
+        let roots_examined = candidates.len();
+
         for (info, payload) in candidates {
             let Some(state) = self
                 .volume
                 .inspect(|device| load_state(device, info, payload.as_deref()))?
             else {
-                return Ok(BTreeSet::new());
+                suspect = true;
+                continue;
             };
             if info.generation == 0 {
                 continue;
             }
-            let root = SnapshotRoot {
+            let current = SnapshotRoot {
                 generation: info.generation,
                 cursor: state.cursor,
                 tree_root: state.tree_root,
                 next_inode: state.next_inode,
                 record_count: state.records.len() as u64,
             };
-            for held in std::iter::once(root).chain(state.snapshots.values().copied()) {
-                let Some((_, owned)) = self.volume.inspect(|device| load_tree(device, held))?
+            for (i, held) in std::iter::once(current)
+                .chain(state.snapshots.values().copied())
+                .enumerate()
+            {
+                if !visited_roots.insert((held.generation, held.tree_root)) {
+                    continue;
+                }
+                if i > 0 {
+                    historical += 1;
+                }
+                let Some((_, owned)) =
+                    self.volume.inspect(|device| load_tree(device, held))?
                 else {
-                    return Ok(BTreeSet::new());
+                    suspect = true;
+                    continue;
                 };
-                protected.extend(owned);
+                for block in owned {
+                    *counts.entry(block).or_default() += 1;
+                }
             }
         }
-        Ok((self.state.cursor..self.volume.block_count())
-            .filter(|n| !protected.contains(n))
-            .collect())
+
+        // Fail closed if ownership is unknown for *any* F0-checksummed
+        // root candidate. Even an unreferenced-looking block may be live.
+        let free = if suspect {
+            BTreeSet::new()
+        } else {
+            (self.state.cursor..total)
+                .filter(|n| !counts.contains_key(n))
+                .collect()
+        };
+        let next_root = self.generation().saturating_add(2);
+        let report = AllocationReport {
+            generation: self.generation(),
+            image_blocks: total,
+            high_watermark: self.state.cursor,
+            root_candidates: roots_examined,
+            historical_roots: historical,
+            referenced_blocks: counts.len(),
+            shared_blocks: counts.values().filter(|n| **n > 1).count(),
+            reclaimable_blocks: free.len(),
+            fresh_blocks_for_next_commit: self.state.cursor.saturating_sub(next_root + 1),
+            root_generations_remaining: self.state.cursor.saturating_sub(next_root),
+            reuse_blocked: suspect,
+        };
+        Ok((report, free))
+    }
+
+    /// Recompute reachability across *both* root slots and all pinned
+    /// snapshots, validating metadata and data checksums during the scan.
+    pub fn allocation_report(&mut self) -> Result<AllocationReport> {
+        self.allocation_state().map(|(report, _)| report)
+    }
+
+    fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
+        self.allocation_state().map(|(_, free)| free)
     }
 
     pub fn stat(&self, path: &str) -> Result<Stat> {
