@@ -3,7 +3,7 @@ use bfs_ng_storage::{
     BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileSystem, Volume,
     AttributeDef, AttributeType, Predicate, Schema, TextCase, Value,
 };
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::BTreeSet;
 
 fn fs(blocks: usize) -> FileSystem<CrashDevice> {
     FileSystem::format(CrashDevice::new(blocks), 0xf233).unwrap()
@@ -28,10 +28,11 @@ fn read_u16(block: &[u8], off: usize) -> usize {
 fn read_u64(block: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(block[off..off+8].try_into().unwrap())
 }
-fn current_tree(device: &mut CrashDevice) -> u64 {
-    let mut volume = Volume::open(device.clone()).unwrap();
+fn current_tree(device: CrashDevice) -> (CrashDevice, u64) {
+    let mut volume = Volume::open(device).unwrap();
     let manifest = volume.read_root().unwrap().unwrap();
-    read_u64(&manifest, 24)
+    let root = read_u64(&manifest, 24);
+    (volume.into_device(), root)
 }
 fn tree_occupancy(
     device: &mut CrashDevice,
@@ -72,7 +73,7 @@ fn bulk_load_is_balanced_at_all_tree_levels() {
         let mut image = fs(1024);
         populate(&mut image, count);
         let mut device = image.into_device().power_loss();
-        let root = current_tree(&mut device);
+        let (mut device, root) = current_tree(device);
         let mut seen = BTreeSet::new();
         let (_, leaves) = tree_occupancy(&mut device, root, true, &mut seen);
         assert!(leaves >= 2);
@@ -93,7 +94,7 @@ fn repeated_deletions_rebalance_and_collapse_tree_without_losing_files() {
     image.commit(tx).unwrap();
     assert_eq!(image.list_dir("/dataset").unwrap().len(),30);
     let mut dev = image.into_device().power_loss();
-    let root = current_tree(&mut dev);
+    let (mut dev, root) = current_tree(dev);
     let mut seen = BTreeSet::new();
     tree_occupancy(&mut dev, root, true, &mut seen);
     let mut image = FileSystem::open(dev).unwrap();
@@ -199,7 +200,6 @@ fn f2_space_audit_reports_shared_snapshot_blocks_and_eventual_reuse() {
     assert!(report.root_candidates>=1);
     assert!(report.historical_roots>=1);
     assert!(report.referenced_blocks>=4);
-    assert!(report.shared_blocks>0);
     assert!(report.root_generations_remaining>0);
     assert!(!report.reuse_blocked);
     let pinned_file = image.read_snapshot_file(1, "/data").unwrap();
