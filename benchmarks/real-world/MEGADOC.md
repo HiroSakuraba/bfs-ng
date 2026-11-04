@@ -81,3 +81,18 @@ The benchmark suite is separated from \`main\` until the parent AxiomZig/DVE rea
 ## Initial end-to-end corpus composition
 
 With the optional lane verification enabled, the pinned test regenerates **20 verified megadocs** (17 paper-aligned latent-diagnostic views plus 3 executed and output-checked runtime_trace views), **260 broader benchmark-only provenance views**, and **520 source-record JSON objects**. It does not synthesize additional training examples or claim the scaling/evaluation results from the megadocs research paper.
+
+## Pinned-source results (GitHub Actions, November 4, 2026)
+
+The workflow regenerated data from pinned AxiomMegaDoc source commit `f64ab90f6f1acda227ee839318aeb81e41aa73ae`, ran Guile 3.0.9, MLton 20210117, and SWI-Prolog 9.0.4, then replayed the deterministic modeled access patterns through BFS-NG cache-lab.
+
+| Workload | Included split | Events | LRU hits at 1 MiB | S3-FIFO hits | W-TinyLFU hits |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Assembly / file reads | all | 573 | 439 (76.61%) | 439 (76.61%) | 439 (76.61%) |
+| Training-style sequential | train only | 177 | 129 (72.88%) | 129 (72.88%) | 129 (72.88%) |
+| Provenance lookups | all | 4,320 | 1,623 (37.57%) | 1,698 (39.31%) | 2,034 (47.08%) |
+| Mixed assembly/query/training | train only | 4,980 | 1,985 (39.86%) | 2,231 (44.80%) | 2,404 (48.27%) |
+
+The assembly workload performed **171 real benchmark-harness file-read calls totaling 289,041 bytes**. This is an application-level read count, not a measure of physical bytes fetched from storage. All other workload classes and simulator cache hits are modeled. The workloads are too small and synthetic in scheduling to imply any production performance advantage. Cache results depend on the fixed implementation variants and cannot validate policy equivalence to published reference implementations.
+
+[Successful source-to-cache CI run and saved comparison artifact](https://github.com/HiroSakuraba/bfs-ng/actions/runs/41779373133).
