@@ -86,8 +86,7 @@ fn append_only_old_blocks_become_reusable_only_after_fallback_retirement() {
     assert!(g3.journal_ready_blocks > 0);
     write(&mut fs, b"gen4");
     assert!(
-        fs.free_cursor() <= cursor3
-            && fs.free_cursor() > cursor3.saturating_sub(4),
+        fs.free_cursor() <= cursor3 && fs.free_cursor() > cursor3.saturating_sub(4),
         "at least one g4 page should reuse a previously certified block"
     );
     let mut fs = reopened(fs);
@@ -279,5 +278,8 @@ fn recoverability_of_current_and_old_roots_remains_after_repeated_reuse() {
         assert!(!fs2.allocation_report().unwrap().reuse_blocked);
         fs = fs2;
     }
-    assert!(saw_reuse, "allocator must eventually reuse certified free blocks");
+    assert!(
+        saw_reuse,
+        "allocator must eventually reuse certified free blocks"
+    );
 }
