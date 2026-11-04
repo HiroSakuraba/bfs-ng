@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
-mod reference_index;
 mod reclaim_ledger;
+mod reference_index;
 mod tree_cow;
 use reclaim_ledger::JournalHeader;
 use reference_index::{RefHeader, count_roots};
@@ -901,8 +901,7 @@ fn load_state<D: BlockDevice>(
     else {
         return Ok(None);
     };
-    let Ok(checkpoint) = reclaim_ledger::read(device, journal, root.generation, root.cursor)
-    else {
+    let Ok(checkpoint) = reclaim_ledger::read(device, journal, root.generation, root.cursor) else {
         return Ok(None);
     };
     if !checkpoint.pages.is_disjoint(&index_pages)
@@ -1276,21 +1275,18 @@ impl<D: BlockDevice> FileSystem<D> {
         let journal_cursor = self.state.cursor;
         let checkpoint = if journal_header.first != 0 {
             Some(self.volume.inspect(|device| {
-                reclaim_ledger::read(
-                    device,
-                    journal_header,
-                    journal_generation,
-                    journal_cursor,
-                )
+                reclaim_ledger::read(device, journal_header, journal_generation, journal_cursor)
             })?)
         } else {
             None
         };
         // Fail-closed witness check. A checksum-valid forged free run is not
         // a proof that any of its addresses are free in both F0 candidates.
-        if !suspect && checkpoint.as_ref().is_some_and(|journal| {
-            !journal.ready.is_subset(&free)
-        }) {
+        if !suspect
+            && checkpoint
+                .as_ref()
+                .is_some_and(|journal| !journal.ready.is_subset(&free))
+        {
             suspect = true;
             free.clear();
             rotated_out.clear();
@@ -1331,9 +1327,7 @@ impl<D: BlockDevice> FileSystem<D> {
         self.allocation_state().map(|scrub| scrub.report)
     }
 
-    fn reusable_blocks(
-        &mut self,
-    ) -> Result<(BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
+    fn reusable_blocks(&mut self) -> Result<(BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
         self.allocation_state()
             .map(|scrub| (scrub.free, scrub.rotated_out, scrub.current_owned))
     }
@@ -1678,29 +1672,11 @@ impl<D: BlockDevice> FileSystem<D> {
                 volume: &mut self.volume,
                 staged: &builder.staged,
             };
-            reference_index::read(
-                &mut overlay,
-                state.reference,
-                generation,
-                builder.cursor,
-            )?
-            .1
+            reference_index::read(&mut overlay, state.reference, generation, builder.cursor)?.1
         };
-        let new_owned: BTreeSet<u64> = counts
-            .keys()
-            .copied()
-            .chain(new_ref_pages)
-            .collect();
-        let pending: BTreeSet<u64> = current_owned
-            .difference(&new_owned)
-            .copied()
-            .collect();
-        state.journal = reclaim_ledger::persist(
-            &mut builder,
-            generation,
-            &rotated_out,
-            &pending,
-        )?;
+        let new_owned: BTreeSet<u64> = counts.keys().copied().chain(new_ref_pages).collect();
+        let pending: BTreeSet<u64> = current_owned.difference(&new_owned).copied().collect();
+        state.journal = reclaim_ledger::persist(&mut builder, generation, &rotated_out, &pending)?;
         // Independently verify the complete staged journal before F0
         // publication. Its pages must not alias the namespace/ref index.
         {
@@ -1708,12 +1684,8 @@ impl<D: BlockDevice> FileSystem<D> {
                 volume: &mut self.volume,
                 staged: &builder.staged,
             };
-            let checkpoint = reclaim_ledger::read(
-                &mut overlay,
-                state.journal,
-                generation,
-                builder.cursor,
-            )?;
+            let checkpoint =
+                reclaim_ledger::read(&mut overlay, state.journal, generation, builder.cursor)?;
             if !checkpoint.pages.is_disjoint(&new_owned)
                 || checkpoint
                     .ready
