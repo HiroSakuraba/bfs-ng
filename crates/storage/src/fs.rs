@@ -333,7 +333,8 @@ fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     b[catalog_end + 16..catalog_end + 24].copy_from_slice(&state.journal.first.to_le_bytes());
     b[catalog_end + 24..catalog_end + 28].copy_from_slice(&state.journal.pages.to_le_bytes());
     b[catalog_end + 28..catalog_end + 32].copy_from_slice(&state.journal.runs.to_le_bytes());
-    b[catalog_end + 32..catalog_end + 40].copy_from_slice(&state.journal.sweep_cursor.to_le_bytes());
+    b[catalog_end + 32..catalog_end + 40]
+        .copy_from_slice(&state.journal.sweep_cursor.to_le_bytes());
     b
 }
 
@@ -1347,9 +1348,15 @@ impl<D: BlockDevice> FileSystem<D> {
             report,
             current_owned,
             fallback_owned,
-            ready: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.ready.clone()),
-            pending: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.pending.clone()),
-            deferred: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.deferred.clone()),
+            ready: checkpoint
+                .as_ref()
+                .map_or_else(BTreeSet::new, |j| j.ready.clone()),
+            pending: checkpoint
+                .as_ref()
+                .map_or_else(BTreeSet::new, |j| j.pending.clone()),
+            deferred: checkpoint
+                .as_ref()
+                .map_or_else(BTreeSet::new, |j| j.deferred.clone()),
         })
     }
 
@@ -1383,9 +1390,21 @@ impl<D: BlockDevice> FileSystem<D> {
                 scrub.current_owned
             },
             ready: if valid { scrub.ready } else { BTreeSet::new() },
-            pending: if valid { scrub.pending } else { BTreeSet::new() },
-            deferred: if valid { scrub.deferred } else { BTreeSet::new() },
-            sweep_cursor: if valid { self.state.journal.sweep_cursor } else { 0 },
+            pending: if valid {
+                scrub.pending
+            } else {
+                BTreeSet::new()
+            },
+            deferred: if valid {
+                scrub.deferred
+            } else {
+                BTreeSet::new()
+            },
+            sweep_cursor: if valid {
+                self.state.journal.sweep_cursor
+            } else {
+                0
+            },
         };
         Ok((cache, false))
     }
