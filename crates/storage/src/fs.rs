@@ -775,8 +775,8 @@ fn load_state<D: BlockDevice>(
     }))
 }
 
-/// F1 namespace backed by a checksummed, append-only immutable block tree.
-/// One writer per image; no production mount, snapshots or reclamation.
+/// F2 image namespace with pinned historical roots and reachability-checked
+/// allocation reuse. Still a single-writer disposable test-image prototype.
 pub struct FileSystem<D: BlockDevice> {
     volume: Volume<D>,
     state: State,
@@ -804,6 +804,63 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn file_count(&self) -> usize {
         self.state.records.len()
+    }
+
+    /// Persistent, read-only snapshot generation IDs.
+    pub fn snapshots(&self) -> Vec<u64> {
+        self.state.snapshots.keys().copied().collect()
+    }
+
+    /// Read a pinned historical file and recheck its recorded content checksum.
+    pub fn read_snapshot_file(&mut self, generation: u64, path: &str) -> Result<Vec<u8>> {
+        validate_path(path)?;
+        let snap = *self.state.snapshots.get(&generation).ok_or(Error::InvalidSnapshot)?;
+        self.volume.inspect(|device| {
+            let (records, _) = load_tree(device, snap)?.ok_or(Error::CorruptTree)?;
+            let record = records.get(path).ok_or(Error::NotFound)?;
+            if record.directory {
+                return Err(Error::IsDirectory);
+            }
+            data_read(device, record, snap.cursor, snap.generation)?.ok_or(Error::CorruptTree)
+        })
+    }
+
+    /// Reconstruct the free set from independently validated F0 root slots
+    /// and every retained snapshot in each root's catalog.
+    ///
+    /// If even one checksummed candidate has damaged F1 metadata, fail
+    /// *closed* for reclamation: use fresh blocks only on this commit.
+    fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
+        let candidates = self.volume.candidate_roots()?;
+        let mut protected = BTreeSet::new();
+        for (info, payload) in candidates {
+            let Some(state) = self.volume.inspect(|device| {
+                load_state(device, info, payload.as_deref())
+            })? else {
+                return Ok(BTreeSet::new());
+            };
+            if info.generation == 0 {
+                continue;
+            }
+            let root = SnapshotRoot {
+                generation: info.generation,
+                cursor: state.cursor,
+                tree_root: state.tree_root,
+                next_inode: state.next_inode,
+                record_count: state.records.len() as u64,
+            };
+            for held in std::iter::once(root).chain(state.snapshots.values().copied()) {
+                let Some((_, owned)) = self.volume.inspect(|device| {
+                    load_tree(device, held)
+                })? else {
+                    return Ok(BTreeSet::new());
+                };
+                protected.extend(owned);
+            }
+        }
+        Ok((self.state.cursor..self.volume.block_count())
+            .filter(|n| !protected.contains(n))
+            .collect())
     }
 
     pub fn stat(&self, path: &str) -> Result<Stat> {
@@ -869,6 +926,14 @@ impl<D: BlockDevice> FileSystem<D> {
             next_inode: self.state.next_inode,
             records: self.state.records.clone(),
             new_data: BTreeMap::new(),
+            snapshots: self.state.snapshots.clone(),
+            current_root: SnapshotRoot {
+                generation: self.generation(),
+                tree_root: self.state.tree_root,
+                cursor: self.state.cursor,
+                next_inode: self.state.next_inode,
+                record_count: self.state.records.len() as u64,
+            },
             dirty: false,
         }
     }
@@ -888,10 +953,16 @@ impl<D: BlockDevice> FileSystem<D> {
             .checked_add(1)
             .ok_or(Error::GenerationOverflow)?;
         let root_block = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
-        let mut builder = Builder::new(self.state.cursor, root_block);
+        if generation > u32::MAX as u64 {
+            return Err(Error::GenerationOverflow);
+        }
+        let reusable = self.reusable_blocks()?;
+        let mut builder = Builder::new(self.state.cursor, root_block, reusable);
         let mut state = State {
             cursor: self.state.cursor,
             next_inode: tx.next_inode,
+            tree_root: 0,
+            snapshots: tx.snapshots,
             records: tx.records,
         };
         for (path, bytes) in tx.new_data {
@@ -907,17 +978,19 @@ impl<D: BlockDevice> FileSystem<D> {
                 let to = usize::min(from + CHUNK, bytes.len());
                 builder.staged.push((
                     start + i as u64,
-                    encode_data(entry.inode, i as u32, &bytes[from..to]),
+                    encode_data(entry.inode, i as u32, &bytes[from..to], generation as u32),
                 ));
             }
             entry.start = start;
             entry.count = chunks as u32;
             entry.length = bytes.len() as u64;
             entry.checksum = crc32c(&bytes);
+            entry.birth_generation = generation;
         }
         let root_node = build_nodes(&mut builder, &state.records, generation)?;
         state.cursor = builder.cursor;
-        let manifest = root_manifest(&state, root_node, generation);
+        state.tree_root = root_node;
+        let manifest = root_manifest(&state, generation);
         self.volume
             .commit_root_with_blocks(&builder.staged, &manifest)?;
         self.state = state;
