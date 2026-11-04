@@ -1,6 +1,6 @@
 //! F3: incremental CoW B+tree-style namespace on an F2 safe allocator.
 //! New generations copy modified leaves and ancestors, sharing untouched nodes.
-use crate::volume::{RootInfo, crc32c};
+use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,10 +17,10 @@ use reclaim_ledger::JournalHeader;
 use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM8\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM9\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 8;
+const FORMAT: u32 = 9;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -348,10 +348,10 @@ struct Builder {
 }
 
 impl Builder {
-    fn new(cursor: u64, next_root: u64, reusable: BTreeSet<u64>) -> Self {
+    fn new(cursor: u64, reusable: BTreeSet<u64>) -> Self {
         Self {
             cursor,
-            root_limit: next_root,
+            root_limit: ROOT_PAYLOAD_LAST,
             reusable,
             staged: Vec::new(),
         }
@@ -456,7 +456,7 @@ fn data_read<D: BlockDevice>(
     }
     let end = record.start.checked_add(record.count as u64);
     if record.start < cursor
-        || record.start <= generation + 1
+        || record.start <= ROOT_PAYLOAD_LAST
         || end.is_none_or(|n| n > device.block_count())
     {
         return Ok(None);
@@ -632,7 +632,7 @@ fn read_nodes<D: BlockDevice>(
     out: &mut BTreeMap<String, Record>,
 ) -> Result<Option<(String, u8)>> {
     if address < cursor
-        || address <= generation + 1
+        || address <= ROOT_PAYLOAD_LAST
         || address >= device.block_count()
         || !visited.insert(address)
         || visited.len() > 2048
@@ -789,7 +789,7 @@ fn load_tree<D: BlockDevice>(device: &mut D, root: SnapshotRoot) -> Result<Optio
                     return Ok(None);
                 };
                 if record.start < root.cursor
-                    || record.start <= root.generation + 1
+                    || record.start <= ROOT_PAYLOAD_LAST
                     || end > device.block_count()
                 {
                     return Ok(None);
@@ -1321,7 +1321,7 @@ impl<D: BlockDevice> FileSystem<D> {
             free.clear();
             rotated_out.clear();
         }
-        let next_root = self.generation().saturating_add(2);
+        // F0's three root payload blocks no longer advance with generation.
         let report = AllocationReport {
             generation: self.generation(),
             image_blocks: total,
@@ -1331,8 +1331,8 @@ impl<D: BlockDevice> FileSystem<D> {
             referenced_blocks: counts.len(),
             shared_blocks: counts.values().filter(|n| **n > 1).count(),
             reclaimable_blocks: free.len(),
-            fresh_blocks_for_next_commit: self.state.cursor.saturating_sub(next_root + 1),
-            root_generations_remaining: self.state.cursor.saturating_sub(next_root),
+            fresh_blocks_for_next_commit: self.state.cursor.saturating_sub(ROOT_PAYLOAD_LAST + 1),
+            root_generations_remaining: u64::from(u32::MAX).saturating_sub(self.generation()),
             reuse_blocked: suspect,
             reference_index_pages: self.state.reference.pages as usize,
             reference_index_entries: self.state.reference.entries as usize,
@@ -1622,17 +1622,15 @@ impl<D: BlockDevice> FileSystem<D> {
             .generation()
             .checked_add(1)
             .ok_or(Error::GenerationOverflow)?;
-        let root_block = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
         if generation > u32::MAX as u64 {
             return Err(Error::GenerationOverflow);
         }
-        // Even when the reusable pool is nonempty, advancing F0's low-end
-        // payload address must never enter the high-watermark F1 region.
-        if root_block >= self.state.cursor {
+        // F0 reserves [2, 4] for rotating payloads; this boundary is fixed.
+        if self.state.cursor <= ROOT_PAYLOAD_LAST + 1 {
             return Err(Error::NoSpace);
         }
         let (certificate, from_cache) = self.certified_for_commit()?;
-        let mut builder = Builder::new(self.state.cursor, root_block, certificate.ready.clone());
+        let mut builder = Builder::new(self.state.cursor, certificate.ready.clone());
         let mut state = State {
             cursor: self.state.cursor,
             next_inode: tx.next_inode,
