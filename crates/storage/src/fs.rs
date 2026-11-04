@@ -9,7 +9,7 @@ mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
 mod tree_cow;
-use tree_cow::{discard_superseded_nodes, patch_tree};
+use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
 const META_MAGIC: &[u8; 8] = b"BFSNGM4\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
@@ -522,6 +522,25 @@ fn encode_branch(
     Ok(seal(b))
 }
 
+/// Distribute bulk-load pages evenly so a final short chunk cannot
+/// strand an underfilled non-root leaf or branch (12-way fanout, min 6).
+fn balanced_chunks<T>(items: &[T]) -> Vec<&[T]> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let groups = items.len().div_ceil(FANOUT);
+    let base = items.len() / groups;
+    let extras = items.len() % groups;
+    let mut output = Vec::with_capacity(groups);
+    let mut start = 0;
+    for i in 0..groups {
+        let end = start + base + usize::from(i < extras);
+        output.push(&items[start..end]);
+        start = end;
+    }
+    output
+}
+
 fn build_nodes(
     builder: &mut Builder,
     records: &BTreeMap<String, Record>,
@@ -532,7 +551,7 @@ fn build_nodes(
     }
     let items: Vec<_> = records.iter().collect();
     let mut children: Vec<(String, u64)> = Vec::new();
-    for part in items.chunks(FANOUT) {
+    for part in balanced_chunks(&items) {
         let node = encode_leaf(part, generation)?;
         let addr = builder.push(node)?;
         children.push((part.last().expect("nonempty group").0.clone(), addr));
@@ -540,7 +559,7 @@ fn build_nodes(
     let mut level = 1u8;
     while children.len() > 1 {
         let mut upper = Vec::new();
-        for part in children.chunks(FANOUT) {
+        for part in balanced_chunks(&children) {
             let node = encode_branch(part, level, generation)?;
             let addr = builder.push(node)?;
             upper.push((part.last().expect("nonempty group").0.clone(), addr));
@@ -861,6 +880,36 @@ fn load_state<D: BlockDevice>(
     }))
 }
 
+/// Read-only F2 allocation scrub: all values are recomputed from the
+/// recoverable F0 roots and their pinned F2 snapshot trees, never from an
+/// untrusted serialized free list. Counts are *physical* 4 KiB blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocationReport {
+    pub generation: u64,
+    pub image_blocks: u64,
+    pub high_watermark: u64,
+    pub root_candidates: usize,
+    pub historical_roots: usize,
+    pub referenced_blocks: usize,
+    pub shared_blocks: usize,
+    pub reclaimable_blocks: usize,
+    pub fresh_blocks_for_next_commit: u64,
+    pub root_generations_remaining: u64,
+    /// A structurally valid F0 root failed F2/F4 graph verification.
+    /// Its unknown block ownership quarantines the entire reuse pool.
+    pub reuse_blocked: bool,
+}
+
+/// Page of checksummed on-disk F3 namespace entries. `next_after` is only
+/// valid for the same prefix and generation; stale live cursors are rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespacePage {
+    pub generation: u64,
+    pub entries: Vec<(String, Stat)>,
+    pub next_after: Option<String>,
+    pub metadata_pages_read: usize,
+}
+
 /// F2 image namespace with pinned historical roots and reachability-checked
 /// allocation reuse. Still a single-writer disposable test-image prototype.
 pub struct FileSystem<D: BlockDevice> {
@@ -1009,37 +1058,192 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// If even one checksummed candidate has damaged F1 metadata, fail
     /// *closed* for reclamation: use fresh blocks only on this commit.
-    fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
+    fn allocation_state(&mut self) -> Result<(AllocationReport, BTreeSet<u64>)> {
         let candidates = self.volume.candidate_roots()?;
-        let mut protected = BTreeSet::new();
+        let mut counts = BTreeMap::<u64, usize>::new();
+        let mut visited_roots = BTreeSet::new();
+        let mut historical_seen = BTreeSet::new();
+        let mut suspect = false;
+        let total = self.volume.block_count();
+        let roots_examined = candidates.len();
+
         for (info, payload) in candidates {
             let Some(state) = self
                 .volume
                 .inspect(|device| load_state(device, info, payload.as_deref()))?
             else {
-                return Ok(BTreeSet::new());
+                suspect = true;
+                continue;
             };
             if info.generation == 0 {
                 continue;
             }
-            let root = SnapshotRoot {
+            let current = SnapshotRoot {
                 generation: info.generation,
                 cursor: state.cursor,
                 tree_root: state.tree_root,
                 next_inode: state.next_inode,
                 record_count: state.records.len() as u64,
             };
-            for held in std::iter::once(root).chain(state.snapshots.values().copied()) {
+            for (i, held) in std::iter::once(current)
+                .chain(state.snapshots.values().copied())
+                .enumerate()
+            {
+                if i > 0 {
+                    // A root retained in any candidate's snapshot catalog
+                    // is historical, even when the same root is also an
+                    // older candidate's current root and traversal reaches
+                    // it there first. Count distinct pinned roots here,
+                    // independently of the traversal deduplication below.
+                    historical_seen.insert((held.generation, held.tree_root));
+                }
+                if !visited_roots.insert((held.generation, held.tree_root)) {
+                    continue;
+                }
                 let Some((_, owned)) = self.volume.inspect(|device| load_tree(device, held))?
                 else {
-                    return Ok(BTreeSet::new());
+                    suspect = true;
+                    continue;
                 };
-                protected.extend(owned);
+                for block in owned {
+                    *counts.entry(block).or_default() += 1;
+                }
             }
         }
-        Ok((self.state.cursor..self.volume.block_count())
-            .filter(|n| !protected.contains(n))
-            .collect())
+
+        // Fail closed if ownership is unknown for *any* F0-checksummed
+        // root candidate. Even an unreferenced-looking block may be live.
+        let free = if suspect {
+            BTreeSet::new()
+        } else {
+            (self.state.cursor..total)
+                .filter(|n| !counts.contains_key(n))
+                .collect()
+        };
+        let next_root = self.generation().saturating_add(2);
+        let report = AllocationReport {
+            generation: self.generation(),
+            image_blocks: total,
+            high_watermark: self.state.cursor,
+            root_candidates: roots_examined,
+            historical_roots: historical_seen.len(),
+            referenced_blocks: counts.len(),
+            shared_blocks: counts.values().filter(|n| **n > 1).count(),
+            reclaimable_blocks: free.len(),
+            fresh_blocks_for_next_commit: self.state.cursor.saturating_sub(next_root + 1),
+            root_generations_remaining: self.state.cursor.saturating_sub(next_root),
+            reuse_blocked: suspect,
+        };
+        Ok((report, free))
+    }
+
+    /// Recompute reachability across *both* root slots and all pinned
+    /// snapshots, validating metadata and data checksums during the scan.
+    pub fn allocation_report(&mut self) -> Result<AllocationReport> {
+        self.allocation_state().map(|(report, _)| report)
+    }
+
+    fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
+        self.allocation_state().map(|(_, free)| free)
+    }
+
+    fn range_page(
+        &mut self,
+        root: SnapshotRoot,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<NamespacePage> {
+        if prefix != "/" {
+            // Range prefixes may end in '/' for direct-child scans, unlike
+            // complete file paths used by normal namespace operations.
+            let stem = prefix.strip_suffix('/').unwrap_or(prefix);
+            validate_user_path(stem)?;
+        }
+        if let Some(previous) = after {
+            validate_user_path(previous)?;
+            if !previous.starts_with(prefix) {
+                return Err(Error::InvalidPath);
+            }
+        }
+        if limit == 0 || limit > 512 {
+            return Err(Error::TooLarge);
+        }
+        let (mut rows, metadata_pages_read) = scan_pages(
+            &mut self.volume,
+            root.tree_root,
+            root.generation,
+            root.cursor,
+            prefix,
+            after,
+            limit,
+        )?;
+        let more = rows.len() > limit;
+        if more {
+            rows.truncate(limit);
+        }
+        let next_after = if more {
+            rows.last().map(|(key, _)| key.clone())
+        } else {
+            None
+        };
+        let entries = rows
+            .into_iter()
+            .map(|(path, record)| {
+                let stat = Stat {
+                    inode: record.inode,
+                    directory: record.directory,
+                    bytes: record.length,
+                    generation: root.generation,
+                };
+                (path, stat)
+            })
+            .collect();
+        Ok(NamespacePage {
+            generation: root.generation,
+            entries,
+            next_after,
+            metadata_pages_read,
+        })
+    }
+
+    /// Direct on-disk, checksummed lexicographic namespace traversal.
+    /// Unlike list_dir, this does not consult the materialized file map.
+    /// The caller must present the expected root generation at every page.
+    pub fn scan_files_disk(
+        &mut self,
+        expected_generation: u64,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<NamespacePage> {
+        if expected_generation != self.generation() {
+            return Err(Error::StaleTransaction);
+        }
+        let root = SnapshotRoot {
+            generation: self.generation(),
+            cursor: self.state.cursor,
+            tree_root: self.state.tree_root,
+            next_inode: self.state.next_inode,
+            record_count: self.state.records.len() as u64,
+        };
+        self.range_page(root, prefix, after, limit)
+    }
+
+    /// Same on-disk range traversal for a retained, immutable snapshot.
+    pub fn scan_snapshot_files_disk(
+        &mut self,
+        generation: u64,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<NamespacePage> {
+        let root = *self
+            .state
+            .snapshots
+            .get(&generation)
+            .ok_or(Error::InvalidSnapshot)?;
+        self.range_page(root, prefix, after, limit)
     }
 
     pub fn stat(&self, path: &str) -> Result<Stat> {
