@@ -449,9 +449,19 @@ fn discard_intermediate(builder: &mut Builder, root: u64) -> Result<()> {
             }
         }
     }
+    // Unreachable path-copy intermediates never reached a published root.
+    // Explicitly return their certified addresses to the free journal; F2's
+    // fast allocator cannot rediscover them on the next generation without
+    // an expensive independent full-graph scrub.
+    let abandoned: BTreeSet<u64> = staged
+        .keys()
+        .filter(|id| !visited.contains(id))
+        .copied()
+        .collect();
     builder.staged.retain(|(id, page)| {
         (&page[..8] != LEAF_MAGIC && &page[..8] != BRANCH_MAGIC) || visited.contains(id)
     });
+    builder.reusable.extend(abandoned);
     Ok(())
 }
 
