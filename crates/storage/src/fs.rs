@@ -983,6 +983,8 @@ pub struct AllocationReport {
     /// Blocks in the selected root's delayed-free journal, eligible only
     /// after the next successful F0 candidate rotation.
     pub journal_pending_blocks: usize,
+    /// Safe but not yet sweep-verified retirements in the durable queue.
+    pub journal_deferred_blocks: usize,
 }
 
 /// Internal result of the independent two-root ownership scrub.
@@ -991,6 +993,10 @@ struct Scrub {
     free: BTreeSet<u64>,
     rotated_out: BTreeSet<u64>,
     current_owned: BTreeSet<u64>,
+    fallback_owned: BTreeSet<u64>,
+    ready: BTreeSet<u64>,
+    pending: BTreeSet<u64>,
+    deferred: BTreeSet<u64>,
 }
 
 /// Page of checksummed on-disk F3 namespace entries. `next_after` is only
@@ -1010,6 +1016,11 @@ pub struct FileSystem<D: BlockDevice> {
     state: State,
     last_metadata_blocks_written: usize,
     last_reference_pages_written: usize,
+    /// Certificate is valid only for this exact in-handle F0 generation.
+    certified: Option<Certificate>,
+    /// Number of independent full two-F0-root scans needed by commit.
+    certification_scans: u64,
+    last_commit_used_certificate: bool,
 }
 
 impl<D: BlockDevice> FileSystem<D> {
@@ -1021,6 +1032,9 @@ impl<D: BlockDevice> FileSystem<D> {
             state,
             last_metadata_blocks_written: 0,
             last_reference_pages_written: 0,
+            certified: None,
+            certification_scans: 0,
+            last_commit_used_certificate: false,
         })
     }
 
@@ -1031,6 +1045,9 @@ impl<D: BlockDevice> FileSystem<D> {
             state,
             last_metadata_blocks_written: 0,
             last_reference_pages_written: 0,
+            certified: None,
+            certification_scans: 0,
+            last_commit_used_certificate: false,
         })
     }
 
