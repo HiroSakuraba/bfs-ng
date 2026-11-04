@@ -5,7 +5,8 @@
 //! counted in their own postings. Each CoW page has a birth generation and CRC.
 //! Allocation MUST still protect both F0 candidates and verify their F3 graph.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, StagedReader, Volume, seal, u16_at, u64_at,
+    BLOCK_SIZE, BlockDevice, Builder, Error, Result, ROOT_PAYLOAD_LAST, StagedReader, Volume, seal,
+    u16_at, u64_at,
     valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,8 +40,8 @@ enum Page {
     Branch { level: u8, children: Vec<Child> },
 }
 
-fn valid_address(address: u64, generation: u64, cursor: u64, total: u64) -> bool {
-    address > generation.saturating_add(1) && address >= cursor && address < total
+fn valid_address(address: u64, _generation: u64, cursor: u64, total: u64) -> bool {
+    address > ROOT_PAYLOAD_LAST && address >= cursor && address < total
 }
 
 /// Decode exactly one checked immutable page; child subtree integrity is
