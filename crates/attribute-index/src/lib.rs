@@ -7,9 +7,7 @@
 mod index;
 mod schema;
 
-pub use index::{
-    FileId, IndexStore, Predicate, QueryResult, Snapshot, Transaction,
-};
+pub use index::{FileId, IndexStore, Predicate, QueryResult, Snapshot, Transaction};
 pub use schema::{
-    AttributeDef, AttributeType, IndexError, Schema, TextCase, Value, SCHEMA_VERSION,
+    AttributeDef, AttributeType, IndexError, SCHEMA_VERSION, Schema, TextCase, Value,
 };

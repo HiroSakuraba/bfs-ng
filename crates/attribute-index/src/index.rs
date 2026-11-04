@@ -13,9 +13,18 @@ pub struct FileId {
 
 #[derive(Clone, Debug)]
 pub enum Predicate {
-    Equal { attribute: String, value: Value },
-    Contains { attribute: String, member: String },
-    Prefix { attribute: String, prefix: String },
+    Equal {
+        attribute: String,
+        value: Value,
+    },
+    Contains {
+        attribute: String,
+        member: String,
+    },
+    Prefix {
+        attribute: String,
+        prefix: String,
+    },
     /// Inclusive lower, exclusive upper. Supported for i64/u64/timestamps.
     Range {
         attribute: String,
@@ -261,9 +270,18 @@ pub struct QueryResult {
 
 #[derive(Clone, Debug)]
 enum Condition {
-    Equal { value: Value, key: Vec<u8> },
-    Contains { value: String, key: Vec<u8> },
-    Prefix { value: String, key_prefix: Vec<u8> },
+    Equal {
+        value: Value,
+        key: Vec<u8>,
+    },
+    Contains {
+        value: String,
+        key: Vec<u8>,
+    },
+    Prefix {
+        value: String,
+        key_prefix: Vec<u8>,
+    },
     Range {
         lower: Value,
         upper: Value,
@@ -363,9 +381,7 @@ impl Snapshot {
             Predicate::Range { lower, upper, .. } => {
                 if !matches!(
                     def.ty,
-                    AttributeType::Signed
-                        | AttributeType::Unsigned
-                        | AttributeType::TimestampNs
+                    AttributeType::Signed | AttributeType::Unsigned | AttributeType::TimestampNs
                 ) {
                     return Err(IndexError::InvalidPredicate(
                         "Range requires signed, unsigned or timestamp attribute".into(),
@@ -394,9 +410,11 @@ impl Snapshot {
         })
     }
 
-    fn validate_query(&self, predicates: &[Predicate], limit: usize)
-        -> Result<Vec<Prepared>, IndexError>
-    {
+    fn validate_query(
+        &self,
+        predicates: &[Predicate],
+        limit: usize,
+    ) -> Result<Vec<Prepared>, IndexError> {
         if limit == 0 || limit > MAX_QUERY_LIMIT {
             return Err(IndexError::InvalidLimit);
         }
@@ -430,12 +448,13 @@ impl Snapshot {
                 break;
             }
             let matches = match (&predicate.condition, kind) {
-                (Condition::Equal { key, .. }, 0)
-                | (Condition::Contains { key, .. }, 0) => posting.value.as_slice() == key.as_slice(),
-                (Condition::Prefix { key_prefix, .. }, 1) => {
-                    posting.value.starts_with(key_prefix)
+                (Condition::Equal { key, .. }, 0) | (Condition::Contains { key, .. }, 0) => {
+                    posting.value.as_slice() == key.as_slice()
                 }
-                (Condition::Range { upper_key, .. }, 2) => posting.value.as_slice() < upper_key.as_slice(),
+                (Condition::Prefix { key_prefix, .. }, 1) => posting.value.starts_with(key_prefix),
+                (Condition::Range { upper_key, .. }, 2) => {
+                    posting.value.as_slice() < upper_key.as_slice()
+                }
                 _ => unreachable!("prepared condition code"),
             };
             if !matches {

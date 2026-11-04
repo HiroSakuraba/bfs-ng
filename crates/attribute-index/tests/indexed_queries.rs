@@ -119,7 +119,10 @@ fn axiom_dve_and_megadoc_queries_match_independent_scan() {
         id(1),
         vec![
             ("asset.kind".into(), text("SHADER")),
-            ("asset.depends_on".into(), tags(&["texture:7", "shader:base"])),
+            (
+                "asset.depends_on".into(),
+                tags(&["texture:7", "shader:base"]),
+            ),
             ("fs.sequence".into(), Value::Unsigned(12)),
             ("asset.updated_ns".into(), Value::TimestampNs(-3)),
             ("source.sha256".into(), Value::Hash256([7; 32])),
@@ -161,15 +164,15 @@ fn axiom_dve_and_megadoc_queries_match_independent_scan() {
     let s = store.snapshot().unwrap();
     assert_eq!(s.file_count(), 4);
     let cases = vec![
-        (vec![Predicate::eq("asset.kind", text("shader"))], vec![id(1)]),
+        (
+            vec![Predicate::eq("asset.kind", text("shader"))],
+            vec![id(1)],
+        ),
         (
             vec![Predicate::contains("asset.depends_on", "texture:7")],
             vec![id(1)],
         ),
-        (
-            vec![Predicate::prefix("asset.kind", "SH")],
-            vec![id(1)],
-        ),
+        (vec![Predicate::prefix("asset.kind", "SH")], vec![id(1)]),
         (
             vec![Predicate::range(
                 "corpus.score",
@@ -391,11 +394,7 @@ fn schema_and_query_errors_are_bounded() {
         vec![Predicate::eq("asset.depends_on", tags(&["a"]))],
         vec![Predicate::contains("asset.kind", "shader")],
         vec![Predicate::prefix("asset.kind", "")],
-        vec![Predicate::range(
-            "asset.kind",
-            text("a"),
-            text("z"),
-        )],
+        vec![Predicate::range("asset.kind", text("a"), text("z"))],
         vec![Predicate::range(
             "fs.sequence",
             Value::Unsigned(9),
@@ -431,7 +430,10 @@ fn casefold_canonicalization_deduplicates_multivalues() {
     }])
     .unwrap();
     let store = IndexStore::new(9, schema).unwrap();
-    let file = FileId { volume: 9, inode: 12 };
+    let file = FileId {
+        volume: 9,
+        inode: 12,
+    };
     let mut tx = store.begin().unwrap();
     tx.upsert(
         file,
@@ -497,9 +499,18 @@ fn seeded_randomized_index_vs_scan_differential() {
                     ("asset.kind".into(), text(cat)),
                     ("asset.depends_on".into(), tags(&[tag])),
                     ("corpus.validation".into(), text(status)),
-                    ("corpus.score".into(), Value::Signed((step as i64 % 31) - 15)),
-                    ("megadoc.split".into(), text(if step % 5 == 0 { "test" } else { "train" })),
-                    ("asset.updated_ns".into(), Value::TimestampNs(step as i64 - 200)),
+                    (
+                        "corpus.score".into(),
+                        Value::Signed((step as i64 % 31) - 15),
+                    ),
+                    (
+                        "megadoc.split".into(),
+                        text(if step % 5 == 0 { "test" } else { "train" }),
+                    ),
+                    (
+                        "asset.updated_ns".into(),
+                        Value::TimestampNs(step as i64 - 200),
+                    ),
                     ("fs.sequence".into(), Value::Unsigned(step as u64)),
                     ("fs.active".into(), Value::Bool(step % 2 == 0)),
                 ],
@@ -510,11 +521,7 @@ fn seeded_randomized_index_vs_scan_differential() {
         if step % 9 == 0 {
             let snap = store.snapshot().unwrap();
             assert!(snap.index_is_consistent(), "step {step}");
-            compare(
-                &snap,
-                &[Predicate::eq("asset.kind", text("shader"))],
-                10000,
-            );
+            compare(&snap, &[Predicate::eq("asset.kind", text("shader"))], 10000);
             compare(
                 &snap,
                 &[
@@ -541,16 +548,8 @@ fn seeded_randomized_index_vs_scan_differential() {
                 )],
                 10000,
             );
-            compare(
-                &snap,
-                &[Predicate::prefix("asset.kind", "ma")],
-                10000,
-            );
-            compare(
-                &snap,
-                &[Predicate::eq("fs.active", Value::Bool(true))],
-                7,
-            );
+            compare(&snap, &[Predicate::prefix("asset.kind", "ma")], 10000);
+            compare(&snap, &[Predicate::eq("fs.active", Value::Bool(true))], 7);
         }
     }
 }

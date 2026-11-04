@@ -37,7 +37,10 @@ impl fmt::Display for IndexError {
             Self::WrongVolume => write!(f, "file ID belongs to another volume"),
             Self::InvalidLimit => write!(f, "query limit must be 1..=10000"),
             Self::Conflict { expected, actual } => {
-                write!(f, "stale transaction: expected generation {expected}, got {actual}")
+                write!(
+                    f,
+                    "stale transaction: expected generation {expected}, got {actual}"
+                )
             }
             Self::GenerationOverflow => write!(f, "generation counter overflow"),
             Self::LockPoisoned => write!(f, "metadata index lock poisoned"),
@@ -60,7 +63,10 @@ pub enum AttributeType {
     Signed,
     Unsigned,
     TimestampNs,
-    Text { case: TextCase, max_bytes: usize },
+    Text {
+        case: TextCase,
+        max_bytes: usize,
+    },
     Hash256,
     TextSet {
         case: TextCase,
@@ -114,7 +120,8 @@ impl Schema {
                 | AttributeType::TextSet { max_bytes, .. } => {
                     if *max_bytes == 0 || *max_bytes > 1024 {
                         return Err(IndexError::InvalidSchema(format!(
-                            "text length must be 1..=1024 for {}", def.name
+                            "text length must be 1..=1024 for {}",
+                            def.name
                         )));
                     }
                 }
@@ -162,15 +169,17 @@ fn valid_name(name: &str) -> bool {
         && name.len() <= 128
         && name.split('.').all(|part| {
             !part.is_empty()
-                && part.bytes().all(|b| {
-                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
-                })
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
         })
 }
 
 fn normalize_text(value: &str, case: TextCase, max_bytes: usize) -> Result<String, IndexError> {
     if value.len() > max_bytes || value.contains('\0') {
-        return Err(IndexError::InvalidValue("text length or embedded NUL".into()));
+        return Err(IndexError::InvalidValue(
+            "text length or embedded NUL".into(),
+        ));
     }
     match case {
         TextCase::ExactUtf8 => Ok(value.into()),
@@ -188,9 +197,7 @@ impl AttributeDef {
             (AttributeType::Bool, Value::Bool(v)) => Ok(Value::Bool(v)),
             (AttributeType::Signed, Value::Signed(v)) => Ok(Value::Signed(v)),
             (AttributeType::Unsigned, Value::Unsigned(v)) => Ok(Value::Unsigned(v)),
-            (AttributeType::TimestampNs, Value::TimestampNs(v)) => {
-                Ok(Value::TimestampNs(v))
-            }
+            (AttributeType::TimestampNs, Value::TimestampNs(v)) => Ok(Value::TimestampNs(v)),
             (AttributeType::Hash256, Value::Hash256(v)) => Ok(Value::Hash256(v)),
             (AttributeType::Text { case, max_bytes }, Value::Text(v)) => {
                 Ok(Value::Text(normalize_text(&v, *case, *max_bytes)?))
@@ -205,7 +212,8 @@ impl AttributeDef {
             ) => {
                 if items.len() > *max_items {
                     return Err(IndexError::InvalidValue(format!(
-                        "{} has too many set members", self.name
+                        "{} has too many set members",
+                        self.name
                     )));
                 }
                 let normalized: BTreeSet<_> = items
@@ -215,7 +223,8 @@ impl AttributeDef {
                 Ok(Value::TextSet(normalized))
             }
             _ => Err(IndexError::InvalidValue(format!(
-                "type mismatch for {}", self.name
+                "type mismatch for {}",
+                self.name
             ))),
         }
     }
@@ -244,7 +253,8 @@ impl AttributeDef {
                 case, max_bytes, ..
             } => normalize_text(text, *case, *max_bytes),
             _ => Err(IndexError::InvalidPredicate(format!(
-                "{} is not a text attribute", self.name
+                "{} is not a text attribute",
+                self.name
             ))),
         }
     }
@@ -290,16 +300,12 @@ mod tests {
     fn numeric_sorting_and_hash_encoding() {
         let signed = [-100, -1, 0, 1, 100];
         for pair in signed.windows(2) {
-            assert!(
-                scalar_key(&Value::Signed(pair[0]))
-                    < scalar_key(&Value::Signed(pair[1]))
-            );
+            assert!(scalar_key(&Value::Signed(pair[0])) < scalar_key(&Value::Signed(pair[1])));
         }
         let times = [i64::MIN, -1, 0, i64::MAX];
         for pair in times.windows(2) {
             assert!(
-                scalar_key(&Value::TimestampNs(pair[0]))
-                    < scalar_key(&Value::TimestampNs(pair[1]))
+                scalar_key(&Value::TimestampNs(pair[0])) < scalar_key(&Value::TimestampNs(pair[1]))
             );
         }
         assert_eq!(scalar_key(&Value::Hash256([7; 32])).len(), 33);
