@@ -17,6 +17,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.85.0'
+          components: rustfmt, clippy
       - name: Python
         uses: actions/setup-python@v5
         with:
