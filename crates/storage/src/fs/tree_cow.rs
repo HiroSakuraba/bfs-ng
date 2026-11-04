@@ -19,15 +19,6 @@ enum Page {
     Branch { level: u8, children: Vec<Child> },
 }
 
-impl Page {
-    fn level(&self) -> u8 {
-        match self {
-            Self::Leaf(_) => 0,
-            Self::Branch { level, .. } => *level,
-        }
-    }
-}
-
 /// Read an older, persisted node or a newly staged node in the current
 /// transaction. CRC and node geometry are rechecked; all device writes remain
 /// fenced behind Volume's ordered root publication.
