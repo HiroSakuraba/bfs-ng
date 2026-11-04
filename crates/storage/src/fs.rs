@@ -1265,6 +1265,11 @@ impl<D: BlockDevice> FileSystem<D> {
             .get(&self.generation())
             .cloned()
             .unwrap_or_default();
+        let fallback_owned = slot_owned
+            .range(..self.generation())
+            .next_back()
+            .map(|(_, owned)| owned.clone())
+            .unwrap_or_default();
         // The older root's exclusive blocks are released only AFTER
         // successfully publishing the new generation; the new journal
         // may list them as ready, but cannot allocate from them today.
@@ -1303,12 +1308,15 @@ impl<D: BlockDevice> FileSystem<D> {
         } else {
             None
         };
-        // Fail-closed witness check. A checksum-valid forged free run is not
-        // a proof that any of its addresses are free in both F0 candidates.
+        // A checksum-valid forged journal cannot create certified free
+        // space, disguise a fallback-owned pending block, or promote a
+        // quarantine entry. The full scan is the independent oracle.
         if !suspect
-            && checkpoint
-                .as_ref()
-                .is_some_and(|journal| !journal.ready.is_subset(&free))
+            && checkpoint.as_ref().is_some_and(|journal| {
+                !journal.ready.is_subset(&free)
+                    || !journal.deferred.is_subset(&free)
+                    || journal.pending != rotated_out
+            })
         {
             suspect = true;
             free.clear();
@@ -1335,12 +1343,17 @@ impl<D: BlockDevice> FileSystem<D> {
             reclaim_journal_runs: self.state.journal.runs as usize,
             journal_ready_blocks: checkpoint.as_ref().map_or(0, |j| j.ready.len()),
             journal_pending_blocks: checkpoint.as_ref().map_or(0, |j| j.pending.len()),
+            journal_deferred_blocks: checkpoint.as_ref().map_or(0, |j| j.deferred.len()),
         };
         Ok(Scrub {
             report,
             free,
             rotated_out,
             current_owned,
+            fallback_owned,
+            ready: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.ready.clone()),
+            pending: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.pending.clone()),
+            deferred: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.deferred.clone()),
         })
     }
 
