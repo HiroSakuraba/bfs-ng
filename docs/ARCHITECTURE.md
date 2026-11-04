@@ -25,8 +25,8 @@ The research sequence is:
 - C1: deterministic trace schema, reproducible generators, replay baseline.
 - C2: compare LRU, S3-FIFO, W-TinyLFU policies under identical byte capacity.
 - C3: cost-weighted reports and golden reference invariants.
-- C4: validate policy behavior against independently implemented references; fix deviations.
-- C5: add an opt-in read-only generation-safe metadata cache with explicit invalidation.
+- C4: comparison runner against independent libCacheSim LRU/S3-FIFO/W-TinyLFU; assess and document variant deltas (full upstream run pending).
+- C5: safe-Rust read-only metadata cache keyed by volume+physical address+generation, with CRC32C validation and immutable handles. Snapshot pin/retirement and persistence are not implemented.
 - C6: measure real query p50/p99, CPU L1/LLC/TLB misses, page-cache overlap and write amplification.
 
 ## First filesystem milestones

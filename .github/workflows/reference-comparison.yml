@@ -1,0 +1,52 @@
+name: Independent reference comparison (C4)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reference-comparison:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85.0'
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install independent reference
+        run: |
+          python -m pip install libcachesim
+          python -m pip freeze > c4-reference-versions.txt
+      - name: Test C4 adapter
+        run: python -m unittest discover -s crates/cache-lab/scripts -p 'test_*.py' -v
+      - name: Compare golden trace
+        run: |
+          python crates/cache-lab/scripts/compare_libcachesim.py \
+            --trace crates/cache-lab/fixtures/golden.csv \
+            --capacity 8192 --require-lru-match \
+            --output c4-golden.json
+      - name: Compare seeded mixed trace
+        run: |
+          cargo run --release -p bfs-ng-cache-lab -- generate \
+            --output c4-mixed.csv --events 5000 --seed 42 --pattern mixed
+          python crates/cache-lab/scripts/compare_libcachesim.py \
+            --trace c4-mixed.csv --capacity 262144 \
+            --require-lru-match --output c4-mixed.json
+      - name: Upload comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: c4-independent-reference
+          path: |
+            c4-golden.json
+            c4-mixed.json
+            c4-reference-versions.txt
+          if-no-files-found: warn
