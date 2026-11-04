@@ -46,7 +46,10 @@ impl Certificate {
         new_owned_without_journal: &BTreeSet<u64>,
         new_cursor: u64,
     ) -> Result<Sweep> {
-        let generation = self.generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
         let rotated: BTreeSet<u64> = self
             .fallback_owned
             .difference(&self.current_owned)
@@ -55,8 +58,7 @@ impl Certificate {
         if rotated != self.pending || !self.ready.is_disjoint(&self.deferred) {
             return Err(Error::CorruptTree);
         }
-        let mut deferred: BTreeSet<u64> =
-            self.deferred.union(&rotated).copied().collect();
+        let mut deferred: BTreeSet<u64> = self.deferred.union(&rotated).copied().collect();
         let pending: BTreeSet<u64> = self
             .current_owned
             .difference(new_owned_without_journal)
