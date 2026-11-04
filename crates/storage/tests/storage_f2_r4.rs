@@ -19,7 +19,7 @@ fn sweep_cursor(device: CrashDevice) -> (CrashDevice, u64, u64, u64) {
     let mut volume = Volume::open(device).unwrap();
     let generation = volume.info().generation;
     let payload = volume.read_root().unwrap().unwrap();
-    assert_eq!(&payload[..8], b"BFSNGM8\0");
+    assert_eq!(&payload[..8], b"BFSNGM9\0");
     let snapshots = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let journal_off = 64 + snapshots * 40 + 16;
     let journal_root =
