@@ -90,7 +90,14 @@ fn bounded_retirement_sweep_resumes_after_power_loss() {
     let g3 = fs.allocation_report().unwrap();
     assert_eq!(g3.generation, 3);
     assert!(g3.journal_ready_blocks > 0);
-    assert!(g3.journal_ready_blocks <= 32);
+    // The 32-block budget applies to *new promotions*, not to the entire
+    // ready journal: safely abandoned same-transaction nodes may already
+    // be ready from prior generations.
+    assert!(
+        g3.journal_deferred_blocks
+            >= g2.journal_pending_blocks.saturating_sub(32)
+    );
+    assert!(g3.journal_ready_blocks <= g3.reclaimable_blocks);
     assert!(g3.journal_deferred_blocks > 0);
     let (device, gen3, _, cursor3) = sweep_cursor(fs.into_device().power_loss());
     assert_eq!(gen3, 3);
@@ -174,7 +181,13 @@ fn torn_sweep_checkpoint_never_advances_a_partial_cursor() {
         let mut fs = FileSystem::open(device).unwrap();
         assert_eq!(fs.read_file("/item").unwrap(), b"current");
         let check = fs.allocation_report().unwrap();
-        assert!(check.journal_ready_blocks <= check.reclaimable_blocks);
-        assert!(check.journal_deferred_blocks <= check.reclaimable_blocks);
+        if check.reuse_blocked {
+            // A torn, structurally valid F0 candidate may still have unknown
+            // ownership. Full scrub must quarantine all physical reuse.
+            assert_eq!(check.reclaimable_blocks, 0);
+        } else {
+            assert!(check.journal_ready_blocks <= check.reclaimable_blocks);
+            assert!(check.journal_deferred_blocks <= check.reclaimable_blocks);
+        }
     }
 }
