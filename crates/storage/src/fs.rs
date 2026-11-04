@@ -522,6 +522,25 @@ fn encode_branch(
     Ok(seal(b))
 }
 
+/// Distribute bulk-load pages evenly so a final short chunk cannot
+/// strand an underfilled non-root leaf or branch (12-way fanout, min 6).
+fn balanced_chunks<T>(items: &[T]) -> Vec<&[T]> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let groups = items.len().div_ceil(FANOUT);
+    let base = items.len() / groups;
+    let extras = items.len() % groups;
+    let mut output = Vec::with_capacity(groups);
+    let mut start = 0;
+    for i in 0..groups {
+        let end = start + base + usize::from(i < extras);
+        output.push(&items[start..end]);
+        start = end;
+    }
+    output
+}
+
 fn build_nodes(
     builder: &mut Builder,
     records: &BTreeMap<String, Record>,
@@ -532,7 +551,7 @@ fn build_nodes(
     }
     let items: Vec<_> = records.iter().collect();
     let mut children: Vec<(String, u64)> = Vec::new();
-    for part in items.chunks(FANOUT) {
+    for part in balanced_chunks(&items) {
         let node = encode_leaf(part, generation)?;
         let addr = builder.push(node)?;
         children.push((part.last().expect("nonempty group").0.clone(), addr));
@@ -540,7 +559,7 @@ fn build_nodes(
     let mut level = 1u8;
     while children.len() > 1 {
         let mut upper = Vec::new();
-        for part in children.chunks(FANOUT) {
+        for part in balanced_chunks(&children) {
             let node = encode_branch(part, level, generation)?;
             let addr = builder.push(node)?;
             upper.push((part.last().expect("nonempty group").0.clone(), addr));
