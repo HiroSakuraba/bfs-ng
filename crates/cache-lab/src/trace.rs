@@ -139,7 +139,7 @@ impl Rng {
 
 fn shape(key: u64) -> (u64, Kind, u64) {
     match key % 8 {
-        0 | 1 | 2 => (4096, Kind::Metadata, 110_000),
+        0..=2 => (4096, Kind::Metadata, 110_000),
         3 => (4096, Kind::Index, 130_000),
         4 => (4096, Kind::Directory, 100_000),
         5 | 6 => (16_384, Kind::Data, 160_000),
