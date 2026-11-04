@@ -39,20 +39,23 @@ fn repeatedly_rotated_payloads_never_touch_the_two_recoverable_roots() {
         // next generation's payload shares one of the earlier ring blocks.
         if generation > 1 {
             let mut device = volume.into_device().power_loss();
-            let latest_slot = (generation % 2) as usize;
-            device.corrupt_stable_for_testing(latest_slot, 18, 0xb7);
+            let latest_slot = generation % 2;
+            let mut original = [0; BLOCK_SIZE];
+            device.read_block(latest_slot, &mut original).unwrap();
+            device.corrupt_stable_for_testing(latest_slot as usize, 18, 0xb7);
             let mut fallback = Volume::open(device).unwrap();
             assert_eq!(fallback.info().generation, generation - 1);
             assert_eq!(
                 fallback.read_root().unwrap(),
                 Some(format!("root-{}", generation - 1).into_bytes())
             );
-            // A damaged newest slot is tested on a copy. Continue the
-            // primary run by reopening the known-good two-root image below.
-            volume = vol(5);
-            for old in 1..=generation {
-                volume.commit_root(format!("root-{old}").as_bytes()).unwrap();
-            }
+            // Restore the original slot and continue from the same physical
+            // image. No fake fresh format or reconstructed generations.
+            let mut device = fallback.into_device();
+            device.write_block(latest_slot, &original).unwrap();
+            device.sync().unwrap();
+            volume = Volume::open(device.power_loss()).unwrap();
+            assert_eq!(volume.info().generation, generation);
         }
         assert_eq!(current.root_block, Some(2 + (generation - 1) % 3));
     }
