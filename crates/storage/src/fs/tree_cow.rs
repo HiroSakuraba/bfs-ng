@@ -347,6 +347,113 @@ pub(super) fn patch_tree<D: BlockDevice>(
     Ok(replacement_roots[0].block)
 }
 
+/// Read a bounded lexicographic range directly from immutable F3 pages,
+/// without consulting FileSystem's materialized in-memory record map.
+/// Each leaf and branch is checksum-checked while traversing.
+pub(super) fn scan_pages<D: BlockDevice>(
+    volume: &mut Volume<D>,
+    root: u64,
+    generation: u64,
+    cursor: u64,
+    prefix: &str,
+    after: Option<&str>,
+    count: usize,
+) -> Result<(Vec<(String, Record)>, usize)> {
+    if root == 0 {
+        return Ok((Vec::new(), 0));
+    }
+    let empty = Builder::new(cursor, generation.saturating_add(1), BTreeSet::new());
+    let mut result = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut reads = 0;
+    let wanted = count.checked_add(1).ok_or(Error::TooLarge)?;
+
+    struct Walker<'a, D: BlockDevice> {
+        volume: &'a mut Volume<D>,
+        empty: &'a Builder,
+        generation: u64,
+        cursor: u64,
+        prefix: &'a str,
+        after: Option<&'a str>,
+        wanted: usize,
+        visited: &'a mut BTreeSet<u64>,
+        reads: &'a mut usize,
+        result: &'a mut Vec<(String, Record)>,
+    }
+    impl<D: BlockDevice> Walker<'_, D> {
+        fn walk(&mut self, address: u64, level: Option<u8>) -> Result<()> {
+            if self.result.len() >= self.wanted {
+                return Ok(());
+            }
+            if address < self.cursor
+                || address <= self.generation.saturating_add(1)
+                || !self.visited.insert(address)
+                || self.visited.len() > 4096
+            {
+                return Err(Error::CorruptTree);
+            }
+            let page = read_page(self.volume, self.empty, address, self.generation)?;
+            *self.reads += 1;
+            match page {
+                Page::Leaf(entries) => {
+                    if level.is_some_and(|expected| expected != 0) {
+                        return Err(Error::CorruptTree);
+                    }
+                    for (key, record) in entries {
+                        if key == super::INTERNAL_PATH
+                            || self.after.is_some_and(|after| key.as_str() <= after)
+                            || key.as_str() < self.prefix
+                        {
+                            continue;
+                        }
+                        if !key.starts_with(self.prefix) {
+                            // All following keys are greater: prefix results
+                            // form one contiguous lexicographic interval.
+                            break;
+                        }
+                        self.result.push((key, record));
+                        if self.result.len() >= self.wanted {
+                            break;
+                        }
+                    }
+                }
+                Page::Branch { level: actual, children } => {
+                    if level.is_some_and(|expected| expected != actual) {
+                        return Err(Error::CorruptTree);
+                    }
+                    for child in children {
+                        if child.max.as_str() < self.prefix
+                            || self.after.is_some_and(|after| child.max.as_str() <= after)
+                        {
+                            continue;
+                        }
+                        self.walk(child.block, Some(actual - 1))?;
+                        if self.result.len() >= self.wanted {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    Walker {
+        volume,
+        empty: &empty,
+        generation,
+        cursor,
+        prefix,
+        after,
+        wanted,
+        visited: &mut visited,
+        reads: &mut reads,
+        result: &mut result,
+    }.walk(root, None)?;
+
+    Ok((result, reads))
+}
+
 /// Drop intermediate nodes superseded by later edits in the same transaction.
 /// Newly allocated file-content chunks are never removed by this pass.
 pub(super) fn discard_superseded_nodes(builder: &mut Builder, root: u64) -> Result<usize> {
