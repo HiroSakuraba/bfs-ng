@@ -765,7 +765,30 @@ fn load_tree<D: BlockDevice>(device: &mut D, root: SnapshotRoot) -> Result<Optio
             }
         }
     }
+    // A structurally valid F3 tree is not sufficient if its private F4
+    // secondary postings are corrupt or reference deleted file IDs.
+    if read_catalog(device, root, &records).is_err() {
+        return Ok(None);
+    }
     Ok(Some((records, owned)))
+}
+
+fn read_catalog<D: BlockDevice>(
+    device: &mut D,
+    root: SnapshotRoot,
+    records: &BTreeMap<String, Record>,
+) -> Result<Option<Catalog>> {
+    let Some(record) = records.get(INTERNAL_PATH) else {
+        return Ok(None);
+    };
+    if record.directory {
+        return Err(Error::CorruptTree);
+    }
+    let raw = data_read(device, record, root.cursor, root.generation)?
+        .ok_or(Error::CorruptTree)?;
+    let catalog = Catalog::decode(&raw)?;
+    catalog.validate_files(records)?;
+    Ok(Some(catalog))
 }
 
 fn load_state<D: BlockDevice>(
@@ -802,6 +825,9 @@ fn load_state<D: BlockDevice>(
     let Some((records, _)) = load_tree(device, root)? else {
         return Ok(None);
     };
+    let Ok(catalog) = read_catalog(device, root, &records) else {
+        return Ok(None);
+    };
     let mut snapshots = BTreeMap::new();
     let mut last_generation = 0;
     for i in 0..snap_count {
@@ -830,6 +856,7 @@ fn load_state<D: BlockDevice>(
         tree_root: root.tree_root,
         snapshots,
         records,
+        catalog,
     }))
 }
 
@@ -871,6 +898,54 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn file_count(&self) -> usize {
         self.state.records.len()
+            - usize::from(self.state.records.contains_key(INTERNAL_PATH))
+    }
+
+    pub fn schema(&self) -> Option<&Schema> {
+        self.state.catalog.as_ref().map(|catalog| &catalog.schema)
+    }
+
+    /// Indexed typed attribute search, using the persisted secondary posting
+    /// set reconstructed and independently verified on mount.
+    pub fn search_attributes(
+        &self, predicates: &[Predicate], limit: usize,
+    ) -> Result<QueryResult> {
+        let catalog = self.state.catalog.as_ref()
+            .ok_or(Error::Attribute("no schema installed".into()))?;
+        catalog.query(self.volume.info().volume_id, self.generation(), predicates, limit)
+    }
+
+    /// Independent M0 record-scan oracle, bypassing the persisted postings.
+    pub fn attribute_scan_oracle(
+        &self, predicates: &[Predicate], limit: usize,
+    ) -> Result<QueryResult> {
+        let catalog = self.state.catalog.as_ref()
+            .ok_or(Error::Attribute("no schema installed".into()))?;
+        catalog.oracle(self.volume.info().volume_id, self.generation(), predicates, limit)
+    }
+
+    pub fn file_attributes(&self, path: &str) -> Result<BTreeMap<String, Value>> {
+        validate_user_path(path)?;
+        let record = self.state.records.get(path).ok_or(Error::NotFound)?;
+        if record.directory {
+            return Err(Error::IsDirectory);
+        }
+        Ok(self.state.catalog.as_ref().map(|c| c.get(record.inode))
+            .unwrap_or_default())
+    }
+
+    /// Snapshot-consistent indexed query across historical file IDs.
+    pub fn search_snapshot_attributes(
+        &mut self, generation: u64, predicates: &[Predicate], limit: usize,
+    ) -> Result<QueryResult> {
+        let root = *self.state.snapshots.get(&generation).ok_or(Error::InvalidSnapshot)?;
+        let volume = self.volume.info().volume_id;
+        self.volume.inspect(|device| {
+            let (records, _) = load_tree(device, root)?.ok_or(Error::CorruptTree)?;
+            let catalog = read_catalog(device, root, &records)?
+                .ok_or(Error::Attribute("snapshot has no schema".into()))?;
+            catalog.query(volume, generation, predicates, limit)
+        })
     }
 
     /// Physical metadata-node writes in the last successful commit.
@@ -886,7 +961,7 @@ impl<D: BlockDevice> FileSystem<D> {
 
     /// Read a pinned historical file and recheck its recorded content checksum.
     pub fn read_snapshot_file(&mut self, generation: u64, path: &str) -> Result<Vec<u8>> {
-        validate_path(path)?;
+        validate_user_path(path)?;
         let snap = *self
             .state
             .snapshots
@@ -949,7 +1024,7 @@ impl<D: BlockDevice> FileSystem<D> {
                 generation: self.generation(),
             });
         }
-        validate_path(path)?;
+        validate_user_path(path)?;
         let record = self.state.records.get(path).ok_or(Error::NotFound)?;
         Ok(Stat {
             inode: record.inode,
@@ -961,7 +1036,7 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<String>> {
         if path != "/" {
-            validate_path(path)?;
+            validate_user_path(path)?;
             if !self.state.records.get(path).is_some_and(|r| r.directory) {
                 return Err(Error::NotDirectory);
             }
@@ -975,6 +1050,7 @@ impl<D: BlockDevice> FileSystem<D> {
             .state
             .records
             .keys()
+            .filter(|entry| entry.as_str() != INTERNAL_PATH)
             .filter(|entry| entry.starts_with(&prefix))
             .filter(|entry| !entry[prefix.len()..].contains('/'))
             .cloned()
@@ -982,7 +1058,7 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        validate_path(path)?;
+        validate_user_path(path)?;
         let entry = self.state.records.get(path).ok_or(Error::NotFound)?.clone();
         if entry.directory {
             return Err(Error::IsDirectory);
@@ -1003,6 +1079,8 @@ impl<D: BlockDevice> FileSystem<D> {
             next_inode: self.state.next_inode,
             records: self.state.records.clone(),
             new_data: BTreeMap::new(),
+            catalog: self.state.catalog.clone(),
+            catalog_dirty: false,
             snapshots: self.state.snapshots.clone(),
             current_root: SnapshotRoot {
                 generation: self.generation(),
