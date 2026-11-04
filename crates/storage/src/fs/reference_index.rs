@@ -45,12 +45,7 @@ fn valid_address(address: u64, generation: u64, cursor: u64, total: u64) -> bool
 
 /// Decode exactly one checked immutable page; child subtree integrity is
 /// checked separately by the recursive reader.
-fn decode(
-    b: &[u8; BLOCK_SIZE],
-    generation: u64,
-    cursor: u64,
-    total: u64,
-) -> Result<Page> {
+fn decode(b: &[u8; BLOCK_SIZE], generation: u64, cursor: u64, total: u64) -> Result<Page> {
     let leaf = &b[..8] == LEAF_MAGIC;
     let branch = &b[..8] == BRANCH_MAGIC;
     let birth = u64_at(b, 8);
@@ -204,7 +199,10 @@ fn store_branches(
         return Ok(Vec::new());
     }
     let chunks: Vec<_> = if children.len() > BRANCH_CAPACITY {
-        vec![&children[..children.len() / 2], &children[children.len() / 2..]]
+        vec![
+            &children[..children.len() / 2],
+            &children[children.len() / 2..],
+        ]
     } else {
         vec![children]
     };
@@ -236,7 +234,9 @@ fn patch_node<D: BlockDevice>(
             match rows.binary_search_by_key(&key, |(id, _)| *id) {
                 Ok(i) => match new_count {
                     Some(refs) => rows[i].1 = refs,
-                    None => { rows.remove(i); }
+                    None => {
+                        rows.remove(i);
+                    }
                 },
                 Err(i) => {
                     let refs = new_count.ok_or(Error::CorruptTree)?;
@@ -245,10 +245,21 @@ fn patch_node<D: BlockDevice>(
             }
             store_leaves(builder, &rows, generation)
         }
-        Page::Branch { level, mut children } => {
-            let i = children.partition_point(|child| child.max < key).min(children.len() - 1);
+        Page::Branch {
+            level,
+            mut children,
+        } => {
+            let i = children
+                .partition_point(|child| child.max < key)
+                .min(children.len() - 1);
             let replacement = patch_node(
-                volume, builder, children[i].address, key, new_count, generation, false,
+                volume,
+                builder,
+                children[i].address,
+                key,
+                new_count,
+                generation,
+                false,
             )?;
             children.splice(i..=i, replacement);
             if children.is_empty() {
@@ -314,8 +325,12 @@ fn inspect<D: BlockDevice>(
             expected_level: Option<u8>,
             is_root: bool,
         ) -> Result<Option<u64>> {
-            if !valid_address(address, self.generation, self.cursor, self.device.block_count())
-                || !self.visited.insert(address)
+            if !valid_address(
+                address,
+                self.generation,
+                self.cursor,
+                self.device.block_count(),
+            ) || !self.visited.insert(address)
                 || self.visited.len() > MAX_PAGES
             {
                 return Err(Error::CorruptTree);
@@ -323,7 +338,10 @@ fn inspect<D: BlockDevice>(
             let mut block = [0; BLOCK_SIZE];
             self.device.read_block(address, &mut block)?;
             let page = decode(
-                &block, self.generation, self.cursor, self.device.block_count(),
+                &block,
+                self.generation,
+                self.cursor,
+                self.device.block_count(),
             )?;
             match page {
                 Page::Leaf(rows) => {
@@ -366,7 +384,11 @@ fn inspect<D: BlockDevice>(
         last: None,
     };
     walker.walk(root, None, true)?;
-    if walker.visited.iter().any(|page| walker.counts.contains_key(page)) {
+    if walker
+        .visited
+        .iter()
+        .any(|page| walker.counts.contains_key(page))
+    {
         return Err(Error::CorruptTree);
     }
     Ok((walker.counts, walker.visited))
@@ -396,13 +418,16 @@ pub(super) fn read<D: BlockDevice>(
 /// Number of actual CoW reference pages that will reach the disk in this
 /// commit, excluding superseded intermediate path copies.
 pub(super) fn staged_page_count(builder: &Builder) -> usize {
-    builder.staged.iter().filter(|(_, page)| {
-        &page[..8] == LEAF_MAGIC || &page[..8] == BRANCH_MAGIC
-    }).count()
+    builder
+        .staged
+        .iter()
+        .filter(|(_, page)| &page[..8] == LEAF_MAGIC || &page[..8] == BRANCH_MAGIC)
+        .count()
 }
 
 fn discard_intermediate(builder: &mut Builder, root: u64) -> Result<()> {
-    let staged: BTreeMap<u64, [u8; BLOCK_SIZE]> = builder.staged
+    let staged: BTreeMap<u64, [u8; BLOCK_SIZE]> = builder
+        .staged
         .iter()
         .filter(|(_, b)| &b[..8] == LEAF_MAGIC || &b[..8] == BRANCH_MAGIC)
         .map(|(id, data)| (*id, *data))
@@ -410,7 +435,9 @@ fn discard_intermediate(builder: &mut Builder, root: u64) -> Result<()> {
     let mut visited = BTreeSet::new();
     let mut stack = vec![root];
     while let Some(addr) = stack.pop() {
-        let Some(page) = staged.get(&addr) else { continue };
+        let Some(page) = staged.get(&addr) else {
+            continue;
+        };
         if !visited.insert(addr) {
             return Err(Error::CorruptTree);
         }
@@ -440,7 +467,10 @@ fn seal_root<D: BlockDevice>(
         root
     };
     discard_intermediate(builder, root)?;
-    let overlay = &mut StagedReader { volume, staged: &builder.staged };
+    let overlay = &mut StagedReader {
+        volume,
+        staged: &builder.staged,
+    };
     let (actual, pages) = inspect(overlay, root, generation, builder.cursor)?;
     if &actual != expected || pages.len() > MAX_PAGES || actual.len() > u32::MAX as usize {
         return Err(Error::CorruptTree);
