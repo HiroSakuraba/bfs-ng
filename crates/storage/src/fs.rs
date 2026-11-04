@@ -980,6 +980,14 @@ pub struct AllocationReport {
     pub journal_pending_blocks: usize,
 }
 
+/// Internal result of the independent two-root ownership scrub.
+struct Scrub {
+    report: AllocationReport,
+    free: BTreeSet<u64>,
+    rotated_out: BTreeSet<u64>,
+    current_owned: BTreeSet<u64>,
+}
+
 /// Page of checksummed on-disk F3 namespace entries. `next_after` is only
 /// valid for the same prefix and generation; stale live cursors are rejected.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1147,9 +1155,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// If even one checksummed candidate has damaged F1 metadata, fail
     /// *closed* for reclamation: use fresh blocks only on this commit.
-    fn allocation_state(
-        &mut self,
-    ) -> Result<(AllocationReport, BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
+    fn allocation_state(&mut self) -> Result<Scrub> {
         let candidates = self.volume.candidate_roots()?;
         let mut counts = BTreeMap::<u64, usize>::new();
         let mut visited_roots = BTreeSet::new();
@@ -1311,20 +1317,25 @@ impl<D: BlockDevice> FileSystem<D> {
             journal_ready_blocks: checkpoint.as_ref().map_or(0, |j| j.ready.len()),
             journal_pending_blocks: checkpoint.as_ref().map_or(0, |j| j.pending.len()),
         };
-        Ok((report, free, rotated_out, current_owned))
+        Ok(Scrub {
+            report,
+            free,
+            rotated_out,
+            current_owned,
+        })
     }
 
     /// Recompute reachability across *both* root slots and all pinned
     /// snapshots, validating metadata and data checksums during the scan.
     pub fn allocation_report(&mut self) -> Result<AllocationReport> {
-        self.allocation_state().map(|(report, _, _, _)| report)
+        self.allocation_state().map(|scrub| scrub.report)
     }
 
     fn reusable_blocks(
         &mut self,
     ) -> Result<(BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
         self.allocation_state()
-            .map(|(_, free, rotated_out, current_owned)| (free, rotated_out, current_owned))
+            .map(|scrub| (scrub.free, scrub.rotated_out, scrub.current_owned))
     }
 
     fn range_page(
