@@ -990,8 +990,6 @@ pub struct AllocationReport {
 /// Internal result of the independent two-root ownership scrub.
 struct Scrub {
     report: AllocationReport,
-    free: BTreeSet<u64>,
-    rotated_out: BTreeSet<u64>,
     current_owned: BTreeSet<u64>,
     fallback_owned: BTreeSet<u64>,
     ready: BTreeSet<u64>,
@@ -1347,8 +1345,6 @@ impl<D: BlockDevice> FileSystem<D> {
         };
         Ok(Scrub {
             report,
-            free,
-            rotated_out,
             current_owned,
             fallback_owned,
             ready: checkpoint.as_ref().map_or_else(BTreeSet::new, |j| j.ready.clone()),
