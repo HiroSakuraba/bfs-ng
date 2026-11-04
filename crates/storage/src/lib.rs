@@ -5,6 +5,9 @@ mod device;
 mod fs;
 mod volume;
 
+pub use bfs_ng_attribute_index::{
+    AttributeDef, AttributeType, FileId, Predicate, QueryResult, Schema, TextCase, Value,
+};
 pub use device::{BlockDevice, CrashDevice, Fault, FileDevice};
 pub use fs::{FileSystem, FsTransaction, Stat};
 pub use volume::{RootInfo, Volume};
@@ -37,6 +40,7 @@ pub enum Error {
     IsDirectory,
     StaleTransaction,
     InvalidSnapshot,
+    Attribute(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -69,6 +73,7 @@ impl fmt::Display for Error {
             Self::IsDirectory => write!(f, "expected a regular file"),
             Self::StaleTransaction => write!(f, "transaction started at a stale root generation"),
             Self::InvalidSnapshot => write!(f, "snapshot generation is absent or invalid"),
+            Self::Attribute(reason) => write!(f, "attribute metadata: {reason}"),
         }
     }
 }

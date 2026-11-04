@@ -8,3 +8,6 @@ description = "Experimental F0 file-backed block image, checksummed roots, and c
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[dependencies]
+bfs-ng-attribute-index = { path = "../attribute-index" }
