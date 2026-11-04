@@ -110,3 +110,11 @@ All policies receive the **same v1 trace**:
 3. Avoid publishing inventories, model summaries or traces from confidential repositories. Inventory JSON deliberately contains relative filenames to support provenance and must be reviewed.
 4. CI runs deterministic synthetic and trace-only fixtures. It does not claim production performance or metadata-index superiority.
 5. Next stages: DVE runtime instrumented \`ContentSource\` capture; AxiomZig compiler pipeline instrumentation; syscall/page-cache telemetry; true filesystem images once CoW write/recovery are safe.
+
+## Searchable metadata (design only)
+
+See [BFS-NG searchable metadata architecture](../../docs/SEARCHABLE_METADATA.md) for typed attribute schemas, CoW indexes, transaction/snapshot invariants, proposed AxiomZig diagnostic queries and DVE asset-dependency queries. Current `index` trace events are **modeled logical accesses**, not index-page reads against an implemented filesystem.
+
+## Pinned external-source workflow
+
+The [external-source smoke workflow](../../.github/workflows/real-world-sources.yml) checks out fixed AxiomZig and DVE commits, replays their patterns, and uploads only aggregate benchmark data. External sources are not committed to BFS-NG. An opt-in workflow run can change availability and timing; the pinned source commits keep the input content stable.
