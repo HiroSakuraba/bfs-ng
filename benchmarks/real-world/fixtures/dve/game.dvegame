@@ -1,0 +1,5 @@
+DVE_GAME 1
+name=BFSNGFixture
+version=0.1.0
+entryScene=examples/scene.dvoxscene.json
+startupScript=examples/startup.lua

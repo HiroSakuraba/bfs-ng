@@ -12,6 +12,14 @@ BFS-NG aims to combine searchable, typed file attributes with transactional meta
 - **M0 searchable metadata (in-memory only):** typed attribute schemas, stable volume/inode IDs, ordered index postings, atomic in-memory update publication, immutable snapshots, equality/range/prefix/membership queries, and a full-scan differential oracle. See [M0 design and limits](docs/M0_SEARCHABLE_ATTRIBUTES.md).
 - **Not implemented:** production disk format, mounts, persistent block-device driver, transactional allocator, **durable** indexes, persistent snapshot retention, authorization-aware queries, Windows/Linux adapters.
 
+## Searchable metadata design
+
+The [metadata query architecture](docs/SEARCHABLE_METADATA.md) explains how the experimental M0 typed in-memory query engine can eventually become a persistent, transactionally consistent CoW index. The durable query engine and live-query feed are **not implemented**.
+
+## Real-world corpus and asset benchmarks
+
+The [AxiomZig, DVE, and AxiomMegaDoc suite](benchmarks/real-world/README.md) collects source-backed deterministic modeled or benchmark-owned read traces, suitable for cache policy comparisons. It does **not** measure kernel cache misses or operate on a BFS-NG filesystem. The [AxiomMegaDoc walkthrough](benchmarks/real-world/MEGADOC.md) covers long-document assembly, training-style reads and provenance workloads. Bulk training data remains versioned in [AxiomMegaDoc](https://github.com/HiroSakuraba/AxiomMegadoc/tree/main/corpus/v0.12).
+
 ## First run
 
 Install Rust 1.85 or later. From the repository root:
@@ -33,6 +41,7 @@ Cargo.toml
 crates/cache-lab/     # Standalone safe-Rust trace simulator
 crates/metadata-cache/ # Generation-safe read-only metadata cache
 crates/attribute-index/ # M0 typed in-memory query/index reference
+benchmarks/real-world/ # AxiomZig/DVE/AxiomMegaDoc access-pattern harness
 docs/ARCHITECTURE.md  # Design decisions and roadmap
 .github/workflows/    # Compilation, tests, lint and golden replay
 ```

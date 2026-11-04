@@ -8,3 +8,7 @@
 /replay.csv
 /mrc.csv
 /golden-results.csv
+
+# Local real-world benchmark data and generated traces (never commit private file lists)
+/benchmarks/real-world/local-data/
+/benchmarks/real-world/results/

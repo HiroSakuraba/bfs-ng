@@ -1,0 +1,92 @@
+name: External-source benchmark smoke (AxiomZig and DVE)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  external-source-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout pinned AxiomZig source
+        uses: actions/checkout@v5
+        with:
+          repository: HiroSakuraba/AxiomZig
+          ref: e22f28424bc2f7589b5779e23bd1790ad075bbb5
+          path: benchmark_sources/axiomzig
+          persist-credentials: false
+      - name: Checkout pinned DVE source
+        uses: actions/checkout@v5
+        with:
+          repository: HiroSakuraba/destructible-voxel-engine
+          ref: f11b9dd348688c89714247806a6036be077d4d7c
+          path: benchmark_sources/dve
+          persist-credentials: false
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85.0'
+          components: rustfmt, clippy
+      - name: Build real AxiomZig corpus-member trace
+        run: |
+          mkdir -p /tmp/bfsng-real
+          python3 benchmarks/real-world/bench.py trace \
+            --project axiomzig --root benchmark_sources/axiomzig --zip-members \
+            --revision e22f28424bc2f7589b5779e23bd1790ad075bbb5 \
+            --pattern compile --passes 1 --mode model \
+            --max-items 100000 --max-events 1000000 --max-read 4096 \
+            --output /tmp/bfsng-real/axiomzig.csv \
+            --summary /tmp/bfsng-real/axiomzig.json
+      - name: Record DVE scene access from actual files
+        run: |
+          python3 benchmarks/real-world/bench.py trace \
+            --project dve --root benchmark_sources/dve \
+            --revision f11b9dd348688c89714247806a6036be077d4d7c \
+            --pattern scene --passes 2 --mode record \
+            --max-items 100000 --max-read 16384 \
+            --output /tmp/bfsng-real/dve-scene.csv \
+            --summary /tmp/bfsng-real/dve-scene.json
+          python3 benchmarks/real-world/bench.py trace \
+            --project dve --root benchmark_sources/dve \
+            --revision f11b9dd348688c89714247806a6036be077d4d7c \
+            --pattern hotreload --passes 3 --mode model \
+            --output /tmp/bfsng-real/dve-hotreload.csv \
+            --summary /tmp/bfsng-real/dve-hotreload.json
+      - name: Validate real-source traces and cache policies
+        run: |
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+          root = Path("/tmp/bfsng-real")
+          expected = {"timestamp_ns", "stream_id", "key", "charged_bytes",
+                      "kind", "refill_cost_ns", "speculative"}
+          for name in ("axiomzig", "dve-scene", "dve-hotreload"):
+              with (root / (name + ".csv")).open(newline="") as fp:
+                  rows = list(csv.DictReader(fp))
+              summary = json.loads((root / (name + ".json")).read_text())
+              assert rows and summary["events"] == len(rows), name
+              assert set(rows[0]) == expected, name
+              print(name, summary["files_indexed"], "objects,", len(rows), "events")
+          assert json.loads((root / "dve-scene.json").read_text())["observed_file_read_bytes"] > 0
+          PY
+          for name in axiomzig dve-scene dve-hotreload; do
+            cargo run --quiet --release -p bfs-ng-cache-lab -- replay \
+              --input "/tmp/bfsng-real/$name.csv" --capacity-bytes 1048576 \
+              --policies none,lru,s3fifo,wtinylfu \
+              --output "/tmp/bfsng-real/$name-cache.csv"
+          done
+      - name: Upload aggregate results, not source data
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: real-source-cache-reports
+          path: |
+            /tmp/bfsng-real/*.json
+            /tmp/bfsng-real/*-cache.csv
+          if-no-files-found: warn
