@@ -41,3 +41,8 @@ Next: F3 incremental CoW B+tree updates and a durable, independently checked ref
 ## F2 follow-up — allocation audit
 
 The [F2/F3 backlog batch](F2_F3_BACKLOG_CLOSEOUT.md) adds a read-only, independently rebuilt `AllocationReport`, including shared-block accounting, reclaimable-block availability, root-slot exhaustion estimates and quarantine when an F0-valid candidate has corrupt higher-level metadata. This remains a verified full-scan oracle; **no durable free-space/refcount tree or compaction is implemented**.
+
+
+## Later milestone — F2.R1 index witness
+
+See [F2.R1 durable references](F2_R1_DURABLE_REFERENCES.md) for the version-5 immutable reference-index page chain, independent reconstruction check on recovery, and protection of those pages in both root slots. The full-scan reachability oracle remains mandatory; a persistent incrementally updated free-space/reference tree is still pending.
