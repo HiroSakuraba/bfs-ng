@@ -956,6 +956,11 @@ impl<D: BlockDevice> FileSystem<D> {
         if generation > u32::MAX as u64 {
             return Err(Error::GenerationOverflow);
         }
+        // Even when the reusable pool is nonempty, advancing F0's low-end
+        // payload address must never enter the high-watermark F1 region.
+        if root_block >= self.state.cursor {
+            return Err(Error::NoSpace);
+        }
         let reusable = self.reusable_blocks()?;
         let mut builder = Builder::new(self.state.cursor, root_block, reusable);
         let mut state = State {
