@@ -110,9 +110,7 @@ fn checksum_correct_early_promotion_of_fallback_block_is_quarantined() {
     let count = u16::from_le_bytes(page[28..30].try_into().unwrap()) as usize;
     let eligible_at = (0..count)
         .map(|index| 32 + index * 20 + 12)
-        .find(|&at| {
-            u64::from_le_bytes(page[at..at + 8].try_into().unwrap()) == generation + 1
-        })
+        .find(|&at| u64::from_le_bytes(page[at..at + 8].try_into().unwrap()) == generation + 1)
         .expect("the oldest fallback must have pending journal blocks");
     // Earlier ready runs can now exist for never-published staged pages.
     // Deliberately forge a *pending* fallback-owned address, not a safe
