@@ -1759,32 +1759,56 @@ impl<D: BlockDevice> FileSystem<D> {
             reference_index::read(&mut overlay, state.reference, generation, builder.cursor)?.1
         };
         let new_owned: BTreeSet<u64> = counts.keys().copied().chain(new_ref_pages).collect();
-        let pending: BTreeSet<u64> = current_owned.difference(&new_owned).copied().collect();
-        state.journal = reclaim_ledger::persist(&mut builder, generation, &rotated_out, &pending)?;
-        // Independently verify the complete staged journal before F0
-        // publication. Its pages must not alias the namespace/ref index.
-        {
+        let sweep = certificate.rotate(&new_owned, builder.cursor)?;
+        state.journal = reclaim_ledger::persist(
+            &mut builder,
+            generation,
+            &sweep.promoted,
+            &sweep.pending,
+            &sweep.deferred,
+            sweep.sweep_cursor,
+        )?;
+        // Read the actual staged checkpoint rather than assuming the writer's
+        // intended runs survived encoding. This also protects its pages
+        // against aliasing with all current namespace/ref-index blocks.
+        let checkpoint = {
             let mut overlay = StagedReader {
                 volume: &mut self.volume,
                 staged: &builder.staged,
             };
-            let checkpoint =
-                reclaim_ledger::read(&mut overlay, state.journal, generation, builder.cursor)?;
-            if !checkpoint.pages.is_disjoint(&new_owned)
-                || checkpoint
-                    .ready
-                    .iter()
-                    .chain(&checkpoint.pending)
-                    .any(|id| new_owned.contains(id))
-            {
-                return Err(Error::CorruptTree);
-            }
+            reclaim_ledger::read(&mut overlay, state.journal, generation, builder.cursor)?
+        };
+        if !checkpoint.pages.is_disjoint(&new_owned)
+            || checkpoint.ready != builder.reusable.union(&sweep.promoted).copied().collect()
+            || checkpoint.pending != sweep.pending
+            || checkpoint.deferred != sweep.deferred
+            || checkpoint
+                .ready
+                .iter()
+                .chain(&checkpoint.pending)
+                .chain(&checkpoint.deferred)
+                .any(|id| new_owned.contains(id))
+        {
+            return Err(Error::CorruptTree);
         }
+        let certified_new = Certificate {
+            generation,
+            fallback_owned: certificate.current_owned,
+            current_owned: new_owned.union(&checkpoint.pages).copied().collect(),
+            ready: checkpoint.ready,
+            pending: checkpoint.pending,
+            deferred: checkpoint.deferred,
+            sweep_cursor: state.journal.sweep_cursor,
+        };
         state.cursor = builder.cursor;
         let reference_writes = reference_index::staged_page_count(&builder);
         let manifest = root_manifest(&state, generation);
         self.volume
             .commit_root_with_blocks(&builder.staged, &manifest)?;
+        // NEVER install uncommitted certificate mutations. F0's final sync
+        // is the transaction's publication/ownership boundary.
+        self.certified = Some(certified_new);
+        self.last_commit_used_certificate = from_cache;
         self.last_metadata_blocks_written = metadata_writes;
         self.last_reference_pages_written = reference_writes;
         self.state = state;
