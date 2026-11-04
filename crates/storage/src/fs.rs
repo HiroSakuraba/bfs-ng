@@ -8,17 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
+mod reclaim_cache;
 mod reclaim_ledger;
 mod reference_index;
+use reclaim_cache::Certificate;
 mod tree_cow;
 use reclaim_ledger::JournalHeader;
 use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM7\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM8\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 7;
+const FORMAT: u32 = 8;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -308,7 +310,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 /// Snapshot pins are included in the same commit as the live namespace.
 fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     let catalog_end = 64 + state.snapshots.len() * 40;
-    let mut b = vec![0_u8; catalog_end + 32];
+    let mut b = vec![0_u8; catalog_end + 40];
     b[..8].copy_from_slice(META_MAGIC);
     b[8..12].copy_from_slice(&FORMAT.to_le_bytes());
     b[16..24].copy_from_slice(&state.cursor.to_le_bytes());
@@ -331,6 +333,7 @@ fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     b[catalog_end + 16..catalog_end + 24].copy_from_slice(&state.journal.first.to_le_bytes());
     b[catalog_end + 24..catalog_end + 28].copy_from_slice(&state.journal.pages.to_le_bytes());
     b[catalog_end + 28..catalog_end + 32].copy_from_slice(&state.journal.runs.to_le_bytes());
+    b[catalog_end + 32..catalog_end + 40].copy_from_slice(&state.journal.sweep_cursor.to_le_bytes());
     b
 }
 
@@ -844,7 +847,7 @@ fn load_state<D: BlockDevice>(
         return Ok(None);
     }
     let snap_count = u32_at(bytes, 56) as usize;
-    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 32 {
+    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 40 {
         return Ok(None);
     }
     let root = SnapshotRoot {
@@ -895,6 +898,7 @@ fn load_state<D: BlockDevice>(
         first: u64_at(bytes, trailer + 16),
         pages: u32_at(bytes, trailer + 24),
         runs: u32_at(bytes, trailer + 28),
+        sweep_cursor: u64_at(bytes, trailer + 32),
     };
     let Ok((persisted, index_pages)) =
         reference_index::read(device, reference, root.generation, root.cursor)
@@ -906,6 +910,8 @@ fn load_state<D: BlockDevice>(
     };
     if !checkpoint.pages.is_disjoint(&index_pages)
         || !checkpoint.ready.is_disjoint(&checkpoint.pending)
+        || !checkpoint.ready.is_disjoint(&checkpoint.deferred)
+        || !checkpoint.pending.is_disjoint(&checkpoint.deferred)
     {
         return Ok(None);
     }
@@ -918,7 +924,7 @@ fn load_state<D: BlockDevice>(
         || checkpoint
             .ready
             .iter()
-            .chain(&checkpoint.pending)
+            .chain(&checkpoint.deferred)
             .any(|id| reconstructed.contains_key(id) || index_pages.contains(id))
         || checkpoint
             .pages
