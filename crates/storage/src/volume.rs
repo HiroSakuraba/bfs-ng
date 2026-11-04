@@ -289,9 +289,14 @@ impl<D: BlockDevice> Volume<D> {
             if head.volume_id != self.head.volume_id {
                 return Err(Error::InconsistentVolume);
             }
-            if let Some(payload) = read_payload(&mut self.device, head)? {
-                roots.push((head.info(), head.root_block.map(|_| payload)));
-            }
+            // A checksummed F0 slot with a damaged payload still owns
+            // UNKNOWN high-region blocks. Expose it to F2's scrub as an
+            // invalid candidate rather than silently treating its space as
+            // reclaimable. Generation zero deliberately has no payload.
+            let payload = read_payload(&mut self.device, head)?
+                .map(|bytes| head.root_block.map(|_| bytes))
+                .unwrap_or(None);
+            roots.push((head.info(), payload));
         }
         roots.sort_by_key(|(info, _)| info.generation);
         Ok(roots)
