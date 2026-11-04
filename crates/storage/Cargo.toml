@@ -1,0 +1,10 @@
+[package]
+name = "bfs-ng-storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Experimental F0 file-backed block image, checksummed roots, and crash simulation"
+
+[lints.rust]
+unsafe_code = "forbid"

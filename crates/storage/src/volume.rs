@@ -1,0 +1,307 @@
+//! Two alternating, CRC32C-protected root slots and append-only root payloads.
+//! The durable ordering is: payload write -> sync -> root slot write -> sync.
+use crate::{BLOCK_SIZE, BlockDevice, Error, ROOT_CAPACITY, Result};
+
+const SUPER_MAGIC: [u8; 8] = *b"BFSNGF0\0";
+const PAYLOAD_MAGIC: [u8; 8] = *b"BFSNGR0\0";
+const VERSION: u32 = 1;
+const NO_ROOT: u64 = u64::MAX;
+const CHECKSUM_OFFSET: usize = 120;
+
+fn crc32c(data: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ ((0_u32.wrapping_sub(crc & 1)) & 0x82f6_3b78);
+        }
+    }
+    !crc
+}
+
+fn u32_at(block: &[u8], start: usize) -> u32 {
+    u32::from_le_bytes(block[start..start + 4].try_into().expect("fixed offsets"))
+}
+
+fn u64_at(block: &[u8], start: usize) -> u64 {
+    u64::from_le_bytes(block[start..start + 8].try_into().expect("fixed offsets"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootInfo {
+    pub volume_id: u128,
+    pub generation: u64,
+    pub root_block: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Super {
+    volume_id: u128,
+    generation: u64,
+    root_block: Option<u64>,
+    root_crc: u32,
+    blocks: u64,
+}
+
+impl Super {
+    fn initial(volume_id: u128, blocks: u64) -> Self {
+        Self {
+            volume_id,
+            generation: 0,
+            root_block: None,
+            root_crc: 0,
+            blocks,
+        }
+    }
+
+    fn encode(self) -> [u8; BLOCK_SIZE] {
+        let mut block = [0_u8; BLOCK_SIZE];
+        block[0..8].copy_from_slice(&SUPER_MAGIC);
+        block[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        block[12..16].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
+        block[16..32].copy_from_slice(&self.volume_id.to_le_bytes());
+        block[32..40].copy_from_slice(&self.generation.to_le_bytes());
+        block[40..48].copy_from_slice(&self.root_block.unwrap_or(NO_ROOT).to_le_bytes());
+        block[48..52].copy_from_slice(&self.root_crc.to_le_bytes());
+        block[56..64].copy_from_slice(&self.blocks.to_le_bytes());
+        let checksum = crc32c(&block[..CHECKSUM_OFFSET]);
+        block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
+        block
+    }
+
+    fn decode(block: &[u8; BLOCK_SIZE], slot: u64, blocks: u64) -> Option<Self> {
+        if block[..8] != SUPER_MAGIC
+            || u32_at(block, 8) != VERSION
+            || u32_at(block, 12) != BLOCK_SIZE as u32
+            || u64_at(block, 56) != blocks
+            || block[52..56].iter().any(|b| *b != 0)
+            || block[64..CHECKSUM_OFFSET].iter().any(|b| *b != 0)
+            || block[CHECKSUM_OFFSET + 4..].iter().any(|b| *b != 0)
+            || u32_at(block, CHECKSUM_OFFSET) != crc32c(&block[..CHECKSUM_OFFSET])
+        {
+            return None;
+        }
+        let volume_id = u128::from_le_bytes(block[16..32].try_into().ok()?);
+        let generation = u64_at(block, 32);
+        let block_number = u64_at(block, 40);
+        let root_crc = u32_at(block, 48);
+        if volume_id == 0 || generation % 2 != slot {
+            return None;
+        }
+        let root_block = if generation == 0 {
+            if block_number != NO_ROOT || root_crc != 0 {
+                return None;
+            }
+            None
+        } else {
+            let expected = generation.checked_add(1)?;
+            if block_number != expected || block_number >= blocks {
+                return None;
+            }
+            Some(block_number)
+        };
+        Some(Self {
+            volume_id,
+            generation,
+            root_block,
+            root_crc,
+            blocks,
+        })
+    }
+
+    fn info(self) -> RootInfo {
+        RootInfo {
+            volume_id: self.volume_id,
+            generation: self.generation,
+            root_block: self.root_block,
+        }
+    }
+}
+
+/// One writer per image. Never call this through a second concurrent device.
+/// Snapshots and free-space allocation do not exist in F0.
+pub struct Volume<D: BlockDevice> {
+    device: D,
+    head: Super,
+    poisoned: bool,
+}
+
+fn read_payload<D: BlockDevice>(device: &mut D, head: Super) -> Result<Option<Vec<u8>>> {
+    let Some(block_number) = head.root_block else {
+        return Ok(Some(Vec::new()));
+    };
+    let mut block = [0_u8; BLOCK_SIZE];
+    device.read_block(block_number, &mut block)?;
+    if crc32c(&block) != head.root_crc
+        || block[..8] != PAYLOAD_MAGIC
+        || block[12..16].iter().any(|b| *b != 0)
+    {
+        return Ok(None);
+    }
+    let len = u32_at(&block, 8) as usize;
+    if len > ROOT_CAPACITY || block[16 + len..].iter().any(|b| *b != 0) {
+        return Ok(None);
+    }
+    Ok(Some(block[16..16 + len].to_vec()))
+}
+
+impl<D: BlockDevice> Volume<D> {
+    /// Only formats a *blank, disposable* image. Reserved blocks 0/1 must be
+    /// zero; all later blocks are treated as unused.
+    pub fn format(mut device: D, volume_id: u128) -> Result<Self> {
+        if volume_id == 0 || device.block_count() < 4 {
+            return Err(Error::Geometry);
+        }
+        // F0 has no reclaimable allocation map. Formatting is permitted
+        // only on an entirely blank, disposable image, not merely empty
+        // root slots that might hide orphaned user data.
+        for block_number in 0..device.block_count() {
+            let mut block = [0_u8; BLOCK_SIZE];
+            device.read_block(block_number, &mut block)?;
+            if block.iter().any(|b| *b != 0) {
+                return Err(Error::NotBlank);
+            }
+        }
+        let head = Super::initial(volume_id, device.block_count());
+        device.write_block(0, &head.encode())?;
+        device.sync()?;
+        Ok(Self {
+            device,
+            head,
+            poisoned: false,
+        })
+    }
+
+    /// Reopens a volume, selecting the highest complete and checksummed root.
+    /// A damaged latest root falls back to the previous valid slot. A malformed
+    /// image with no valid root is refused, never silently formatted.
+    pub fn open(mut device: D) -> Result<Self> {
+        if device.block_count() < 4 {
+            return Err(Error::Geometry);
+        }
+        let mut candidates = Vec::new();
+        for slot in 0..2 {
+            let mut block = [0_u8; BLOCK_SIZE];
+            device.read_block(slot, &mut block)?;
+            if let Some(candidate) = Super::decode(&block, slot, device.block_count()) {
+                candidates.push(candidate);
+            }
+        }
+        if candidates.is_empty() {
+            return Err(Error::NoValidRoot);
+        }
+        if candidates.len() == 2 {
+            let a = candidates[0];
+            let b = candidates[1];
+            if a.volume_id != b.volume_id
+                || a.blocks != b.blocks
+                || a.generation == b.generation
+                || a.generation.abs_diff(b.generation) != 1
+            {
+                return Err(Error::InconsistentVolume);
+            }
+        }
+        candidates.sort_by(|a, b| b.generation.cmp(&a.generation));
+        for head in candidates {
+            if read_payload(&mut device, head)?.is_some() {
+                return Ok(Self {
+                    device,
+                    head,
+                    poisoned: false,
+                });
+            }
+        }
+        Err(Error::CorruptRoot)
+    }
+
+    pub fn info(&self) -> RootInfo {
+        self.head.info()
+    }
+
+    pub fn block_count(&self) -> u64 {
+        self.head.blocks
+    }
+
+    pub fn read_root(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.head.root_block.is_none() {
+            return Ok(None);
+        }
+        read_payload(&mut self.device, self.head)?
+            .ok_or(Error::CorruptRoot)
+            .map(Some)
+    }
+
+    /// Only one new, immutable root payload block per generation (no allocator).
+    /// A successful return means both sync barriers succeeded. A failed commit
+    /// poisons this handle; reopen from disk before another attempt.
+    pub fn commit_root(&mut self, payload: &[u8]) -> Result<RootInfo> {
+        if self.poisoned {
+            return Err(Error::Poisoned);
+        }
+        if payload.len() > ROOT_CAPACITY {
+            return Err(Error::TooLarge);
+        }
+        let generation = self
+            .head
+            .generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
+        let next_block = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        if next_block >= self.head.blocks {
+            return Err(Error::NoSpace);
+        }
+        let mut block = [0_u8; BLOCK_SIZE];
+        block[..8].copy_from_slice(&PAYLOAD_MAGIC);
+        block[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        block[16..16 + payload.len()].copy_from_slice(payload);
+        let head = Super {
+            volume_id: self.head.volume_id,
+            generation,
+            root_block: Some(next_block),
+            root_crc: crc32c(&block),
+            blocks: self.head.blocks,
+        };
+        let action = (|| {
+            self.device.write_block(next_block, &block)?;
+            self.device.sync()?; // CoW payload precedes publishing its pointer.
+            self.device.write_block(generation % 2, &head.encode())?;
+            self.device.sync()?; // Root slot publication barrier.
+            Ok(())
+        })();
+        match action {
+            Ok(()) => {
+                self.head = head;
+                Ok(head.info())
+            }
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn into_device(self) -> D {
+        self.device
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_crc32c_vector() {
+        assert_eq!(crc32c(b"123456789"), 0xe306_9283);
+    }
+
+    #[test]
+    fn rejects_corrupt_superblock_and_geometry() {
+        let h = Super::initial(55, 16);
+        let mut block = h.encode();
+        assert!(Super::decode(&block, 0, 16).is_some());
+        block[18] ^= 0x80;
+        assert!(Super::decode(&block, 0, 16).is_none());
+        assert!(Super::decode(&h.encode(), 1, 16).is_none());
+        assert!(Super::decode(&h.encode(), 0, 12).is_none());
+    }
+}

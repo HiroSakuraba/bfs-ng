@@ -31,7 +31,7 @@ The research sequence is:
 
 ## First filesystem milestones
 
-- F0: disk-format specification, power-failure model, block device abstraction.
+- F0: **experimental implementation** in `crates/storage`: fixed-size regular-file block device, checksummed two-slot roots, append-only payloads, ordered `sync_all` barriers and fault-injected recovery. Not an allocator or production disk format; see [F0 durability contract](F0_STORAGE.md).
 - F1: image-backed storage, validated block/inode parsing, directory structure.
 - F2: choose and implement a *single* transaction durability mechanism.
 - F3: checksums, scrub and recoverability tests under injected failures.

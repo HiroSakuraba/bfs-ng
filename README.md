@@ -10,6 +10,7 @@ BFS-NG aims to combine searchable, typed file attributes with transactional meta
 - **Validated by GitHub Actions:** Rust compilation, 11 tests, Clippy, and the independent LRU golden trace. Formatting is enforced from this tranche onward.
 - **C4 reference comparison:** independent libCacheSim 0.3.5 comparison runner and workflow, with verified LRU control. Research S3-FIFO/TinyLFU variants differ measurably; see results and limitations in the C4 report. S3-FIFO/TinyLFU remain research variants.
 - **M0 searchable metadata (in-memory only):** typed attribute schemas, stable volume/inode IDs, ordered index postings, atomic in-memory update publication, immutable snapshots, equality/range/prefix/membership queries, and a full-scan differential oracle. See [M0 design and limits](docs/M0_SEARCHABLE_ATTRIBUTES.md).
+- **F0 storage prototype:** regular-file block image with 4 KiB blocks, alternating checksummed roots, ordered two-barrier publication, and crash/torn-write simulation. This is a **disposable test-image format**, not a mounted filesystem. See [F0 durability protocol](docs/F0_STORAGE.md).
 - **Not implemented:** production disk format, mounts, persistent block-device driver, transactional allocator, **durable** indexes, persistent snapshot retention, authorization-aware queries, Windows/Linux adapters.
 
 ## Searchable metadata design
@@ -27,6 +28,7 @@ Install Rust 1.85 or later. From the repository root:
 ```sh
 cargo test --workspace --all-targets
 cargo test -p bfs-ng-attribute-index
+cargo test -p bfs-ng-storage
 cargo run --release -p bfs-ng-cache-lab -- demo --events 50000 --seed 42 --capacity-bytes 1048576
 cargo run --release -p bfs-ng-cache-lab -- sweep --input crates/cache-lab/fixtures/golden.csv --capacities 4096,8192,16384
 python3 crates/cache-lab/scripts/lru_oracle.py crates/cache-lab/fixtures/golden.csv 8192
@@ -41,6 +43,7 @@ Cargo.toml
 crates/cache-lab/     # Standalone safe-Rust trace simulator
 crates/metadata-cache/ # Generation-safe read-only metadata cache
 crates/attribute-index/ # M0 typed in-memory query/index reference
+crates/storage/         # F0 disposable block-image prototype
 benchmarks/real-world/ # AxiomZig/DVE/AxiomMegaDoc access-pattern harness
 docs/ARCHITECTURE.md  # Design decisions and roadmap
 .github/workflows/    # Compilation, tests, lint and golden replay
