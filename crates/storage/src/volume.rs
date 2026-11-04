@@ -275,6 +275,36 @@ impl<D: BlockDevice> Volume<D> {
         Ok(block)
     }
 
+    /// All structurally valid F0 roots with checksummed payloads. Callers
+    /// must independently verify F1 trees before considering blocks reusable.
+    /// A valid F0 slot is not proof that its higher-level tree is intact.
+    pub(crate) fn candidate_roots(&mut self) -> Result<Vec<(RootInfo, Option<Vec<u8>>)>> {
+        let mut roots = Vec::new();
+        for slot in 0..2 {
+            let mut raw = [0; BLOCK_SIZE];
+            self.device.read_block(slot, &mut raw)?;
+            let Some(head) = Super::decode(&raw, slot, self.head.blocks) else {
+                continue;
+            };
+            if head.volume_id != self.head.volume_id {
+                return Err(Error::InconsistentVolume);
+            }
+            if let Some(payload) = read_payload(&mut self.device, head)? {
+                roots.push((
+                    head.info(),
+                    head.root_block.map(|_| payload),
+                ));
+            }
+        }
+        roots.sort_by_key(|(info, _)| info.generation);
+        Ok(roots)
+    }
+
+    /// Allow F1 to examine child blocks without exposing raw-device writes.
+    pub(crate) fn inspect<R>(&mut self, f: impl FnOnce(&mut D) -> Result<R>) -> Result<R> {
+        f(&mut self.device)
+    }
+
     /// Reopens a volume, selecting the highest complete and checksummed root.
     /// A damaged latest root falls back to the previous valid slot. A malformed
     /// image with no valid root is refused, never silently formatted.
