@@ -93,10 +93,7 @@ fn bounded_retirement_sweep_resumes_after_power_loss() {
     // The 32-block budget applies to *new promotions*, not to the entire
     // ready journal: safely abandoned same-transaction nodes may already
     // be ready from prior generations.
-    assert!(
-        g3.journal_deferred_blocks
-            >= g2.journal_pending_blocks.saturating_sub(32)
-    );
+    assert!(g3.journal_deferred_blocks >= g2.journal_pending_blocks.saturating_sub(32));
     assert!(g3.journal_ready_blocks <= g3.reclaimable_blocks);
     assert!(g3.journal_deferred_blocks > 0);
     let (device, gen3, _, cursor3) = sweep_cursor(fs.into_device().power_loss());
