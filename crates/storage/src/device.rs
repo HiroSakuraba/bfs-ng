@@ -21,7 +21,7 @@ pub struct FileDevice {
 
 impl FileDevice {
     pub fn create_new(path: impl AsRef<Path>, blocks: u64) -> Result<Self> {
-        if blocks < 4 {
+        if blocks < 5 {
             return Err(Error::Geometry);
         }
         let length = blocks
@@ -45,7 +45,7 @@ impl FileDevice {
         }
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let length = file.metadata()?.len();
-        if length < 4 * BLOCK_SIZE as u64 || length % BLOCK_SIZE as u64 != 0 {
+        if length < 5 * BLOCK_SIZE as u64 || length % BLOCK_SIZE as u64 != 0 {
             return Err(Error::Geometry);
         }
         Ok(Self {
