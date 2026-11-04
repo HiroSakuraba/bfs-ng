@@ -49,6 +49,32 @@ F0-only `Volume::commit_root()` uses steps 3–6. F2/F3 `commit_root_with_blocks
 - Minimum image geometry is five blocks for F0 alone. F1/F2 needs additional blocks above 4 and may still run out of capacity based on workload and free space.
 - **Old v1/v8 test images are rejected, not silently remapped.** Recreate a disposable image to use v2/v9.
 
+## Additional F2.R4 staging-accounting correction
+
+The new >image-blocks endurance workload revealed a separate, pre-existing
+F2.R4 leak: CoW namespace and physical-reference index updates may create
+several intermediate pages before retaining only the final reachable path.
+The final staged write set correctly discarded those pages, but the certified
+allocator failed to return their *reserved addresses* to the durable ready
+pool. Independent full-tree scrub saw abundant unowned space even as the
+fast allocator exhausted its virgin cursor.
+
+F0.R1 therefore also returns the addresses of discarded, **never-published**
+staged nodes to `Builder.reusable` in both `discard_superseded_nodes` and
+`discard_intermediate`, *before* the journal is built. Those addresses were
+allocated from a previously certified ready set or virgin space and were
+not referenced by either recoverable F0 candidate. The staged reachable
+namespace and reference trees are verified before publication, and the new
+journal is independently decoded and later full-scrub-checked. Discarded
+pages can safely appear as ready immediately; unlike pages retired from an
+**already published** F0 candidate, they need no fallback-rotation epoch.
+
+This means a v9 journal may contain ready blocks even at generation 2,
+while g1's fallback-owned physical blocks remain pending until rotation.
+Tests now identify forged *pending* entries rather than assuming the first
+journal entry must be pending, and distinguish newly promoted sweep blocks
+from previously proven, never-published staged blocks.
+
 ## Tests
 
 - `storage_f0`: 240 root-payload publications on a **five-block** image; both root candidates remain recoverable across repeated ring rollover. Corrupt latest superblocks and latest payloads after rollover and verify clean fallback. Inject torn writes/sync failures at all four F0 publication steps after the first wrap.
