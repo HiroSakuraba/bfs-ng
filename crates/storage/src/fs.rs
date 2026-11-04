@@ -1124,8 +1124,33 @@ impl<D: BlockDevice> FileSystem<D> {
             tree_root: 0,
             snapshots: tx.snapshots,
             records: tx.records,
+            catalog: tx.catalog,
         };
-        for (path, bytes) in tx.new_data {
+        let mut new_data = tx.new_data;
+        if tx.catalog_dirty {
+            let contents = state.catalog.as_ref()
+                .ok_or(Error::Attribute("cannot clear an installed schema".into()))?
+                .encode()?;
+            let inode = match state.records.get(INTERNAL_PATH) {
+                Some(existing) if !existing.directory => existing.inode,
+                Some(_) => return Err(Error::CorruptTree),
+                None => {
+                    let id = state.next_inode;
+                    state.next_inode = id.checked_add(1)
+                        .ok_or(Error::GenerationOverflow)?;
+                    state.records.insert(INTERNAL_PATH.into(), Record::file(id));
+                    id
+                }
+            };
+            if inode < 2 || state.records.len() > MAX_RECORDS {
+                return Err(Error::NoSpace);
+            }
+            new_data.insert(INTERNAL_PATH.into(), contents);
+        }
+        if let Some(catalog) = &state.catalog {
+            catalog.validate_files(&state.records)?;
+        }
+        for (path, bytes) in new_data {
             let entry = state.records.get_mut(&path).ok_or(Error::CorruptTree)?;
             if bytes.is_empty() {
                 *entry = Record::file(entry.inode);
