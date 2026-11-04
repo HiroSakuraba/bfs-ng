@@ -954,6 +954,7 @@ pub struct FileSystem<D: BlockDevice> {
     volume: Volume<D>,
     state: State,
     last_metadata_blocks_written: usize,
+    last_reference_pages_written: usize,
 }
 
 impl<D: BlockDevice> FileSystem<D> {
@@ -964,6 +965,7 @@ impl<D: BlockDevice> FileSystem<D> {
             volume,
             state,
             last_metadata_blocks_written: 0,
+            last_reference_pages_written: 0,
         })
     }
 
@@ -973,6 +975,7 @@ impl<D: BlockDevice> FileSystem<D> {
             volume,
             state,
             last_metadata_blocks_written: 0,
+            last_reference_pages_written: 0,
         })
     }
 
@@ -1066,6 +1069,12 @@ impl<D: BlockDevice> FileSystem<D> {
     /// This diagnostic is non-durable and is reset on image reopen.
     pub fn last_metadata_blocks_written(&self) -> usize {
         self.last_metadata_blocks_written
+    }
+
+    /// Physical CoW reference-index pages written by the last committed
+    /// transaction. This excludes discarded intermediate path copies.
+    pub fn last_reference_pages_written(&self) -> usize {
+        self.last_reference_pages_written
     }
 
     /// Persistent, read-only snapshot generation IDs.
@@ -1549,10 +1558,12 @@ impl<D: BlockDevice> FileSystem<D> {
             &counts,
         )?;
         state.cursor = builder.cursor;
+        let reference_writes = reference_index::staged_page_count(&builder);
         let manifest = root_manifest(&state, generation);
         self.volume
             .commit_root_with_blocks(&builder.staged, &manifest)?;
         self.last_metadata_blocks_written = metadata_writes;
+        self.last_reference_pages_written = reference_writes;
         self.state = state;
         Ok(generation)
     }
