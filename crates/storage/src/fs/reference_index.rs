@@ -338,9 +338,7 @@ fn inspect<D: BlockDevice>(
                 Ok(*last)
             }
             Page::Branch { level, children } => {
-                if expected_level.is_some_and(|expected| expected != level)
-                    || (is_root && children.len() == 1)
-                {
+                if expected_level.is_some_and(|expected| expected != level) {
                     return Err(Error::CorruptTree);
                 }
                 for child in children {
