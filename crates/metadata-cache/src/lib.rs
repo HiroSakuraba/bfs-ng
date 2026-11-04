@@ -54,20 +54,16 @@ pub enum CacheError {
     BadMagic,
     UnsupportedFormat(u16),
     InvalidReservedBits,
-    WrongIdentity {
-        expected: BlockKey,
-        found: BlockKey,
-    },
-    ChecksumMismatch {
-        stored: u32,
-        computed: u32,
-    },
+    WrongIdentity { expected: BlockKey, found: BlockKey },
+    ChecksumMismatch { stored: u32, computed: u32 },
 }
 
 impl fmt::Display for CacheError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidBlockSize => write!(f, "metadata block must be at least {HEADER_LEN} bytes"),
+            Self::InvalidBlockSize => {
+                write!(f, "metadata block must be at least {HEADER_LEN} bytes")
+            }
             Self::Device(e) => write!(f, "block device: {e}"),
             Self::LockPoisoned => write!(f, "cache lock poisoned"),
             Self::BadMagic => write!(f, "metadata magic mismatch"),
