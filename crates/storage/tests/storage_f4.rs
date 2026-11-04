@@ -3,7 +3,6 @@ use bfs_ng_storage::{
     FileDevice, FileSystem, Predicate, Schema, TextCase, Value, BLOCK_SIZE,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 fn schema() -> Schema {
     Schema::new(vec![
