@@ -1,4 +1,6 @@
-# F0 — experimental block image and root publication
+# F0 — historical v1 append-only block image and root publication
+
+**Historical reference only.** This document describes the original v1 disk layout. F0.R1 now uses the [three-block rotating payload allocator](F0_R1_ROTATING_ROOTS.md), superblock version 2 and F2/F3 manifest version 9. The v1 rules below are **not** valid for newly formatted images.
 
 **Status: committed implementation prototype. Not a usable filesystem, not safe for irreplaceable data.**
 
