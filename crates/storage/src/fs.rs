@@ -9,7 +9,7 @@ mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
 mod tree_cow;
-use tree_cow::{discard_superseded_nodes, patch_tree};
+use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
 const META_MAGIC: &[u8; 8] = b"BFSNGM4\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
@@ -900,6 +900,16 @@ pub struct AllocationReport {
     pub reuse_blocked: bool,
 }
 
+/// Page of checksummed on-disk F3 namespace entries. `next_after` is only
+/// valid for the same prefix and generation; stale live cursors are rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamespacePage {
+    pub generation: u64,
+    pub entries: Vec<(String, Stat)>,
+    pub next_after: Option<String>,
+    pub metadata_pages_read: usize,
+}
+
 /// F2 image namespace with pinned historical roots and reachability-checked
 /// allocation reuse. Still a single-writer disposable test-image prototype.
 pub struct FileSystem<D: BlockDevice> {
@@ -1131,6 +1141,96 @@ impl<D: BlockDevice> FileSystem<D> {
 
     fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
         self.allocation_state().map(|(_, free)| free)
+    }
+
+    fn range_page(
+        &mut self,
+        root: SnapshotRoot,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<NamespacePage> {
+        if prefix != "/" {
+            validate_user_path(prefix)?;
+        }
+        if let Some(previous) = after {
+            validate_user_path(previous)?;
+            if !previous.starts_with(prefix) {
+                return Err(Error::InvalidPath);
+            }
+        }
+        if limit == 0 || limit > 512 {
+            return Err(Error::TooLarge);
+        }
+        let (mut rows, metadata_pages_read) = scan_pages(
+            &mut self.volume,
+            root.tree_root,
+            root.generation,
+            root.cursor,
+            prefix,
+            after,
+            limit,
+        )?;
+        let more = rows.len() > limit;
+        if more {
+            rows.truncate(limit);
+        }
+        let next_after = if more {
+            rows.last().map(|(key, _)| key.clone())
+        } else {
+            None
+        };
+        let entries = rows.into_iter().map(|(path, record)| {
+            let stat = Stat {
+                inode: record.inode,
+                directory: record.directory,
+                bytes: record.length,
+                generation: root.generation,
+            };
+            (path, stat)
+        }).collect();
+        Ok(NamespacePage {
+            generation: root.generation,
+            entries,
+            next_after,
+            metadata_pages_read,
+        })
+    }
+
+    /// Direct on-disk, checksummed lexicographic namespace traversal.
+    /// Unlike list_dir, this does not consult the materialized file map.
+    /// The caller must present the expected root generation at every page.
+    pub fn scan_files_disk(
+        &mut self,
+        expected_generation: u64,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<NamespacePage> {
+        if expected_generation != self.generation() {
+            return Err(Error::StaleTransaction);
+        }
+        let root = SnapshotRoot {
+            generation: self.generation(),
+            cursor: self.state.cursor,
+            tree_root: self.state.tree_root,
+            next_inode: self.state.next_inode,
+            record_count: self.state.records.len() as u64,
+        };
+        self.range_page(root, prefix, after, limit)
+    }
+
+    /// Same on-disk range traversal for a retained, immutable snapshot.
+    pub fn scan_snapshot_files_disk(
+        &mut self,
+        generation: u64,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<NamespacePage> {
+        let root = *self.state.snapshots.get(&generation)
+            .ok_or(Error::InvalidSnapshot)?;
+        self.range_page(root, prefix, after, limit)
     }
 
     pub fn stat(&self, path: &str) -> Result<Stat> {
