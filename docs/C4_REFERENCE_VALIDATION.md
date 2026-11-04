@@ -27,6 +27,10 @@ Traces with speculative access, size-mutating identities, zero sizes or zero cap
 
 ## Reproducibility and acceptance
 
-The `reference-comparison.yml` manual GitHub Actions workflow pins libCacheSim 0.3.5, records installed distribution versions, and uploads evidence as JSON. It is intentionally **not a required branch-protection check** while the upstream Python package version remains unpinned.
+The `reference-comparison.yml` GitHub Actions workflow pins libCacheSim 0.3.5, records installed distribution versions, and uploads evidence as JSON. It is intentionally **not a required branch-protection check** while the upstream Python package version remains unpinned.
 
 C4 is only independently validated once that job completes successfully, artifacts have been preserved, the exact upstream version is recorded and unexpected LRU mismatches investigated. A subsequent tranche can drive Caffeine's own simulator and align TinyLFU configuration in more depth.
+
+## First observed differential results (libCacheSim 0.3.5)
+
+On the 5,000-event mixed workload at 262,144 bytes, the independent LRU control matched exactly (4,602 misses each). The Rust S3-FIFO research variant had 4,248 misses versus 3,616 for libCacheSim; Rust W-TinyLFU had 3,689 versus 3,321 after aligning the minimum admission window to 4 KiB. This is **not algorithm conformance**, nor a general performance ranking. The original 5-event golden trace also matched LRU exactly (3 misses). The workflow archives JSON including byte-miss totals because request and byte outcomes can move in opposite directions.

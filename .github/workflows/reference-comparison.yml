@@ -40,13 +40,21 @@ jobs:
           python crates/cache-lab/scripts/compare_libcachesim.py \
             --trace c4-mixed.csv --capacity 262144 \
             --require-lru-match --output c4-mixed.json
+      - name: Cross-check other workload families and cache sizes
+        run: |
+          for pattern in hotset scan phase; do
+            cargo run --release -p bfs-ng-cache-lab -- generate               --output "c4-${pattern}.csv" --events 5000 --seed 42 --pattern "$pattern"
+            for capacity in 262144 1048576; do
+              python crates/cache-lab/scripts/compare_libcachesim.py                 --trace "c4-${pattern}.csv" --capacity "$capacity"                 --require-lru-match --output "c4-${pattern}-${capacity}.json"
+            done
+          done
+          python crates/cache-lab/scripts/compare_libcachesim.py             --trace c4-mixed.csv --capacity 1048576 --require-lru-match             --output c4-mixed-1048576.json
       - name: Upload comparison evidence
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: c4-independent-reference
           path: |
-            c4-golden.json
-            c4-mixed.json
+            c4-*.json
             c4-reference-versions.txt
           if-no-files-found: warn
