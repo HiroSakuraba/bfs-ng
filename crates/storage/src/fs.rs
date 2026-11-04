@@ -1530,11 +1530,12 @@ impl<D: BlockDevice> FileSystem<D> {
                 &state.snapshots,
             )?
         };
-        let previous = if self.state.reference.first != 0 {
+        let prior_header = self.state.reference;
+        let prior_generation = self.generation();
+        let prior_cursor = self.state.cursor;
+        let previous = if prior_header.first != 0 {
             self.volume.inspect(|device| {
-                reference_index::read(
-                    device, self.state.reference, self.generation(), self.state.cursor,
-                )
+                reference_index::read(device, prior_header, prior_generation, prior_cursor)
             })?.0
         } else {
             BTreeMap::new()
