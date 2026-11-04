@@ -1,8 +1,11 @@
-//! F1: bounded, append-only CoW namespace with checksummed metadata/data.
-//! This intentionally rewrites the *entire* sorted tree per transaction.
+//! F3: incremental CoW B+tree-style namespace on an F2 safe allocator.
+//! New generations copy modified leaves and ancestors, sharing untouched nodes.
 use crate::volume::{RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod tree_cow;
+use tree_cow::{discard_superseded_nodes, patch_tree};
 
 const META_MAGIC: &[u8; 8] = b"BFSNGM2\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
@@ -780,18 +783,27 @@ fn load_state<D: BlockDevice>(
 pub struct FileSystem<D: BlockDevice> {
     volume: Volume<D>,
     state: State,
+    last_metadata_blocks_written: usize,
 }
 
 impl<D: BlockDevice> FileSystem<D> {
     pub fn format(device: D, volume_id: u128) -> Result<Self> {
         let volume = Volume::format(device, volume_id)?;
         let state = State::empty(volume.block_count());
-        Ok(Self { volume, state })
+        Ok(Self {
+            volume,
+            state,
+            last_metadata_blocks_written: 0,
+        })
     }
 
     pub fn open(device: D) -> Result<Self> {
         let (volume, state) = Volume::open_verified(device, load_state)?;
-        Ok(Self { volume, state })
+        Ok(Self {
+            volume,
+            state,
+            last_metadata_blocks_written: 0,
+        })
     }
 
     pub fn generation(&self) -> u64 {
@@ -804,6 +816,12 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn file_count(&self) -> usize {
         self.state.records.len()
+    }
+
+    /// Physical metadata-node writes in the last successful commit.
+    /// This diagnostic is non-durable and is reset on image reopen.
+    pub fn last_metadata_blocks_written(&self) -> usize {
+        self.last_metadata_blocks_written
     }
 
     /// Persistent, read-only snapshot generation IDs.
@@ -996,12 +1014,47 @@ impl<D: BlockDevice> FileSystem<D> {
             entry.checksum = crc32c(&bytes);
             entry.birth_generation = generation;
         }
-        let root_node = build_nodes(&mut builder, &state.records, generation)?;
+        // F3: initial tree construction remains a compact bottom-up bulk
+        // load; subsequent transactions copy only changed leaves and their
+        // ancestor paths. Snapshot-only changes copy no metadata nodes.
+        let mut root_node = self.state.tree_root;
+        if root_node == 0 {
+            if !state.records.is_empty() {
+                root_node = build_nodes(&mut builder, &state.records, generation)?;
+            }
+        } else {
+            let mut deltas: Vec<(String, Option<Record>)> = Vec::new();
+            for (path, value) in &state.records {
+                if self.state.records.get(path) != Some(value) {
+                    deltas.push((path.clone(), Some(value.clone())));
+                }
+            }
+            for path in self.state.records.keys() {
+                if !state.records.contains_key(path) {
+                    deltas.push((path.clone(), None));
+                }
+            }
+            deltas.sort_by(|a, b| a.0.cmp(&b.0));
+            for (path, value) in &deltas {
+                root_node = patch_tree(
+                    &mut self.volume,
+                    &mut builder,
+                    root_node,
+                    path,
+                    value.as_ref(),
+                    generation,
+                )?;
+            }
+        }
+        // A multi-key transaction may supersede intermediate path copies.
+        // Only final-root reachable staged nodes are written to disk.
+        let metadata_writes = discard_superseded_nodes(&mut builder, root_node)?;
         state.cursor = builder.cursor;
         state.tree_root = root_node;
         let manifest = root_manifest(&state, generation);
         self.volume
             .commit_root_with_blocks(&builder.staged, &manifest)?;
+        self.last_metadata_blocks_written = metadata_writes;
         self.state = state;
         Ok(generation)
     }
