@@ -360,14 +360,15 @@ fn data_read<D: BlockDevice>(
             .then(Vec::new));
     }
     if record.length == 0 {
-        return Ok(
-            (record.start == 0 && record.count == 0 && record.checksum == crc32c(&[])
-                && record.birth_generation == 0)
-                .then(Vec::new),
-        );
+        return Ok((record.start == 0
+            && record.count == 0
+            && record.checksum == crc32c(&[])
+            && record.birth_generation == 0)
+            .then(Vec::new));
     }
     let len = usize::try_from(record.length).map_err(|_| Error::CorruptTree)?;
-    if len > MAX_DATA || record.count as usize != len.div_ceil(CHUNK)
+    if len > MAX_DATA
+        || record.count as usize != len.div_ceil(CHUNK)
         || record.birth_generation == 0
         || record.birth_generation > generation
         || record.birth_generation > u32::MAX as u64
@@ -634,10 +635,7 @@ fn read_nodes<D: BlockDevice>(
 /// A snapshot uses its original generation and cursor, not the live root's.
 type TreeContents = (BTreeMap<String, Record>, BTreeSet<u64>);
 
-fn load_tree<D: BlockDevice>(
-    device: &mut D,
-    root: SnapshotRoot,
-) -> Result<Option<TreeContents>> {
+fn load_tree<D: BlockDevice>(device: &mut D, root: SnapshotRoot) -> Result<Option<TreeContents>> {
     if root.generation == 0
         || root.cursor <= root.generation.saturating_add(1)
         || root.cursor > device.block_count()
@@ -676,23 +674,24 @@ fn load_tree<D: BlockDevice>(
             return Ok(None);
         }
         if record.directory {
-            if record.start != 0 || record.count != 0
-                || record.length != 0 || record.checksum != 0
+            if record.start != 0
+                || record.count != 0
+                || record.length != 0
+                || record.checksum != 0
                 || record.birth_generation != 0
             {
                 return Ok(None);
             }
         } else {
-            if record.length > MAX_DATA as u64
-                || record.count as usize > MAX_DATA.div_ceil(CHUNK)
-            {
+            if record.length > MAX_DATA as u64 || record.count as usize > MAX_DATA.div_ceil(CHUNK) {
                 return Ok(None);
             }
             if record.count > 0 {
                 let Some(end) = record.start.checked_add(record.count as u64) else {
                     return Ok(None);
                 };
-                if record.start < root.cursor || record.start <= root.generation + 1
+                if record.start < root.cursor
+                    || record.start <= root.generation + 1
                     || end > device.block_count()
                 {
                     return Ok(None);
@@ -815,7 +814,11 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Read a pinned historical file and recheck its recorded content checksum.
     pub fn read_snapshot_file(&mut self, generation: u64, path: &str) -> Result<Vec<u8>> {
         validate_path(path)?;
-        let snap = *self.state.snapshots.get(&generation).ok_or(Error::InvalidSnapshot)?;
+        let snap = *self
+            .state
+            .snapshots
+            .get(&generation)
+            .ok_or(Error::InvalidSnapshot)?;
         self.volume.inspect(|device| {
             let (records, _) = load_tree(device, snap)?.ok_or(Error::CorruptTree)?;
             let record = records.get(path).ok_or(Error::NotFound)?;
@@ -835,9 +838,10 @@ impl<D: BlockDevice> FileSystem<D> {
         let candidates = self.volume.candidate_roots()?;
         let mut protected = BTreeSet::new();
         for (info, payload) in candidates {
-            let Some(state) = self.volume.inspect(|device| {
-                load_state(device, info, payload.as_deref())
-            })? else {
+            let Some(state) = self
+                .volume
+                .inspect(|device| load_state(device, info, payload.as_deref()))?
+            else {
                 return Ok(BTreeSet::new());
             };
             if info.generation == 0 {
@@ -851,9 +855,8 @@ impl<D: BlockDevice> FileSystem<D> {
                 record_count: state.records.len() as u64,
             };
             for held in std::iter::once(root).chain(state.snapshots.values().copied()) {
-                let Some((_, owned)) = self.volume.inspect(|device| {
-                    load_tree(device, held)
-                })? else {
+                let Some((_, owned)) = self.volume.inspect(|device| load_tree(device, held))?
+                else {
                     return Ok(BTreeSet::new());
                 };
                 protected.extend(owned);

@@ -290,10 +290,7 @@ impl<D: BlockDevice> Volume<D> {
                 return Err(Error::InconsistentVolume);
             }
             if let Some(payload) = read_payload(&mut self.device, head)? {
-                roots.push((
-                    head.info(),
-                    head.root_block.map(|_| payload),
-                ));
+                roots.push((head.info(), head.root_block.map(|_| payload)));
             }
         }
         roots.sort_by_key(|(info, _)| info.generation);
