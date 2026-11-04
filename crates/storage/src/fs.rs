@@ -1240,7 +1240,7 @@ impl<D: BlockDevice> FileSystem<D> {
         // The older root's exclusive blocks are released only AFTER
         // successfully publishing the new generation; the new journal
         // may list them as ready, but cannot allocate from them today.
-        let rotated_out: BTreeSet<u64> = if slot_owned.len() == 2 && !suspect {
+        let mut rotated_out: BTreeSet<u64> = if slot_owned.len() == 2 && !suspect {
             let mut iter = slot_owned.values();
             let old = iter.next().expect("two slots");
             let newest = iter.next().expect("two slots");
@@ -1258,7 +1258,7 @@ impl<D: BlockDevice> FileSystem<D> {
         };
         // Fail closed if ownership is unknown for *any* F0-checksummed
         // root candidate. Even an unreferenced-looking block may be live.
-        let free = if suspect {
+        let mut free = if suspect {
             BTreeSet::new()
         } else {
             (self.state.cursor..total)
@@ -1282,7 +1282,9 @@ impl<D: BlockDevice> FileSystem<D> {
         if !suspect && checkpoint.as_ref().is_some_and(|journal| {
             !journal.ready.is_subset(&free)
         }) {
-            return Err(Error::CorruptTree);
+            suspect = true;
+            free.clear();
+            rotated_out.clear();
         }
         let next_root = self.generation().saturating_add(2);
         let report = AllocationReport {
