@@ -36,3 +36,8 @@ Next: F3 incremental CoW B+tree updates and a durable, independently checked ref
 
 - [Btrfs CoW and reference-counted extents](https://btrfs.readthedocs.io/en/stable/dev/dev-btrfs-design.html)
 - [OpenZFS copy-on-write and block birth transactions](https://github.com/openzfs/openzfs-docs/blob/master/docs/Basic%20Concepts/Copy-on-write.rst)
+
+
+## F2 follow-up — allocation audit
+
+The [F2/F3 backlog batch](F2_F3_BACKLOG_CLOSEOUT.md) adds a read-only, independently rebuilt `AllocationReport`, including shared-block accounting, reclaimable-block availability, root-slot exhaustion estimates and quarantine when an F0-valid candidate has corrupt higher-level metadata. This remains a verified full-scan oracle; **no durable free-space/refcount tree or compaction is implemented**.
