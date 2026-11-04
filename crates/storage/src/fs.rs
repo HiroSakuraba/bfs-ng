@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
-mod tree_cow;
 mod reference_index;
+mod tree_cow;
 use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
@@ -1145,12 +1145,7 @@ impl<D: BlockDevice> FileSystem<D> {
             // outside its F3 tree and must be protected while either F0 slot
             // can recover them, including while a snapshot pin is dropped.
             let Ok((_, index_blocks)) = self.volume.inspect(|device| {
-                reference_index::read(
-                    device,
-                    state.reference,
-                    info.generation,
-                    state.cursor,
-                )
+                reference_index::read(device, state.reference, info.generation, state.cursor)
             }) else {
                 suspect = true;
                 continue;
@@ -1540,9 +1535,7 @@ impl<D: BlockDevice> BlockDevice for StagedReader<'_, D> {
         self.volume.block_count()
     }
     fn read_block(&mut self, number: u64, bytes: &mut [u8; BLOCK_SIZE]) -> Result<()> {
-        if let Some((_, staged)) = self.staged.iter().rev()
-            .find(|(block, _)| *block == number)
-        {
+        if let Some((_, staged)) = self.staged.iter().rev().find(|(block, _)| *block == number) {
             *bytes = *staged;
             return Ok(());
         }

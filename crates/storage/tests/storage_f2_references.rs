@@ -1,8 +1,8 @@
 //! F2.R1: durable reference counts are never authoritative without the
 //! independent live + snapshot graph reconstruction.
 use bfs_ng_storage::{
-    AllocationReport, AttributeDef, AttributeType, BlockDevice, CrashDevice, Error,
-    Fault, FileSystem, Predicate, Schema, TextCase, Value, Volume, BLOCK_SIZE,
+    AllocationReport, AttributeDef, AttributeType, BLOCK_SIZE, BlockDevice, CrashDevice, Error,
+    Fault, FileSystem, Predicate, Schema, TextCase, Value, Volume,
 };
 
 fn blank(blocks: usize) -> FileSystem<CrashDevice> {
@@ -22,9 +22,9 @@ fn index_header(device: CrashDevice) -> (CrashDevice, u64, u32, u32) {
     let snap_count = u32::from_le_bytes(manifest[56..60].try_into().unwrap()) as usize;
     let offset = 64 + snap_count * 40;
     assert_eq!(&manifest[..8], b"BFSNGM5\0");
-    let first = u64::from_le_bytes(manifest[offset..offset+8].try_into().unwrap());
-    let pages = u32::from_le_bytes(manifest[offset+8..offset+12].try_into().unwrap());
-    let entries = u32::from_le_bytes(manifest[offset+12..offset+16].try_into().unwrap());
+    let first = u64::from_le_bytes(manifest[offset..offset + 8].try_into().unwrap());
+    let pages = u32::from_le_bytes(manifest[offset + 8..offset + 12].try_into().unwrap());
+    let entries = u32::from_le_bytes(manifest[offset + 12..offset + 16].try_into().unwrap());
     (vol.into_device(), first, pages, entries)
 }
 fn observed(fs: &mut FileSystem<CrashDevice>) -> AllocationReport {
@@ -44,7 +44,10 @@ fn checksummed_reference_index_persists_across_reopen_and_commits() {
     assert!(report.reference_index_entries >= 2); // data + metadata
     fs = reopened(fs);
     assert_eq!(fs.read_file("/record").unwrap(), b"g1");
-    assert_eq!(observed(&mut fs).reference_index_entries, report.reference_index_entries);
+    assert_eq!(
+        observed(&mut fs).reference_index_entries,
+        report.reference_index_entries
+    );
     write(&mut fs, b"g2");
     write(&mut fs, b"g3");
     let report = observed(&mut fs);
@@ -85,7 +88,10 @@ fn snapshot_root_retains_indexed_blocks_and_file_data_after_replacement() {
     assert!(before.root_candidates >= 1);
     fs = reopened(fs);
     assert_eq!(fs.read_file("/record").unwrap(), b"unpin 4");
-    assert!(matches!(fs.read_snapshot_file(1, "/record"), Err(Error::InvalidSnapshot)));
+    assert!(matches!(
+        fs.read_snapshot_file(1, "/record"),
+        Err(Error::InvalidSnapshot)
+    ));
 }
 
 #[test]
@@ -99,7 +105,10 @@ fn multi_page_reference_chain_is_sorted_and_recovers_large_namespace() {
     }
     fs.commit(tx).unwrap();
     let report = observed(&mut fs);
-    assert!(report.reference_index_entries > 405, "test must span reference pages");
+    assert!(
+        report.reference_index_entries > 405,
+        "test must span reference pages"
+    );
     assert!(report.reference_index_pages >= 2);
     let (mut device, first, pages, entries) = index_header(fs.into_device().power_loss());
     assert!(first > 2 && pages >= 2 && entries > 405);
@@ -122,8 +131,10 @@ fn corrupted_latest_reference_page_rolls_back_without_exposing_new_data() {
     let mut recovered = FileSystem::open(device).unwrap();
     assert_eq!(recovered.generation(), 1);
     assert_eq!(recovered.read_file("/record").unwrap(), b"old");
-    assert!(recovered.allocation_report().unwrap().reuse_blocked,
-        "corrupt F0-valid candidate cannot allow block reuse");
+    assert!(
+        recovered.allocation_report().unwrap().reuse_blocked,
+        "corrupt F0-valid candidate cannot allow block reuse"
+    );
 }
 
 fn crc32c(data: &[u8]) -> u32 {
@@ -168,7 +179,8 @@ fn invalid_reference_link_is_rejected_without_unsafe_reclamation() {
     let mut tx = fs.begin();
     tx.mkdir("/data").unwrap();
     for n in 0..95 {
-        tx.write_file(&format!("/data/f{n:03}"), &vec![n as u8; 19000]).unwrap();
+        tx.write_file(&format!("/data/f{n:03}"), &vec![n as u8; 19000])
+            .unwrap();
     }
     fs.commit(tx).unwrap();
     let mut second = fs.begin();
@@ -197,7 +209,12 @@ fn crash_injections_publish_whole_namespace_and_reference_index_only() {
             let mut fs = blank(128);
             write(&mut fs, b"before");
             let mut device = fs.into_device();
-            device.inject(Fault { operation, torn_bytes }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes,
+                })
+                .unwrap();
             let mut fs = FileSystem::open(device).unwrap();
             let mut tx = fs.begin();
             tx.write_file("/record", b"after").unwrap();
@@ -205,8 +222,10 @@ fn crash_injections_publish_whole_namespace_and_reference_index_only() {
             assert!(result.is_ok() || matches!(result, Err(Error::InjectedCrash)));
             let mut fs = reopened(fs);
             let value = fs.read_file("/record").unwrap();
-            assert!(value == b"before" || value == b"after",
-                "mixed or damaged generation at operation={operation}, torn={torn_bytes:?}");
+            assert!(
+                value == b"before" || value == b"after",
+                "mixed or damaged generation at operation={operation}, torn={torn_bytes:?}"
+            );
             let allocation = fs.allocation_report().unwrap();
             // All accepted roots have a valid independently checked index.
             assert!(allocation.reference_index_pages >= 1);
@@ -219,31 +238,50 @@ fn crash_injections_publish_whole_namespace_and_reference_index_only() {
 fn f4_attributes_and_reference_catalog_advance_in_same_root() {
     let mut fs = blank(256);
     let mut tx = fs.begin();
-    tx.install_schema(Schema::new(vec![AttributeDef {
-        id: 1, name: "asset.kind".into(),
-        ty: AttributeType::Text { case: TextCase::AsciiFold, max_bytes: 40 },
-        indexed: true,
-    }]).unwrap()).unwrap();
+    tx.install_schema(
+        Schema::new(vec![AttributeDef {
+            id: 1,
+            name: "asset.kind".into(),
+            ty: AttributeType::Text {
+                case: TextCase::AsciiFold,
+                max_bytes: 40,
+            },
+            indexed: true,
+        }])
+        .unwrap(),
+    )
+    .unwrap();
     tx.write_file("/material", b"alpha").unwrap();
-    tx.set_attributes("/material", [
-        ("asset.kind".into(), Value::Text("SHADER".into())),
-    ]).unwrap();
+    tx.set_attributes(
+        "/material",
+        [("asset.kind".into(), Value::Text("SHADER".into()))],
+    )
+    .unwrap();
     fs.commit(tx).unwrap();
     let mut tx = fs.begin();
     tx.pin_snapshot().unwrap();
     tx.write_file("/material", b"beta").unwrap();
-    tx.set_attributes("/material", [
-        ("asset.kind".into(), Value::Text("MATERIAL".into())),
-    ]).unwrap();
+    tx.set_attributes(
+        "/material",
+        [("asset.kind".into(), Value::Text("MATERIAL".into()))],
+    )
+    .unwrap();
     fs.commit(tx).unwrap();
     fs = reopened(fs);
-    let current = fs.search_attributes(&[
-        Predicate::eq("asset.kind", Value::Text("material".into())),
-    ], 10).unwrap();
+    let current = fs
+        .search_attributes(
+            &[Predicate::eq("asset.kind", Value::Text("material".into()))],
+            10,
+        )
+        .unwrap();
     assert_eq!(current.files.len(), 1);
-    let old = fs.search_snapshot_attributes(1, &[
-        Predicate::eq("asset.kind", Value::Text("shader".into())),
-    ], 10).unwrap();
+    let old = fs
+        .search_snapshot_attributes(
+            1,
+            &[Predicate::eq("asset.kind", Value::Text("shader".into()))],
+            10,
+        )
+        .unwrap();
     assert_eq!(old.files.len(), 1);
     assert_eq!(fs.read_snapshot_file(1, "/material").unwrap(), b"alpha");
     assert!(!observed(&mut fs).reuse_blocked);

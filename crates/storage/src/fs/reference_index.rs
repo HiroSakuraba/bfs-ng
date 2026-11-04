@@ -9,8 +9,7 @@
 //! The persisted entries are untrusted: load_state independently traverses
 //! current and pinned trees and rejects an index not exactly matching them.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, seal, u16_at, u64_at,
-    valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, Result, seal, u16_at, u64_at, valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -135,7 +134,8 @@ pub(super) fn read<D: BlockDevice>(
         }
         next = u64_at(&block, 16);
     }
-    if next != 0 || counts.len() != header.entries as usize
+    if next != 0
+        || counts.len() != header.entries as usize
         || index_pages.iter().any(|block| counts.contains_key(block))
     {
         return Err(Error::CorruptTree);
