@@ -72,6 +72,7 @@ impl State {
 /// Mutates a private namespace copy. All changes publish atomically only when
 /// FileSystem::commit succeeds. No concurrent image handles or OS file locks.
 pub struct FsTransaction {
+    volume_id: u128,
     base_generation: u64,
     next_inode: u64,
     records: BTreeMap<String, Record>,
@@ -478,6 +479,11 @@ fn read_nodes<D: BlockDevice>(
             return Ok(None);
         }
         if kind == 0 {
+            // Depth-first traversal must produce a globally increasing path
+            // sequence; child maximum keys alone are not sufficient.
+            if out.keys().next_back().is_some_and(|previous| key <= *previous) {
+                return Ok(None);
+            }
             let Some(raw) = rd.take(33) else {
                 return Ok(None);
             };
@@ -708,6 +714,7 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn begin(&self) -> FsTransaction {
         FsTransaction {
+            volume_id: self.volume.info().volume_id,
             base_generation: self.generation(),
             next_inode: self.state.next_inode,
             records: self.state.records.clone(),
@@ -717,6 +724,9 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     pub fn commit(&mut self, tx: FsTransaction) -> Result<u64> {
+        if tx.volume_id != self.volume.info().volume_id {
+            return Err(Error::InconsistentVolume);
+        }
         if tx.base_generation != self.generation() {
             return Err(Error::StaleTransaction);
         }

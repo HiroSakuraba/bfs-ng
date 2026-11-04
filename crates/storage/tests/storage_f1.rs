@@ -259,6 +259,20 @@ impl Drop for Temp {
 }
 
 #[test]
+fn cross_volume_transaction_rejected_even_at_same_generation() {
+    let first = FileSystem::format(CrashDevice::new(48), 0x11).unwrap();
+    let mut second = FileSystem::format(CrashDevice::new(48), 0x22).unwrap();
+    let mut tx = first.begin();
+    tx.write_file("/foreign", b"should-not-commit").unwrap();
+    assert!(matches!(
+        second.commit(tx),
+        Err(Error::InconsistentVolume)
+    ));
+    assert_eq!(second.file_count(), 0);
+    assert_eq!(second.generation(), 0);
+}
+
+#[test]
 fn actual_file_image_persists_records_across_commits() {
     let path = Temp::new();
     let mut fs = FileSystem::format(FileDevice::create_new(&path.0, 96).unwrap(), 0x44).unwrap();
