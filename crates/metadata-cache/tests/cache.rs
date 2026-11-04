@@ -8,7 +8,10 @@ use std::sync::{Arc, RwLock};
 const SIZE: usize = 128;
 
 fn r(physical_block: u64, allocation_generation: u64) -> BlockRef {
-    BlockRef { physical_block, allocation_generation }
+    BlockRef {
+        physical_block,
+        allocation_generation,
+    }
 }
 
 fn snap(generation: u64) -> Snapshot {
@@ -114,7 +117,10 @@ fn corrupted_payload_never_cached() {
 fn error_does_not_poison_cache() {
     let device = Arc::new(MemoryReader::default());
     let cache = MetadataCache::new(device.clone(), SIZE, SIZE).unwrap();
-    assert!(matches!(cache.get(snap(1), r(8, 1)), Err(CacheError::Device(_))));
+    assert!(matches!(
+        cache.get(snap(1), r(8, 1)),
+        Err(CacheError::Device(_))
+    ));
     device.put(8, encoded(snap(1), 8, 2));
     assert_eq!(cache.get(snap(1), r(8, 1)).unwrap().payload()[0], 2);
 }

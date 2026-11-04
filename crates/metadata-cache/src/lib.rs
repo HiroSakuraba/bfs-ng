@@ -62,9 +62,18 @@ pub enum CacheError {
     BadMagic,
     UnsupportedFormat(u16),
     InvalidReservedBits,
-    WrongIdentity { expected: BlockKey, found: BlockKey },
-    FutureReference { snapshot_generation: u64, block_generation: u64 },
-    ChecksumMismatch { stored: u32, computed: u32 },
+    WrongIdentity {
+        expected: BlockKey,
+        found: BlockKey,
+    },
+    FutureReference {
+        snapshot_generation: u64,
+        block_generation: u64,
+    },
+    ChecksumMismatch {
+        stored: u32,
+        computed: u32,
+    },
 }
 
 impl fmt::Display for CacheError {
@@ -81,8 +90,14 @@ impl fmt::Display for CacheError {
             Self::WrongIdentity { expected, found } => {
                 write!(f, "expected metadata {expected:?}, found {found:?}")
             }
-            Self::FutureReference { snapshot_generation, block_generation } => {
-                write!(f, "block generation {block_generation} is newer than snapshot {snapshot_generation}")
+            Self::FutureReference {
+                snapshot_generation,
+                block_generation,
+            } => {
+                write!(
+                    f,
+                    "block generation {block_generation} is newer than snapshot {snapshot_generation}"
+                )
             }
             Self::ChecksumMismatch { stored, computed } => {
                 write!(f, "checksum mismatch {stored:08x} != {computed:08x}")
@@ -303,7 +318,10 @@ mod tests {
             volume: 1,
             generation: 1,
         }
-        .key(BlockRef { physical_block: 1, allocation_generation: 1 });
+        .key(BlockRef {
+            physical_block: 1,
+            allocation_generation: 1,
+        });
         assert!(matches!(
             validate_block(vec![0; 32], key),
             Err(CacheError::InvalidBlockSize)
