@@ -632,10 +632,12 @@ fn read_nodes<D: BlockDevice>(
 
 /// Verifies a complete immutable tree and returns its exact data/node reachability.
 /// A snapshot uses its original generation and cursor, not the live root's.
+type TreeContents = (BTreeMap<String, Record>, BTreeSet<u64>);
+
 fn load_tree<D: BlockDevice>(
     device: &mut D,
     root: SnapshotRoot,
-) -> Result<Option<(BTreeMap<String, Record>, BTreeSet<u64>)>> {
+) -> Result<Option<TreeContents>> {
     if root.generation == 0
         || root.cursor <= root.generation.saturating_add(1)
         || root.cursor > device.block_count()
