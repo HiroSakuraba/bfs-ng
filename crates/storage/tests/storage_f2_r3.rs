@@ -19,7 +19,7 @@ fn checkpoint_header(device: CrashDevice) -> (CrashDevice, u64, u32, u32, u64) {
     let mut volume = Volume::open(device).unwrap();
     let generation = volume.info().generation;
     let payload = volume.read_root().unwrap().unwrap();
-    assert_eq!(&payload[..8], b"BFSNGM8\0");
+    assert_eq!(&payload[..8], b"BFSNGM9\0");
     let pins = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let offset = 64 + pins * 40 + 16;
     let first = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
@@ -130,8 +130,8 @@ fn corrupted_f0_payload_with_valid_superblock_never_authorizes_reuse() {
     write(&mut fs, b"original");
     write(&mut fs, b"latest");
     let mut device = fs.into_device().power_loss();
-    // F0 is still the generation+1 payload protocol: the old g1 payload
-    // is block 2 and remains referenced by its valid F0 superblock.
+    // The old g1 payload occupies ring block 2 and remains referenced by
+    // its valid F0 superblock until that candidate is rotated out.
     device.corrupt_stable_for_testing(2, 56, 0x82);
     let mut fs = FileSystem::open(device.power_loss()).unwrap();
     assert_eq!(fs.generation(), 2);
