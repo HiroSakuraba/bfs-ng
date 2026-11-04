@@ -10,7 +10,7 @@ The cache rejects truncated blocks, bad headers, wrong generation/volume/address
 
 ## Read contract
 
-- Entries are keyed by `(volume, physical_block, generation)`, and returned as immutable `Arc<MetadataBlock>`.
+- Entries are keyed by `(volume, physical_block, block_allocation_generation)`, and returned as immutable `Arc<MetadataBlock>`.
 - Reference LRU has a resident-byte limit, but HashMap/Arc/queue bookkeeping is not charged against that budget.
 - No cache lock is held over a device read. Concurrent misses may duplicate physical reads; insertion rechecks the key under the lock.
 - Eviction drops the cache's ownership but does not revoke an already returned `Arc`. Zero budget performs read-through without retaining entries.
@@ -18,7 +18,7 @@ The cache rejects truncated blocks, bad headers, wrong generation/volume/address
 
 ### Critical allocator obligation
 
-Generation-tagged keys **prevent mistaken cache aliasing**, but do not prevent disk blocks from being reused prematurely. The CoW allocator and snapshot manager must retain physical blocks until **all** snapshots capable of referencing them have retired. If storage already contains a newer generation, the old-generation read must fail identity validation rather than silently accept newer contents.
+A snapshot carries its root generation; each CoW child reference separately carries the block's **allocation/birth generation**. Newer snapshots can therefore read unchanged older blocks, while future-generation references are rejected. Generation-tagged keys **prevent mistaken cache aliasing**, but do not prevent disk blocks from being reused prematurely. The CoW allocator and snapshot manager must retain physical blocks until **all** snapshots capable of referencing them have retired. If storage already contains a newer generation, the old-generation read must fail identity validation rather than silently accept newer contents.
 
 ## Tests
 

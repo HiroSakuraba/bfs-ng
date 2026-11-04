@@ -25,13 +25,21 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub const fn key(self, physical_block: u64) -> BlockKey {
+    pub const fn key(self, block: BlockRef) -> BlockKey {
         BlockKey {
             volume: self.volume,
-            physical_block,
-            generation: self.generation,
+            physical_block: block.physical_block,
+            generation: block.allocation_generation,
         }
     }
+}
+
+/// Reference to an immutable CoW metadata block. Its birth generation can
+/// precede the committed root generation of a snapshot that references it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockRef {
+    pub physical_block: u64,
+    pub allocation_generation: u64,
 }
 
 /// A complete physical block from a snapshot-compatible, stable backing store.
@@ -55,6 +63,7 @@ pub enum CacheError {
     UnsupportedFormat(u16),
     InvalidReservedBits,
     WrongIdentity { expected: BlockKey, found: BlockKey },
+    FutureReference { snapshot_generation: u64, block_generation: u64 },
     ChecksumMismatch { stored: u32, computed: u32 },
 }
 
@@ -71,6 +80,9 @@ impl fmt::Display for CacheError {
             Self::InvalidReservedBits => write!(f, "nonzero reserved metadata bits"),
             Self::WrongIdentity { expected, found } => {
                 write!(f, "expected metadata {expected:?}, found {found:?}")
+            }
+            Self::FutureReference { snapshot_generation, block_generation } => {
+                write!(f, "block generation {block_generation} is newer than snapshot {snapshot_generation}")
             }
             Self::ChecksumMismatch { stored, computed } => {
                 write!(f, "checksum mismatch {stored:08x} != {computed:08x}")
@@ -221,9 +233,15 @@ impl<D: BlockReader> MetadataCache<D> {
     pub fn get(
         &self,
         snapshot: Snapshot,
-        physical_block: u64,
+        block: BlockRef,
     ) -> Result<Arc<MetadataBlock>, CacheError> {
-        let key = snapshot.key(physical_block);
+        if block.allocation_generation > snapshot.generation {
+            return Err(CacheError::FutureReference {
+                snapshot_generation: snapshot.generation,
+                block_generation: block.allocation_generation,
+            });
+        }
+        let key = snapshot.key(block);
         {
             let mut state = self.state.lock().map_err(|_| CacheError::LockPoisoned)?;
             if let Some(hit) = state.blocks.get(&key).cloned() {
@@ -236,7 +254,7 @@ impl<D: BlockReader> MetadataCache<D> {
 
         // No mutex held while reading potentially slow storage.
         let mut bytes = vec![0; self.block_size];
-        self.device.read_block(physical_block, &mut bytes)?;
+        self.device.read_block(block.physical_block, &mut bytes)?;
         let candidate = Arc::new(validate_block(bytes, key)?);
         let mut state = self.state.lock().map_err(|_| CacheError::LockPoisoned)?;
         state.stats.validated_reads += 1;
@@ -285,7 +303,7 @@ mod tests {
             volume: 1,
             generation: 1,
         }
-        .key(1);
+        .key(BlockRef { physical_block: 1, allocation_generation: 1 });
         assert!(matches!(
             validate_block(vec![0; 32], key),
             Err(CacheError::InvalidBlockSize)
