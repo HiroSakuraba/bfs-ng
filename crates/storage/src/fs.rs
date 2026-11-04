@@ -9,12 +9,14 @@ mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
 mod tree_cow;
+mod reference_index;
+use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM4\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM5\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 4;
+const FORMAT: u32 = 5;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -80,6 +82,7 @@ struct State {
     snapshots: BTreeMap<u64, SnapshotRoot>,
     records: BTreeMap<String, Record>,
     catalog: Option<Catalog>,
+    reference: RefHeader,
 }
 
 impl State {
@@ -91,6 +94,7 @@ impl State {
             snapshots: BTreeMap::new(),
             records: BTreeMap::new(),
             catalog: None,
+            reference: RefHeader::default(),
         }
     }
 }
@@ -299,7 +303,8 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 /// Root payload format v2. The root slot CRC covers the complete manifest.
 /// Snapshot pins are included in the same commit as the live namespace.
 fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
-    let mut b = vec![0_u8; 64 + state.snapshots.len() * 40];
+    let catalog_end = 64 + state.snapshots.len() * 40;
+    let mut b = vec![0_u8; catalog_end + 16];
     b[..8].copy_from_slice(META_MAGIC);
     b[8..12].copy_from_slice(&FORMAT.to_le_bytes());
     b[16..24].copy_from_slice(&state.cursor.to_le_bytes());
@@ -316,6 +321,9 @@ fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
         b[at + 24..at + 32].copy_from_slice(&snap.next_inode.to_le_bytes());
         b[at + 32..at + 40].copy_from_slice(&snap.record_count.to_le_bytes());
     }
+    b[catalog_end..catalog_end + 8].copy_from_slice(&state.reference.first.to_le_bytes());
+    b[catalog_end + 8..catalog_end + 12].copy_from_slice(&state.reference.pages.to_le_bytes());
+    b[catalog_end + 12..catalog_end + 16].copy_from_slice(&state.reference.entries.to_le_bytes());
     b
 }
 
@@ -829,7 +837,7 @@ fn load_state<D: BlockDevice>(
         return Ok(None);
     }
     let snap_count = u32_at(bytes, 56) as usize;
-    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 {
+    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 16 {
         return Ok(None);
     }
     let root = SnapshotRoot {
@@ -870,6 +878,25 @@ fn load_state<D: BlockDevice>(
         last_generation = snap.generation;
         snapshots.insert(snap.generation, snap);
     }
+    let trailer = 64 + snap_count * 40;
+    let reference = RefHeader {
+        first: u64_at(bytes, trailer),
+        pages: u32_at(bytes, trailer + 8),
+        entries: u32_at(bytes, trailer + 12),
+    };
+    let Ok((persisted, _index_blocks)) =
+        reference_index::read(device, reference, root.generation, root.cursor)
+    else {
+        return Ok(None);
+    };
+    // Never trust a checksum alone for allocation safety. Reconstruct every
+    // reference independently from live/snapshot trees and compare exactly.
+    let Ok(reconstructed) = count_roots(device, root, &snapshots) else {
+        return Ok(None);
+    };
+    if persisted != reconstructed {
+        return Ok(None);
+    }
     Ok(Some(State {
         cursor: root.cursor,
         next_inode: root.next_inode,
@@ -877,6 +904,7 @@ fn load_state<D: BlockDevice>(
         snapshots,
         records,
         catalog,
+        reference,
     }))
 }
 
@@ -1356,6 +1384,7 @@ impl<D: BlockDevice> FileSystem<D> {
             snapshots: tx.snapshots,
             records: tx.records,
             catalog: tx.catalog,
+            reference: RefHeader::default(),
         };
         let mut new_data = tx.new_data;
         if tx.catalog_dirty {
@@ -1439,8 +1468,29 @@ impl<D: BlockDevice> FileSystem<D> {
         // A multi-key transaction may supersede intermediate path copies.
         // Only final-root reachable staged nodes are written to disk.
         let metadata_writes = discard_superseded_nodes(&mut builder, root_node)?;
-        state.cursor = builder.cursor;
         state.tree_root = root_node;
+        // Count newly published tree references using a read-only overlay of
+        // staged pages plus existing immutable blocks. A ref index page is
+        // itself protected by the owning F0 manifest, not its own postings.
+        let counts = {
+            let mut overlay = StagedReader {
+                volume: &mut self.volume,
+                staged: &builder.staged,
+            };
+            count_roots(
+                &mut overlay,
+                SnapshotRoot {
+                    generation,
+                    cursor: builder.cursor,
+                    tree_root: root_node,
+                    next_inode: state.next_inode,
+                    record_count: state.records.len() as u64,
+                },
+                &state.snapshots,
+            )?
+        };
+        state.reference = reference_index::persist(&mut builder, generation, &counts)?;
+        state.cursor = builder.cursor;
         let manifest = root_manifest(&state, generation);
         self.volume
             .commit_root_with_blocks(&builder.staged, &manifest)?;
@@ -1455,6 +1505,35 @@ impl<D: BlockDevice> FileSystem<D> {
 }
 
 /// Narrow read wrapper so FileSystem never exposes unfenced block writes.
+/// Read newly staged CoW pages before they have reached durable media;
+/// unchanged addresses continue to resolve to the old immutable image.
+/// Only used to construct and check F2.R1 reference counts before commit.
+struct StagedReader<'a, D: BlockDevice> {
+    volume: &'a mut Volume<D>,
+    staged: &'a [(u64, [u8; BLOCK_SIZE])],
+}
+impl<D: BlockDevice> BlockDevice for StagedReader<'_, D> {
+    fn block_count(&self) -> u64 {
+        self.volume.block_count()
+    }
+    fn read_block(&mut self, number: u64, bytes: &mut [u8; BLOCK_SIZE]) -> Result<()> {
+        if let Some((_, staged)) = self.staged.iter().rev()
+            .find(|(block, _)| *block == number)
+        {
+            *bytes = *staged;
+            return Ok(());
+        }
+        *bytes = self.volume.read_data_block(number)?;
+        Ok(())
+    }
+    fn write_block(&mut self, _block: u64, _bytes: &[u8; BLOCK_SIZE]) -> Result<()> {
+        Err(Error::Poisoned)
+    }
+    fn sync(&mut self) -> Result<()> {
+        Err(Error::Poisoned)
+    }
+}
+
 struct ReaderDevice<'a, D: BlockDevice> {
     volume: &'a mut Volume<D>,
 }
