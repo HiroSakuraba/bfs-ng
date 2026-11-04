@@ -3,14 +3,18 @@
 use crate::volume::{RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::{BTreeMap, BTreeSet};
+use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
+
+mod attributes;
+use attributes::{Catalog, INTERNAL_PATH};
 
 mod tree_cow;
 use tree_cow::{discard_superseded_nodes, patch_tree};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM2\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM4\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 4;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -75,6 +79,7 @@ struct State {
     tree_root: u64,
     snapshots: BTreeMap<u64, SnapshotRoot>,
     records: BTreeMap<String, Record>,
+    catalog: Option<Catalog>,
 }
 
 impl State {
@@ -85,6 +90,7 @@ impl State {
             tree_root: 0,
             snapshots: BTreeMap::new(),
             records: BTreeMap::new(),
+            catalog: None,
         }
     }
 }
@@ -97,12 +103,46 @@ pub struct FsTransaction {
     next_inode: u64,
     records: BTreeMap<String, Record>,
     new_data: BTreeMap<String, Vec<u8>>,
+    catalog: Option<Catalog>,
+    catalog_dirty: bool,
     snapshots: BTreeMap<u64, SnapshotRoot>,
     current_root: SnapshotRoot,
     dirty: bool,
 }
 
 impl FsTransaction {
+    /// Install an immutable per-volume typed schema. F4 intentionally
+    /// forbids changing it after the first successful publication.
+    pub fn install_schema(&mut self, schema: Schema) -> Result<()> {
+        if self.catalog.is_some() {
+            return Err(Error::Attribute("schema already installed".into()));
+        }
+        self.catalog = Some(Catalog::empty(schema)?);
+        self.catalog_dirty = true;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Atomically replace all attributes of an existing regular file.
+    /// Values are normalized against the same M0 schema used by queries.
+    pub fn set_attributes(
+        &mut self,
+        path: &str,
+        values: impl IntoIterator<Item = (String, Value)>,
+    ) -> Result<()> {
+        validate_user_path(path)?;
+        let file = self.records.get(path).ok_or(Error::NotFound)?;
+        if file.directory {
+            return Err(Error::IsDirectory);
+        }
+        let catalog = self.catalog.as_mut()
+            .ok_or(Error::Attribute("no schema installed".into()))?;
+        catalog.upsert(file.inode, values)?;
+        self.catalog_dirty = true;
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Keep the committed generation on which this transaction began.
     /// A snapshot is an immutable tree root, not a copied set of file bytes.
     pub fn pin_snapshot(&mut self) -> Result<u64> {
@@ -129,7 +169,7 @@ impl FsTransaction {
     }
 
     fn parent(&self, path: &str) -> Result<()> {
-        validate_path(path)?;
+        validate_user_path(path)?;
         let slash = path.rfind('/').ok_or(Error::InvalidPath)?;
         if slash == 0 {
             return Ok(());
@@ -183,20 +223,24 @@ impl FsTransaction {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
-        validate_path(path)?;
-        match self.records.get(path) {
+        validate_user_path(path)?;
+        let inode = match self.records.get(path) {
             None => return Err(Error::NotFound),
             Some(record) if record.directory => return Err(Error::IsDirectory),
-            _ => {}
-        }
+            Some(record) => record.inode,
+        };
         self.records.remove(path);
         self.new_data.remove(path);
+        if let Some(catalog) = &mut self.catalog {
+            catalog.remove(inode)?;
+            self.catalog_dirty = true;
+        }
         self.dirty = true;
         Ok(())
     }
 
     pub fn rmdir(&mut self, path: &str) -> Result<()> {
-        validate_path(path)?;
+        validate_user_path(path)?;
         match self.records.get(path) {
             None => return Err(Error::NotFound),
             Some(record) if !record.directory => return Err(Error::NotDirectory),
@@ -224,6 +268,17 @@ fn validate_path(path: &str) -> Result<()> {
             .skip(1)
             .any(|component| component.is_empty() || component == "." || component == "..")
     {
+        return Err(Error::InvalidPath);
+    }
+    Ok(())
+}
+
+/// Normal namespace APIs must never expose or modify F4's private
+/// transaction-coherent catalog file. Internal tree verification still uses
+/// validate_path, so historical roots can decode this ordinary F3 extent.
+fn validate_user_path(path: &str) -> Result<()> {
+    validate_path(path)?;
+    if path == INTERNAL_PATH {
         return Err(Error::InvalidPath);
     }
     Ok(())
