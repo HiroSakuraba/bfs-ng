@@ -2,8 +2,8 @@
 //! New generations copy modified leaves and ancestors, sharing untouched nodes.
 use crate::volume::{RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
-use std::collections::{BTreeMap, BTreeSet};
 use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
+use std::collections::{BTreeMap, BTreeSet};
 
 mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
@@ -135,7 +135,9 @@ impl FsTransaction {
         if file.directory {
             return Err(Error::IsDirectory);
         }
-        let catalog = self.catalog.as_mut()
+        let catalog = self
+            .catalog
+            .as_mut()
             .ok_or(Error::Attribute("no schema installed".into()))?;
         catalog.upsert(file.inode, values)?;
         self.catalog_dirty = true;
@@ -784,8 +786,7 @@ fn read_catalog<D: BlockDevice>(
     if record.directory {
         return Err(Error::CorruptTree);
     }
-    let raw = data_read(device, record, root.cursor, root.generation)?
-        .ok_or(Error::CorruptTree)?;
+    let raw = data_read(device, record, root.cursor, root.generation)?.ok_or(Error::CorruptTree)?;
     let catalog = Catalog::decode(&raw)?;
     catalog.validate_files(records)?;
     Ok(Some(catalog))
@@ -897,8 +898,7 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     pub fn file_count(&self) -> usize {
-        self.state.records.len()
-            - usize::from(self.state.records.contains_key(INTERNAL_PATH))
+        self.state.records.len() - usize::from(self.state.records.contains_key(INTERNAL_PATH))
     }
 
     pub fn schema(&self) -> Option<&Schema> {
@@ -907,21 +907,37 @@ impl<D: BlockDevice> FileSystem<D> {
 
     /// Indexed typed attribute search, using the persisted secondary posting
     /// set reconstructed and independently verified on mount.
-    pub fn search_attributes(
-        &self, predicates: &[Predicate], limit: usize,
-    ) -> Result<QueryResult> {
-        let catalog = self.state.catalog.as_ref()
+    pub fn search_attributes(&self, predicates: &[Predicate], limit: usize) -> Result<QueryResult> {
+        let catalog = self
+            .state
+            .catalog
+            .as_ref()
             .ok_or(Error::Attribute("no schema installed".into()))?;
-        catalog.query(self.volume.info().volume_id, self.generation(), predicates, limit)
+        catalog.query(
+            self.volume.info().volume_id,
+            self.generation(),
+            predicates,
+            limit,
+        )
     }
 
     /// Independent M0 record-scan oracle, bypassing the persisted postings.
     pub fn attribute_scan_oracle(
-        &self, predicates: &[Predicate], limit: usize,
+        &self,
+        predicates: &[Predicate],
+        limit: usize,
     ) -> Result<QueryResult> {
-        let catalog = self.state.catalog.as_ref()
+        let catalog = self
+            .state
+            .catalog
+            .as_ref()
             .ok_or(Error::Attribute("no schema installed".into()))?;
-        catalog.oracle(self.volume.info().volume_id, self.generation(), predicates, limit)
+        catalog.oracle(
+            self.volume.info().volume_id,
+            self.generation(),
+            predicates,
+            limit,
+        )
     }
 
     pub fn file_attributes(&self, path: &str) -> Result<BTreeMap<String, Value>> {
@@ -930,15 +946,26 @@ impl<D: BlockDevice> FileSystem<D> {
         if record.directory {
             return Err(Error::IsDirectory);
         }
-        Ok(self.state.catalog.as_ref().map(|c| c.get(record.inode))
+        Ok(self
+            .state
+            .catalog
+            .as_ref()
+            .map(|c| c.get(record.inode))
             .unwrap_or_default())
     }
 
     /// Snapshot-consistent indexed query across historical file IDs.
     pub fn search_snapshot_attributes(
-        &mut self, generation: u64, predicates: &[Predicate], limit: usize,
+        &mut self,
+        generation: u64,
+        predicates: &[Predicate],
+        limit: usize,
     ) -> Result<QueryResult> {
-        let root = *self.state.snapshots.get(&generation).ok_or(Error::InvalidSnapshot)?;
+        let root = *self
+            .state
+            .snapshots
+            .get(&generation)
+            .ok_or(Error::InvalidSnapshot)?;
         let volume = self.volume.info().volume_id;
         self.volume.inspect(|device| {
             let (records, _) = load_tree(device, root)?.ok_or(Error::CorruptTree)?;
@@ -1128,7 +1155,9 @@ impl<D: BlockDevice> FileSystem<D> {
         };
         let mut new_data = tx.new_data;
         if tx.catalog_dirty {
-            let contents = state.catalog.as_ref()
+            let contents = state
+                .catalog
+                .as_ref()
                 .ok_or(Error::Attribute("cannot clear an installed schema".into()))?
                 .encode()?;
             let inode = match state.records.get(INTERNAL_PATH) {
@@ -1136,8 +1165,7 @@ impl<D: BlockDevice> FileSystem<D> {
                 Some(_) => return Err(Error::CorruptTree),
                 None => {
                     let id = state.next_inode;
-                    state.next_inode = id.checked_add(1)
-                        .ok_or(Error::GenerationOverflow)?;
+                    state.next_inode = id.checked_add(1).ok_or(Error::GenerationOverflow)?;
                     state.records.insert(INTERNAL_PATH.into(), Record::file(id));
                     id
                 }

@@ -5,9 +5,11 @@ mod device;
 mod fs;
 mod volume;
 
+pub use bfs_ng_attribute_index::{
+    AttributeDef, AttributeType, FileId, Predicate, QueryResult, Schema, TextCase, Value,
+};
 pub use device::{BlockDevice, CrashDevice, Fault, FileDevice};
 pub use fs::{FileSystem, FsTransaction, Stat};
-pub use bfs_ng_attribute_index::{AttributeDef, AttributeType, FileId, Predicate, QueryResult, Schema, TextCase, Value};
 pub use volume::{RootInfo, Volume};
 
 pub const BLOCK_SIZE: usize = 4096;
