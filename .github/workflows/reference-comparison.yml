@@ -44,7 +44,13 @@ jobs:
       - name: Cross-check other workload families and cache sizes
         run: |
           for pattern in hotset scan phase; do
-            cargo run --release -p bfs-ng-cache-lab -- generate               --output "c4-${pattern}.csv" --events 5000 --seed 42 --pattern "$pattern"
+            events=5000
+            if [ "$pattern" = "phase" ]; then
+              # The phase pattern rotates its hot set every 10,000 requests;
+              # 50,000 events cross all four phases and revisit the first.
+              events=50000
+            fi
+            cargo run --release -p bfs-ng-cache-lab -- generate               --output "c4-${pattern}.csv" --events "$events" --seed 42 --pattern "$pattern"
             for capacity in 262144 1048576; do
               python crates/cache-lab/scripts/compare_libcachesim.py                 --trace "c4-${pattern}.csv" --capacity "$capacity"                 --require-lru-match --output "c4-${pattern}-${capacity}.json"
             done
