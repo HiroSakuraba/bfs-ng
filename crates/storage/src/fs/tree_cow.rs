@@ -2,8 +2,8 @@
 //! This is a bounded B+tree-style prototype: leaves may be underfilled after
 //! deletion. It is not a production-grade balanced B+tree implementation.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, FANOUT, NODE_MAGIC, Reader, Record, Result, Volume,
-    encode_branch, encode_leaf, u16_at, u32_at, u64_at, valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, FANOUT, NODE_MAGIC, ROOT_PAYLOAD_LAST, Reader, Record,
+    Result, Volume, encode_branch, encode_leaf, u16_at, u32_at, u64_at, valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
