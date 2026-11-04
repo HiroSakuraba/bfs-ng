@@ -10,7 +10,7 @@ fn blank(blocks: usize) -> FileSystem<CrashDevice> {
 fn ref_root(device: CrashDevice) -> (CrashDevice, u64, usize) {
     let mut volume = Volume::open(device).unwrap();
     let payload = volume.read_root().unwrap().unwrap();
-    assert_eq!(&payload[..8], b"BFSNGM8\0");
+    assert_eq!(&payload[..8], b"BFSNGM9\0");
     let snaps = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let off = 64 + snaps * 40;
     let first = u64::from_le_bytes(payload[off..off + 8].try_into().unwrap());
