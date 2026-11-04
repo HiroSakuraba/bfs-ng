@@ -336,12 +336,13 @@ fn valid_checksum(block: &[u8; BLOCK_SIZE]) -> bool {
     crc32c(&bytes) == stored
 }
 
-fn encode_data(inode: u64, index: u32, bytes: &[u8]) -> [u8; BLOCK_SIZE] {
+fn encode_data(inode: u64, index: u32, bytes: &[u8], generation: u32) -> [u8; BLOCK_SIZE] {
     let mut b = [0; BLOCK_SIZE];
     b[..8].copy_from_slice(DATA_MAGIC);
     b[8..16].copy_from_slice(&inode.to_le_bytes());
     b[16..20].copy_from_slice(&index.to_le_bytes());
     b[20..24].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+    b[28..32].copy_from_slice(&generation.to_le_bytes());
     b[32..32 + bytes.len()].copy_from_slice(bytes);
     seal(b)
 }
@@ -361,12 +362,17 @@ fn data_read<D: BlockDevice>(
     }
     if record.length == 0 {
         return Ok(
-            (record.start == 0 && record.count == 0 && record.checksum == crc32c(&[]))
+            (record.start == 0 && record.count == 0 && record.checksum == crc32c(&[])
+                && record.birth_generation == 0)
                 .then(Vec::new),
         );
     }
     let len = usize::try_from(record.length).map_err(|_| Error::CorruptTree)?;
-    if len > MAX_DATA || record.count as usize != len.div_ceil(CHUNK) {
+    if len > MAX_DATA || record.count as usize != len.div_ceil(CHUNK)
+        || record.birth_generation == 0
+        || record.birth_generation > generation
+        || record.birth_generation > u32::MAX as u64
+    {
         return Ok(None);
     }
     let end = record.start.checked_add(record.count as u64);
@@ -386,7 +392,7 @@ fn data_read<D: BlockDevice>(
             || u32_at(&b, 16) != i
             || u32_at(&b, 20) as usize != chunk_len
             || !valid_checksum(&b)
-            || b[28..32].iter().any(|n| *n != 0)
+            || u32_at(&b, 28) as u64 != record.birth_generation
             || b[32 + chunk_len..].iter().any(|n| *n != 0)
         {
             return Ok(None);
@@ -422,7 +428,7 @@ fn encode_leaf(entries: &[(&String, &Record)], generation: u64) -> Result<[u8; B
     let mut at = 32;
     for (path, record) in entries {
         put_key(&mut b, &mut at, path)?;
-        const LEN: usize = 33;
+        const LEN: usize = 41;
         if at + LEN > BLOCK_SIZE {
             return Err(Error::TooLarge);
         }
@@ -432,6 +438,7 @@ fn encode_leaf(entries: &[(&String, &Record)], generation: u64) -> Result<[u8; B
         b[at + 17..at + 21].copy_from_slice(&record.count.to_le_bytes());
         b[at + 21..at + 29].copy_from_slice(&record.length.to_le_bytes());
         b[at + 29..at + 33].copy_from_slice(&record.checksum.to_le_bytes());
+        b[at + 33..at + 41].copy_from_slice(&record.birth_generation.to_le_bytes());
         at += LEN;
     }
     Ok(seal(b))
@@ -575,7 +582,7 @@ fn read_nodes<D: BlockDevice>(
             {
                 return Ok(None);
             }
-            let Some(raw) = rd.take(33) else {
+            let Some(raw) = rd.take(41) else {
                 return Ok(None);
             };
             let inode = u64_at(raw, 0);
@@ -590,6 +597,7 @@ fn read_nodes<D: BlockDevice>(
                 count: u32_at(raw, 17),
                 length: u64_at(raw, 21),
                 checksum: u32_at(raw, 29),
+                birth_generation: u64_at(raw, 33),
             };
             if out.insert(key.clone(), record).is_some() || out.len() > MAX_RECORDS {
                 return Ok(None);
