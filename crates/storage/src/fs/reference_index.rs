@@ -5,9 +5,8 @@
 //! counted in their own postings. Each CoW page has a birth generation and CRC.
 //! Allocation MUST still protect both F0 candidates and verify their F3 graph.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, ROOT_PAYLOAD_LAST, StagedReader, Volume, seal,
-    u16_at, u64_at,
-    valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, ROOT_PAYLOAD_LAST, Result, StagedReader, Volume, seal,
+    u16_at, u64_at, valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
