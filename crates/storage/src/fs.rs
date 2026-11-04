@@ -8,17 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
+mod reclaim_cache;
 mod reclaim_ledger;
 mod reference_index;
+use reclaim_cache::Certificate;
 mod tree_cow;
 use reclaim_ledger::JournalHeader;
 use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM7\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM8\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 7;
+const FORMAT: u32 = 8;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -308,7 +310,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 /// Snapshot pins are included in the same commit as the live namespace.
 fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     let catalog_end = 64 + state.snapshots.len() * 40;
-    let mut b = vec![0_u8; catalog_end + 32];
+    let mut b = vec![0_u8; catalog_end + 40];
     b[..8].copy_from_slice(META_MAGIC);
     b[8..12].copy_from_slice(&FORMAT.to_le_bytes());
     b[16..24].copy_from_slice(&state.cursor.to_le_bytes());
@@ -331,6 +333,8 @@ fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     b[catalog_end + 16..catalog_end + 24].copy_from_slice(&state.journal.first.to_le_bytes());
     b[catalog_end + 24..catalog_end + 28].copy_from_slice(&state.journal.pages.to_le_bytes());
     b[catalog_end + 28..catalog_end + 32].copy_from_slice(&state.journal.runs.to_le_bytes());
+    b[catalog_end + 32..catalog_end + 40]
+        .copy_from_slice(&state.journal.sweep_cursor.to_le_bytes());
     b
 }
 
@@ -844,7 +848,7 @@ fn load_state<D: BlockDevice>(
         return Ok(None);
     }
     let snap_count = u32_at(bytes, 56) as usize;
-    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 32 {
+    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 40 {
         return Ok(None);
     }
     let root = SnapshotRoot {
@@ -895,6 +899,7 @@ fn load_state<D: BlockDevice>(
         first: u64_at(bytes, trailer + 16),
         pages: u32_at(bytes, trailer + 24),
         runs: u32_at(bytes, trailer + 28),
+        sweep_cursor: u64_at(bytes, trailer + 32),
     };
     let Ok((persisted, index_pages)) =
         reference_index::read(device, reference, root.generation, root.cursor)
@@ -906,6 +911,8 @@ fn load_state<D: BlockDevice>(
     };
     if !checkpoint.pages.is_disjoint(&index_pages)
         || !checkpoint.ready.is_disjoint(&checkpoint.pending)
+        || !checkpoint.ready.is_disjoint(&checkpoint.deferred)
+        || !checkpoint.pending.is_disjoint(&checkpoint.deferred)
     {
         return Ok(None);
     }
@@ -918,7 +925,7 @@ fn load_state<D: BlockDevice>(
         || checkpoint
             .ready
             .iter()
-            .chain(&checkpoint.pending)
+            .chain(&checkpoint.deferred)
             .any(|id| reconstructed.contains_key(id) || index_pages.contains(id))
         || checkpoint
             .pages
@@ -977,14 +984,18 @@ pub struct AllocationReport {
     /// Blocks in the selected root's delayed-free journal, eligible only
     /// after the next successful F0 candidate rotation.
     pub journal_pending_blocks: usize,
+    /// Safe but not yet sweep-verified retirements in the durable queue.
+    pub journal_deferred_blocks: usize,
 }
 
 /// Internal result of the independent two-root ownership scrub.
 struct Scrub {
     report: AllocationReport,
-    free: BTreeSet<u64>,
-    rotated_out: BTreeSet<u64>,
     current_owned: BTreeSet<u64>,
+    fallback_owned: BTreeSet<u64>,
+    ready: BTreeSet<u64>,
+    pending: BTreeSet<u64>,
+    deferred: BTreeSet<u64>,
 }
 
 /// Page of checksummed on-disk F3 namespace entries. `next_after` is only
@@ -1004,6 +1015,11 @@ pub struct FileSystem<D: BlockDevice> {
     state: State,
     last_metadata_blocks_written: usize,
     last_reference_pages_written: usize,
+    /// Certificate is valid only for this exact in-handle F0 generation.
+    certified: Option<Certificate>,
+    /// Number of independent full two-F0-root scans needed by commit.
+    certification_scans: u64,
+    last_commit_used_certificate: bool,
 }
 
 impl<D: BlockDevice> FileSystem<D> {
@@ -1015,6 +1031,9 @@ impl<D: BlockDevice> FileSystem<D> {
             state,
             last_metadata_blocks_written: 0,
             last_reference_pages_written: 0,
+            certified: None,
+            certification_scans: 0,
+            last_commit_used_certificate: false,
         })
     }
 
@@ -1025,6 +1044,9 @@ impl<D: BlockDevice> FileSystem<D> {
             state,
             last_metadata_blocks_written: 0,
             last_reference_pages_written: 0,
+            certified: None,
+            certification_scans: 0,
+            last_commit_used_certificate: false,
         })
     }
 
@@ -1242,6 +1264,11 @@ impl<D: BlockDevice> FileSystem<D> {
             .get(&self.generation())
             .cloned()
             .unwrap_or_default();
+        let fallback_owned = slot_owned
+            .range(..self.generation())
+            .next_back()
+            .map(|(_, owned)| owned.clone())
+            .unwrap_or_default();
         // The older root's exclusive blocks are released only AFTER
         // successfully publishing the new generation; the new journal
         // may list them as ready, but cannot allocate from them today.
@@ -1280,12 +1307,15 @@ impl<D: BlockDevice> FileSystem<D> {
         } else {
             None
         };
-        // Fail-closed witness check. A checksum-valid forged free run is not
-        // a proof that any of its addresses are free in both F0 candidates.
+        // A checksum-valid forged journal cannot create certified free
+        // space, disguise a fallback-owned pending block, or promote a
+        // quarantine entry. The full scan is the independent oracle.
         if !suspect
-            && checkpoint
-                .as_ref()
-                .is_some_and(|journal| !journal.ready.is_subset(&free))
+            && checkpoint.as_ref().is_some_and(|journal| {
+                !journal.ready.is_subset(&free)
+                    || !journal.deferred.is_subset(&free)
+                    || journal.pending != rotated_out
+            })
         {
             suspect = true;
             free.clear();
@@ -1312,12 +1342,21 @@ impl<D: BlockDevice> FileSystem<D> {
             reclaim_journal_runs: self.state.journal.runs as usize,
             journal_ready_blocks: checkpoint.as_ref().map_or(0, |j| j.ready.len()),
             journal_pending_blocks: checkpoint.as_ref().map_or(0, |j| j.pending.len()),
+            journal_deferred_blocks: checkpoint.as_ref().map_or(0, |j| j.deferred.len()),
         };
         Ok(Scrub {
             report,
-            free,
-            rotated_out,
             current_owned,
+            fallback_owned,
+            ready: checkpoint
+                .as_ref()
+                .map_or_else(BTreeSet::new, |j| j.ready.clone()),
+            pending: checkpoint
+                .as_ref()
+                .map_or_else(BTreeSet::new, |j| j.pending.clone()),
+            deferred: checkpoint
+                .as_ref()
+                .map_or_else(BTreeSet::new, |j| j.deferred.clone()),
         })
     }
 
@@ -1327,9 +1366,69 @@ impl<D: BlockDevice> FileSystem<D> {
         self.allocation_state().map(|scrub| scrub.report)
     }
 
-    fn reusable_blocks(&mut self) -> Result<(BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
-        self.allocation_state()
-            .map(|scrub| (scrub.free, scrub.rotated_out, scrub.current_owned))
+    /// One expensive independent certification per opened single-writer
+    /// handle. After that, only successful F0 publications advance the
+    /// ownership certificate; no speculative/staged state is trusted.
+    fn certified_for_commit(&mut self) -> Result<(Certificate, bool)> {
+        if let Some(cert) = &self.certified {
+            if cert.generation == self.generation() {
+                return Ok((cert.clone(), true));
+            }
+        }
+        let scrub = self.allocation_state()?;
+        self.certification_scans += 1;
+        let valid = !scrub.report.reuse_blocked;
+        let generation = self.generation();
+        let cache = Certificate {
+            generation,
+            current_owned: scrub.current_owned.clone(),
+            fallback_owned: if valid {
+                scrub.fallback_owned
+            } else {
+                // The prior F0 slot is not a trusted source for retirement.
+                // Commit only with virgin blocks; never promote its pages.
+                scrub.current_owned
+            },
+            ready: if valid { scrub.ready } else { BTreeSet::new() },
+            pending: if valid {
+                scrub.pending
+            } else {
+                BTreeSet::new()
+            },
+            deferred: if valid {
+                scrub.deferred
+            } else {
+                BTreeSet::new()
+            },
+            sweep_cursor: if valid {
+                self.state.journal.sweep_cursor
+            } else {
+                0
+            },
+        };
+        Ok((cache, false))
+    }
+
+    /// Independent full-graph scans needed to seed commit-time certificates.
+    /// Explicit read-only allocation reports remain independent scrubs.
+    pub fn certification_scans(&self) -> u64 {
+        self.certification_scans
+    }
+
+    /// True when the most recent successful commit used the in-handle
+    /// certificate rather than rebuilding allocation state from both roots.
+    pub fn last_commit_used_certificate(&self) -> bool {
+        self.last_commit_used_certificate
+    }
+
+    /// Advance at most one budget of deferred retirements and publish the
+    /// resulting progress cursor even without any namespace changes.
+    /// This uses the ordinary ordered F0 transaction and consumes a new
+    /// generation/root payload, so it is intentionally explicit.
+    pub fn reclaim_step(&mut self) -> Result<u64> {
+        let mut tx = self.begin();
+        tx.dirty = true;
+        self.commit(tx)
     }
 
     fn range_page(
@@ -1532,8 +1631,8 @@ impl<D: BlockDevice> FileSystem<D> {
         if root_block >= self.state.cursor {
             return Err(Error::NoSpace);
         }
-        let (reusable, rotated_out, current_owned) = self.reusable_blocks()?;
-        let mut builder = Builder::new(self.state.cursor, root_block, reusable);
+        let (certificate, from_cache) = self.certified_for_commit()?;
+        let mut builder = Builder::new(self.state.cursor, root_block, certificate.ready.clone());
         let mut state = State {
             cursor: self.state.cursor,
             next_inode: tx.next_inode,
@@ -1675,32 +1774,56 @@ impl<D: BlockDevice> FileSystem<D> {
             reference_index::read(&mut overlay, state.reference, generation, builder.cursor)?.1
         };
         let new_owned: BTreeSet<u64> = counts.keys().copied().chain(new_ref_pages).collect();
-        let pending: BTreeSet<u64> = current_owned.difference(&new_owned).copied().collect();
-        state.journal = reclaim_ledger::persist(&mut builder, generation, &rotated_out, &pending)?;
-        // Independently verify the complete staged journal before F0
-        // publication. Its pages must not alias the namespace/ref index.
-        {
+        let sweep = certificate.rotate(&new_owned, builder.cursor)?;
+        state.journal = reclaim_ledger::persist(
+            &mut builder,
+            generation,
+            &sweep.promoted,
+            &sweep.pending,
+            &sweep.deferred,
+            sweep.sweep_cursor,
+        )?;
+        // Read the actual staged checkpoint rather than assuming the writer's
+        // intended runs survived encoding. This also protects its pages
+        // against aliasing with all current namespace/ref-index blocks.
+        let checkpoint = {
             let mut overlay = StagedReader {
                 volume: &mut self.volume,
                 staged: &builder.staged,
             };
-            let checkpoint =
-                reclaim_ledger::read(&mut overlay, state.journal, generation, builder.cursor)?;
-            if !checkpoint.pages.is_disjoint(&new_owned)
-                || checkpoint
-                    .ready
-                    .iter()
-                    .chain(&checkpoint.pending)
-                    .any(|id| new_owned.contains(id))
-            {
-                return Err(Error::CorruptTree);
-            }
+            reclaim_ledger::read(&mut overlay, state.journal, generation, builder.cursor)?
+        };
+        if !checkpoint.pages.is_disjoint(&new_owned)
+            || checkpoint.ready != builder.reusable.union(&sweep.promoted).copied().collect()
+            || checkpoint.pending != sweep.pending
+            || checkpoint.deferred != sweep.deferred
+            || checkpoint
+                .ready
+                .iter()
+                .chain(&checkpoint.pending)
+                .chain(&checkpoint.deferred)
+                .any(|id| new_owned.contains(id))
+        {
+            return Err(Error::CorruptTree);
         }
+        let certified_new = Certificate {
+            generation,
+            fallback_owned: certificate.current_owned,
+            current_owned: new_owned.union(&checkpoint.pages).copied().collect(),
+            ready: checkpoint.ready,
+            pending: checkpoint.pending,
+            deferred: checkpoint.deferred,
+            sweep_cursor: state.journal.sweep_cursor,
+        };
         state.cursor = builder.cursor;
         let reference_writes = reference_index::staged_page_count(&builder);
         let manifest = root_manifest(&state, generation);
         self.volume
             .commit_root_with_blocks(&builder.staged, &manifest)?;
+        // NEVER install uncommitted certificate mutations. F0's final sync
+        // is the transaction's publication/ownership boundary.
+        self.certified = Some(certified_new);
+        self.last_commit_used_certificate = from_cache;
         self.last_metadata_blocks_written = metadata_writes;
         self.last_reference_pages_written = reference_writes;
         self.state = state;

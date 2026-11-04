@@ -78,13 +78,16 @@ fn append_only_old_blocks_become_reusable_only_after_fallback_retirement() {
     write(&mut fs, b"gen3"); // cannot overwrite gen2 (fallback)
     let cursor3 = fs.free_cursor();
     assert!(cursor3 < cursor2 && cursor2 < cursor1);
-    // At the start of generation 4, only g2/g3 are recoverable; g1 has
-    // left both slots and is no longer pinned, so its two blocks are free.
+    // R4 does not allocate from newly retired g1 pages during the g3
+    // transaction. Its bounded sweep first publishes them as ready; g4
+    // may now reuse those physical blocks, though the remaining metadata
+    // pages can still consume virgin space.
+    let g3 = fs.allocation_report().unwrap();
+    assert!(g3.journal_ready_blocks > 0);
     write(&mut fs, b"gen4");
-    assert_eq!(
-        fs.free_cursor(),
-        cursor3,
-        "expected safe physical block reuse"
+    assert!(
+        fs.free_cursor() <= cursor3 && fs.free_cursor() > cursor3.saturating_sub(4),
+        "at least one g4 page should reuse a previously certified block"
     );
     let mut fs = reopened(fs);
     assert_eq!(fs.read_file("/state").unwrap(), b"gen4");
@@ -257,17 +260,26 @@ fn snapshot_history_survives_real_file_image_close_reopen() {
 #[test]
 fn recoverability_of_current_and_old_roots_remains_after_repeated_reuse() {
     let mut fs = fresh();
+    let mut saw_reuse = false;
     for i in 0..14 {
+        let previous_cursor = fs.free_cursor();
         write(&mut fs, format!("seed {i}").as_bytes());
+        // Four immutable objects (data, namespace, reference and journal)
+        // are needed for a fresh one-record replacement in R4. Physical
+        // reuse reduces the number of virgin blocks consumed.
+        if i > 2 && previous_cursor.saturating_sub(fs.free_cursor()) < 4 {
+            saw_reuse = true;
+        }
         let mut fs2 = reopened(fs);
         assert_eq!(
             fs2.read_file("/state").unwrap(),
             format!("seed {i}").as_bytes()
         );
+        assert!(!fs2.allocation_report().unwrap().reuse_blocked);
         fs = fs2;
     }
     assert!(
-        fs.free_cursor() > 192 - 30,
-        "allocator should reuse older blocks"
+        saw_reuse,
+        "allocator must eventually reuse certified free blocks"
     );
 }

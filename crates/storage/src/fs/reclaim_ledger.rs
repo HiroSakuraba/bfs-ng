@@ -1,4 +1,4 @@
-//! F2.R3: crash-atomic, epoch-tagged free-run/reclamation checkpoint.
+//! F2.R4: crash-atomic free-run checkpoint with bounded resumption cursor.
 //!
 //! Each F0 manifest owns one immutable checked journal chain. "Ready" ranges
 //! are absent from BOTH recoverable roots after publication; "pending" ranges
@@ -14,7 +14,7 @@ use super::{
 };
 use std::collections::BTreeSet;
 
-const MAGIC: &[u8; 8] = b"BFSFRJ7\0";
+const MAGIC: &[u8; 8] = b"BFSFRJ8\0";
 const HEADER: usize = 32;
 const ENTRY: usize = 20;
 const PAGE_ENTRIES: usize = (BLOCK_SIZE - HEADER) / ENTRY;
@@ -25,6 +25,8 @@ pub(super) struct JournalHeader {
     pub first: u64,
     pub pages: u32,
     pub runs: u32,
+    /// Physical continuation address for the bounded deferred-free sweep.
+    pub sweep_cursor: u64,
 }
 
 #[derive(Debug)]
@@ -32,6 +34,7 @@ pub(super) struct Journal {
     pub pages: BTreeSet<u64>,
     pub ready: BTreeSet<u64>,
     pub pending: BTreeSet<u64>,
+    pub deferred: BTreeSet<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,15 +51,24 @@ fn valid_address(address: u64, generation: u64, cursor: u64, total: u64) -> bool
 fn encode_runs(
     ready: &BTreeSet<u64>,
     pending: &BTreeSet<u64>,
+    deferred: &BTreeSet<u64>,
     generation: u64,
 ) -> Result<Vec<Run>> {
-    let mut rows = Vec::with_capacity(ready.len().saturating_add(pending.len()));
+    let mut rows = Vec::with_capacity(
+        ready
+            .len()
+            .saturating_add(pending.len())
+            .saturating_add(deferred.len()),
+    );
     for &address in ready {
         rows.push((address, generation));
     }
     let next = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
     for &address in pending {
         rows.push((address, next));
+    }
+    for &address in deferred {
+        rows.push((address, 0));
     }
     rows.sort_unstable_by_key(|(address, _)| *address);
     let mut runs = Vec::<Run>::new();
@@ -90,28 +102,34 @@ fn encode_runs(
 pub(super) fn persist(
     builder: &mut Builder,
     generation: u64,
-    released_by_rotation: &BTreeSet<u64>,
+    promoted: &BTreeSet<u64>,
     pending: &BTreeSet<u64>,
+    deferred: &BTreeSet<u64>,
+    sweep_cursor: u64,
 ) -> Result<JournalHeader> {
-    if generation == 0 || generation == u64::MAX || !released_by_rotation.is_disjoint(pending) {
+    if generation == 0
+        || generation == u64::MAX
+        || !promoted.is_disjoint(pending)
+        || !promoted.is_disjoint(deferred)
+        || !pending.is_disjoint(deferred)
+        || (sweep_cursor != 0 && sweep_cursor < builder.cursor)
+    {
         return Err(Error::CorruptTree);
     }
     let mut addresses = Vec::new();
     let runs = loop {
-        let ready: BTreeSet<u64> = builder
-            .reusable
-            .union(released_by_rotation)
-            .copied()
-            .collect();
+        let ready: BTreeSet<u64> = builder.reusable.union(promoted).copied().collect();
         if !ready.is_disjoint(pending)
+            || !ready.is_disjoint(deferred)
             || ready
                 .iter()
                 .chain(pending)
+                .chain(deferred)
                 .any(|&id| !valid_address(id, generation, builder.cursor, u64::MAX))
         {
             return Err(Error::CorruptTree);
         }
-        let rows = encode_runs(&ready, pending, generation)?;
+        let rows = encode_runs(&ready, pending, deferred, generation)?;
         if rows.len() > (MAX_PAGES * PAGE_ENTRIES) {
             return Err(Error::TooLarge);
         }
@@ -146,6 +164,7 @@ pub(super) fn persist(
         first: addresses[0],
         pages: addresses.len() as u32,
         runs: runs.len() as u32,
+        sweep_cursor,
     })
 }
 
@@ -165,12 +184,15 @@ pub(super) fn read<D: BlockDevice>(
         || header.runs as usize > header.pages as usize * PAGE_ENTRIES
         || generation == 0
         || generation == u64::MAX
+        || (header.sweep_cursor != 0
+            && (header.sweep_cursor < cursor || header.sweep_cursor > device.block_count()))
     {
         return Err(Error::CorruptTree);
     }
     let mut pages = BTreeSet::new();
     let mut ready = BTreeSet::new();
     let mut pending = BTreeSet::new();
+    let mut deferred = BTreeSet::new();
     let mut next = header.first;
     let mut previous_end = None;
     let mut total_runs = 0usize;
@@ -208,7 +230,7 @@ pub(super) fn read<D: BlockDevice>(
                 || !valid_address(start, generation, cursor, device.block_count())
                 || end > device.block_count()
                 || previous_end.is_some_and(|last| start < last)
-                || (eligible != generation && eligible != generation + 1)
+                || (eligible != 0 && eligible != generation && eligible != generation + 1)
             {
                 return Err(Error::CorruptTree);
             }
@@ -221,6 +243,8 @@ pub(super) fn read<D: BlockDevice>(
             }
             let target = if eligible == generation {
                 &mut ready
+            } else if eligible == 0 {
+                &mut deferred
             } else {
                 &mut pending
             };
@@ -235,6 +259,8 @@ pub(super) fn read<D: BlockDevice>(
             .iter()
             .any(|id| ready.contains(id) || pending.contains(id))
         || !ready.is_disjoint(&pending)
+        || !ready.is_disjoint(&deferred)
+        || !pending.is_disjoint(&deferred)
     {
         return Err(Error::CorruptTree);
     }
@@ -242,5 +268,6 @@ pub(super) fn read<D: BlockDevice>(
         pages,
         ready,
         pending,
+        deferred,
     })
 }
