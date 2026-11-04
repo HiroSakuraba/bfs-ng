@@ -4,10 +4,11 @@ use crate::volume::{RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::{BTreeMap, BTreeSet};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM1\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM2\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
+const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
 const MAX_RECORDS: usize = 2048;
@@ -30,6 +31,8 @@ struct Record {
     count: u32,
     length: u64,
     checksum: u32,
+    /// Generation that first wrote this data extent; zero for no extent.
+    birth_generation: u64,
 }
 
 impl Record {
@@ -41,6 +44,7 @@ impl Record {
             count: 0,
             length: 0,
             checksum: 0,
+            birth_generation: 0,
         }
     }
 
@@ -53,9 +57,21 @@ impl Record {
 }
 
 #[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SnapshotRoot {
+    generation: u64,
+    tree_root: u64,
+    cursor: u64,
+    next_inode: u64,
+    record_count: u64,
+}
+
+#[derive(Clone)]
 struct State {
     cursor: u64,
     next_inode: u64,
+    tree_root: u64,
+    snapshots: BTreeMap<u64, SnapshotRoot>,
     records: BTreeMap<String, Record>,
 }
 
@@ -64,6 +80,8 @@ impl State {
         Self {
             cursor: blocks,
             next_inode: 2,
+            tree_root: 0,
+            snapshots: BTreeMap::new(),
             records: BTreeMap::new(),
         }
     }
@@ -77,10 +95,37 @@ pub struct FsTransaction {
     next_inode: u64,
     records: BTreeMap<String, Record>,
     new_data: BTreeMap<String, Vec<u8>>,
+    snapshots: BTreeMap<u64, SnapshotRoot>,
+    current_root: SnapshotRoot,
     dirty: bool,
 }
 
 impl FsTransaction {
+    /// Keep the committed generation on which this transaction began.
+    /// A snapshot is an immutable tree root, not a copied set of file bytes.
+    pub fn pin_snapshot(&mut self) -> Result<u64> {
+        if self.current_root.generation == 0 {
+            return Err(Error::InvalidSnapshot);
+        }
+        let generation = self.current_root.generation;
+        if !self.snapshots.contains_key(&generation) && self.snapshots.len() >= MAX_SNAPSHOTS {
+            return Err(Error::NoSpace);
+        }
+        self.snapshots.insert(generation, self.current_root);
+        self.dirty = true;
+        Ok(generation)
+    }
+
+    /// Dropping a pin only makes its blocks *eligible* for reclamation after
+    /// the pin removal commits and all fallback roots stop referring to it.
+    pub fn drop_snapshot(&mut self, generation: u64) -> Result<()> {
+        if self.snapshots.remove(&generation).is_none() {
+            return Err(Error::InvalidSnapshot);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     fn parent(&self, path: &str) -> Result<()> {
         validate_path(path)?;
         let slash = path.rfind('/').ok_or(Error::InvalidPath)?;
@@ -192,34 +237,76 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("fixed length"))
 }
 
-fn root_manifest(state: &State, root_node: u64, generation: u64) -> [u8; 56] {
-    let mut b = [0_u8; 56];
+/// Root payload format v2. The root slot CRC covers the complete manifest.
+/// Snapshot pins are included in the same commit as the live namespace.
+fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
+    let mut b = vec![0_u8; 64 + state.snapshots.len() * 40];
     b[..8].copy_from_slice(META_MAGIC);
     b[8..12].copy_from_slice(&FORMAT.to_le_bytes());
     b[16..24].copy_from_slice(&state.cursor.to_le_bytes());
-    b[24..32].copy_from_slice(&root_node.to_le_bytes());
+    b[24..32].copy_from_slice(&state.tree_root.to_le_bytes());
     b[32..40].copy_from_slice(&state.next_inode.to_le_bytes());
     b[40..48].copy_from_slice(&(state.records.len() as u64).to_le_bytes());
     b[48..56].copy_from_slice(&generation.to_le_bytes());
+    b[56..60].copy_from_slice(&(state.snapshots.len() as u32).to_le_bytes());
+    for (i, snap) in state.snapshots.values().enumerate() {
+        let at = 64 + i * 40;
+        b[at..at + 8].copy_from_slice(&snap.generation.to_le_bytes());
+        b[at + 8..at + 16].copy_from_slice(&snap.tree_root.to_le_bytes());
+        b[at + 16..at + 24].copy_from_slice(&snap.cursor.to_le_bytes());
+        b[at + 24..at + 32].copy_from_slice(&snap.next_inode.to_le_bytes());
+        b[at + 32..at + 40].copy_from_slice(&snap.record_count.to_le_bytes());
+    }
     b
 }
 
+/// Allocates only blocks absent from every recoverable root and pinned tree.
+/// Reusable addresses are drawn first; otherwise the high cursor descends.
 struct Builder {
     cursor: u64,
     root_limit: u64,
+    reusable: BTreeSet<u64>,
     staged: Vec<(u64, [u8; BLOCK_SIZE])>,
 }
 
 impl Builder {
-    fn new(cursor: u64, next_root: u64) -> Self {
+    fn new(cursor: u64, next_root: u64, reusable: BTreeSet<u64>) -> Self {
         Self {
             cursor,
             root_limit: next_root,
+            reusable,
             staged: Vec::new(),
         }
     }
 
     fn reserve(&mut self, amount: u64) -> Result<u64> {
+        if amount == 0 {
+            return Err(Error::Geometry);
+        }
+        // A file's extent is contiguous. Find a complete run in the
+        // recovered free set; never merge unrelated holes into an extent.
+        let mut run_start = None;
+        let mut last = 0;
+        let mut run_len = 0;
+        for &address in &self.reusable {
+            if address <= self.root_limit {
+                continue;
+            }
+            if run_start.is_some() && last.checked_add(1) == Some(address) {
+                run_len += 1;
+            } else {
+                run_start = Some(address);
+                run_len = 1;
+            }
+            last = address;
+            if run_len == amount {
+                let start = run_start.expect("nonempty run");
+                for id in start..start + amount {
+                    self.reusable.remove(&id);
+                }
+                return Ok(start);
+            }
+        }
         let start = self.cursor.checked_sub(amount).ok_or(Error::NoSpace)?;
         if start <= self.root_limit {
             return Err(Error::NoSpace);
