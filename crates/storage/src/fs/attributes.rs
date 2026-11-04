@@ -497,3 +497,32 @@ impl<'a> Decoder<'a> {
     }
     fn finished(&self)->bool {self.pos==self.data.len()}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_postings_must_exactly_match_independent_reconstruction() {
+        let schema = Schema::new(vec![AttributeDef {
+            id: 7,
+            name: "asset.kind".into(),
+            ty: AttributeType::Text {
+                case: TextCase::AsciiFold,
+                max_bytes: 32,
+            },
+            indexed: true,
+        }]).unwrap();
+        let mut catalog = Catalog::empty(schema).unwrap();
+        catalog.upsert(3, [("asset.kind".into(), Value::Text("SHADER".into()))])
+            .unwrap();
+        let bytes = catalog.encode().unwrap();
+        assert_eq!(Catalog::decode(&bytes).unwrap().get(3)["asset.kind"],
+            Value::Text("shader".into()));
+        let mut tampered = bytes;
+        let tail = tampered.len() - 1;
+        tampered[tail] ^= 0x01;
+        assert!(Catalog::decode(&tampered).is_err(),
+            "changed posting inode cannot be accepted by the row oracle");
+    }
+}
