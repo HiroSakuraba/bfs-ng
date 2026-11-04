@@ -790,12 +790,20 @@ impl<D: BlockDevice> FileSystem<D> {
     pub fn format(device: D, volume_id: u128) -> Result<Self> {
         let volume = Volume::format(device, volume_id)?;
         let state = State::empty(volume.block_count());
-        Ok(Self { volume, state, last_metadata_blocks_written: 0 })
+        Ok(Self {
+            volume,
+            state,
+            last_metadata_blocks_written: 0,
+        })
     }
 
     pub fn open(device: D) -> Result<Self> {
         let (volume, state) = Volume::open_verified(device, load_state)?;
-        Ok(Self { volume, state, last_metadata_blocks_written: 0 })
+        Ok(Self {
+            volume,
+            state,
+            last_metadata_blocks_written: 0,
+        })
     }
 
     pub fn generation(&self) -> u64 {
@@ -1029,8 +1037,12 @@ impl<D: BlockDevice> FileSystem<D> {
             deltas.sort_by(|a, b| a.0.cmp(&b.0));
             for (path, value) in &deltas {
                 root_node = patch_tree(
-                    &mut self.volume, &mut builder, root_node, path,
-                    value.as_ref(), generation,
+                    &mut self.volume,
+                    &mut builder,
+                    root_node,
+                    path,
+                    value.as_ref(),
+                    generation,
                 )?;
             }
         }

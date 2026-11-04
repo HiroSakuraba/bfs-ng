@@ -94,7 +94,11 @@ fn read_page<D: BlockDevice>(
                 return Err(Error::CorruptTree);
             }
             previous = max.clone();
-            children.push(Child { max, block: address, level: level - 1 });
+            children.push(Child {
+                max,
+                block: address,
+                level: level - 1,
+            });
         }
         if !rd.done() {
             return Err(Error::CorruptTree);
@@ -103,9 +107,11 @@ fn read_page<D: BlockDevice>(
     }
 }
 
-fn store_leaf(builder: &mut Builder, entries: &[(String, Record)], generation: u64)
-    -> Result<Vec<Child>>
-{
+fn store_leaf(
+    builder: &mut Builder,
+    entries: &[(String, Record)],
+    generation: u64,
+) -> Result<Vec<Child>> {
     let mut children = Vec::new();
     let midpoint = entries.len() / 2;
     let groups: Vec<&[(String, Record)]> = if entries.len() > FANOUT {
@@ -126,9 +132,12 @@ fn store_leaf(builder: &mut Builder, entries: &[(String, Record)], generation: u
     Ok(children)
 }
 
-fn store_branch(builder: &mut Builder, entries: &[Child], level: u8, generation: u64)
-    -> Result<Vec<Child>>
-{
+fn store_branch(
+    builder: &mut Builder,
+    entries: &[Child],
+    level: u8,
+    generation: u64,
+) -> Result<Vec<Child>> {
     let mut parents = Vec::new();
     let midpoint = entries.len() / 2;
     let groups: Vec<&[Child]> = if entries.len() > FANOUT {
@@ -140,7 +149,8 @@ fn store_branch(builder: &mut Builder, entries: &[Child], level: u8, generation:
         if group.iter().any(|child| child.level + 1 != level) {
             return Err(Error::CorruptTree);
         }
-        let keys: Vec<_> = group.iter()
+        let keys: Vec<_> = group
+            .iter()
             .map(|child| (child.max.clone(), child.block))
             .collect();
         let page = encode_branch(&keys, level, generation)?;
@@ -186,7 +196,10 @@ fn patch_node<D: BlockDevice>(
             }
             store_leaf(builder, &entries, generation)
         }
-        Page::Branch { level, mut children } => {
+        Page::Branch {
+            level,
+            mut children,
+        } => {
             let index = children
                 .partition_point(|child| child.max.as_str() < key)
                 .min(children.len() - 1);
@@ -227,21 +240,20 @@ pub(super) fn patch_tree<D: BlockDevice>(
         };
         return Ok(store_leaf(builder, &[(key.to_owned(), record.clone())], generation)?[0].block);
     }
-    let mut replacement_roots = patch_node(
-        volume, builder, root, key, replacement, generation, true,
-    )?;
+    let mut replacement_roots =
+        patch_node(volume, builder, root, key, replacement, generation, true)?;
     if replacement_roots.is_empty() {
         return Ok(0);
     }
     while replacement_roots.len() > 1 {
-        let next_level = replacement_roots[0].level.checked_add(1)
+        let next_level = replacement_roots[0]
+            .level
+            .checked_add(1)
             .ok_or(Error::TooLarge)?;
         if next_level > 8 {
             return Err(Error::TooLarge);
         }
-        replacement_roots = store_branch(
-            builder, &replacement_roots, next_level, generation,
-        )?;
+        replacement_roots = store_branch(builder, &replacement_roots, next_level, generation)?;
     }
     Ok(replacement_roots[0].block)
 }
@@ -249,19 +261,26 @@ pub(super) fn patch_tree<D: BlockDevice>(
 /// Drop intermediate nodes superseded by later edits in the same transaction.
 /// Newly allocated file-content chunks are never removed by this pass.
 pub(super) fn discard_superseded_nodes(builder: &mut Builder, root: u64) -> Result<usize> {
-    let staged: BTreeMap<u64, [u8; BLOCK_SIZE]> = builder.staged.iter()
+    let staged: BTreeMap<u64, [u8; BLOCK_SIZE]> = builder
+        .staged
+        .iter()
         .filter(|(_, b)| &b[..8] == NODE_MAGIC)
         .map(|(addr, b)| (*addr, *b))
         .collect();
     let mut reachable = BTreeSet::new();
     let mut stack = vec![root];
     while let Some(addr) = stack.pop() {
-        let Some(node) = staged.get(&addr) else { continue };
+        let Some(node) = staged.get(&addr) else {
+            continue;
+        };
         if !reachable.insert(addr) {
             return Err(Error::CorruptTree);
         }
         if node[8] > 0 {
-            let mut rd = Reader { block: node, offset: 32 };
+            let mut rd = Reader {
+                block: node,
+                offset: 32,
+            };
             for _ in 0..u16_at(node, 10) {
                 let _key = rd.key().ok_or(Error::CorruptTree)?;
                 let child = rd.take(8).ok_or(Error::CorruptTree)?;
@@ -269,8 +288,8 @@ pub(super) fn discard_superseded_nodes(builder: &mut Builder, root: u64) -> Resu
             }
         }
     }
-    builder.staged.retain(|(addr, page)| {
-        &page[..8] != NODE_MAGIC || reachable.contains(addr)
-    });
+    builder
+        .staged
+        .retain(|(addr, page)| &page[..8] != NODE_MAGIC || reachable.contains(addr));
     Ok(reachable.len())
 }

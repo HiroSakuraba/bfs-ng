@@ -1,6 +1,4 @@
-use bfs_ng_storage::{
-    BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileSystem, Volume,
-};
+use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileSystem, Volume};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn fresh(blocks: usize) -> FileSystem<CrashDevice> {
@@ -13,17 +11,20 @@ fn bulk(fs: &mut FileSystem<CrashDevice>, n: usize) {
     let mut tx = fs.begin();
     tx.mkdir("/dataset").unwrap();
     for i in 0..n {
-        tx.write_file(&format!("/dataset/doc_{i:04}"), format!("original:{i}").as_bytes())
-            .unwrap();
+        tx.write_file(
+            &format!("/dataset/doc_{i:04}"),
+            format!("original:{i}").as_bytes(),
+        )
+        .unwrap();
     }
     fs.commit(tx).unwrap();
 }
 
 fn u16_at(b: &[u8], at: usize) -> usize {
-    u16::from_le_bytes(b[at..at+2].try_into().unwrap()) as usize
+    u16::from_le_bytes(b[at..at + 2].try_into().unwrap()) as usize
 }
 fn u64_at(b: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(b[at..at+8].try_into().unwrap())
+    u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 
 /// Independent test-only walk of physical node addresses, not F3's patcher.
@@ -31,7 +32,9 @@ fn reachable_tree(device: &mut impl BlockDevice, root: u64) -> BTreeSet<u64> {
     let mut found = BTreeSet::new();
     let mut stack = vec![root];
     while let Some(addr) = stack.pop() {
-        if addr == 0 { continue; }
+        if addr == 0 {
+            continue;
+        }
         assert!(found.insert(addr), "duplicate physical node {addr}");
         let mut block = [0; BLOCK_SIZE];
         device.read_block(addr, &mut block).unwrap();
@@ -59,8 +62,10 @@ fn single_update_copies_ancestor_path_and_shares_untouched_nodes() {
     tx.pin_snapshot().unwrap();
     tx.write_file("/dataset/doc_0075", b"revised").unwrap();
     fs.commit(tx).unwrap();
-    assert!(fs.last_metadata_blocks_written() <= 3,
-        "single-key update must not rebuild the 150-record tree");
+    assert!(
+        fs.last_metadata_blocks_written() <= 3,
+        "single-key update must not rebuild the 150-record tree"
+    );
     let mut volume = Volume::open(fs.into_device()).unwrap();
     let manifest = volume.read_root().unwrap().unwrap();
     let live_root = u64_at(&manifest, 24);
@@ -72,7 +77,10 @@ fn single_update_copies_ancestor_path_and_shares_untouched_nodes() {
     assert!(shared >= old_nodes.len() - 3, "lost unchanged node sharing");
     let mut fs = FileSystem::open(dev.power_loss()).unwrap();
     assert_eq!(fs.read_file("/dataset/doc_0075").unwrap(), b"revised");
-    assert_eq!(fs.read_snapshot_file(1, "/dataset/doc_0075").unwrap(), b"original:75");
+    assert_eq!(
+        fs.read_snapshot_file(1, "/dataset/doc_0075").unwrap(),
+        b"original:75"
+    );
     assert_eq!(fs.stat("/dataset/doc_0075").unwrap().inode, old_inode);
     assert_eq!(fs.read_file("/dataset/doc_0149").unwrap(), b"original:149");
 }
@@ -88,7 +96,10 @@ fn snapshot_only_commit_copies_no_tree_nodes() {
     assert_eq!(fs.last_metadata_blocks_written(), 0);
     let mut fs = reopen(fs);
     assert_eq!(fs.stat("/dataset/doc_0002").unwrap().inode, root);
-    assert_eq!(fs.read_snapshot_file(1, "/dataset/doc_0002").unwrap(), b"original:2");
+    assert_eq!(
+        fs.read_snapshot_file(1, "/dataset/doc_0002").unwrap(),
+        b"original:2"
+    );
     let mut tx = fs.begin();
     tx.drop_snapshot(1).unwrap();
     fs.commit(tx).unwrap();
@@ -101,15 +112,19 @@ fn leaf_splits_and_subtree_deletions_keep_search_order() {
     bulk(&mut fs, 25);
     // Insert into middle of a full leaf range, triggering a split.
     let mut tx = fs.begin();
-    tx.write_file("/dataset/doc_0008a", b"split-member").unwrap();
-    tx.write_file("/dataset/doc_0013a", b"middle-member").unwrap();
+    tx.write_file("/dataset/doc_0008a", b"split-member")
+        .unwrap();
+    tx.write_file("/dataset/doc_0013a", b"middle-member")
+        .unwrap();
     fs.commit(tx).unwrap();
     assert_eq!(fs.read_file("/dataset/doc_0008a").unwrap(), b"split-member");
     fs = reopen(fs);
     assert_eq!(fs.list_dir("/dataset").unwrap().len(), 27);
     for i in 0..25 {
-        assert_eq!(fs.read_file(&format!("/dataset/doc_{i:04}")).unwrap(),
-            format!("original:{i}").as_bytes());
+        assert_eq!(
+            fs.read_file(&format!("/dataset/doc_{i:04}")).unwrap(),
+            format!("original:{i}").as_bytes()
+        );
     }
     let mut tx = fs.begin();
     for i in 0..24 {
@@ -133,10 +148,12 @@ fn leaf_splits_and_subtree_deletions_keep_search_order() {
 fn randomized_index_mutations_match_independent_map_after_reopen() {
     let mut fs = fresh(4096);
     bulk(&mut fs, 120);
-    let mut oracle = BTreeMap::<String,Vec<u8>>::new();
+    let mut oracle = BTreeMap::<String, Vec<u8>>::new();
     for i in 0..120 {
-        oracle.insert(format!("/dataset/doc_{i:04}"),
-            format!("original:{i}").into_bytes());
+        oracle.insert(
+            format!("/dataset/doc_{i:04}"),
+            format!("original:{i}").into_bytes(),
+        );
     }
     let mut rng = 0x7834_ba21_ec09_4613u64;
     for step in 0..200 {
@@ -161,8 +178,11 @@ fn randomized_index_mutations_match_independent_map_after_reopen() {
         assert_eq!(fs.list_dir("/dataset").unwrap().len(), oracle.len());
         if step % 17 == 0 {
             for (key, expected) in &oracle {
-                assert_eq!(&fs.read_file(key).unwrap(), expected,
-                    "step {step}, key {key}");
+                assert_eq!(
+                    &fs.read_file(key).unwrap(),
+                    expected,
+                    "step {step}, key {key}"
+                );
             }
         }
     }
@@ -179,16 +199,23 @@ fn multi_edit_commit_discards_intermediate_staged_tree_paths() {
     bulk(&mut fs, 150);
     let mut tx = fs.begin();
     for i in [1, 9, 17, 40, 72, 109, 149] {
-        tx.write_file(&format!("/dataset/doc_{i:04}"), format!("new:{i}").as_bytes())
-            .unwrap();
+        tx.write_file(
+            &format!("/dataset/doc_{i:04}"),
+            format!("new:{i}").as_bytes(),
+        )
+        .unwrap();
     }
     fs.commit(tx).unwrap();
-    assert!(fs.last_metadata_blocks_written() <= 17,
-        "reused ancestors should not be written more than once");
+    assert!(
+        fs.last_metadata_blocks_written() <= 17,
+        "reused ancestors should not be written more than once"
+    );
     fs = reopen(fs);
     for i in [1, 9, 17, 40, 72, 109, 149] {
-        assert_eq!(fs.read_file(&format!("/dataset/doc_{i:04}")).unwrap(),
-            format!("new:{i}").as_bytes());
+        assert_eq!(
+            fs.read_file(&format!("/dataset/doc_{i:04}")).unwrap(),
+            format!("new:{i}").as_bytes()
+        );
     }
 }
 
@@ -201,16 +228,24 @@ fn path_copy_faults_accept_only_complete_old_or_new_file() {
             let mut fs = fresh(1024);
             bulk(&mut fs, 150);
             let mut d = fs.into_device();
-            d.inject(Fault { operation: fail_at, torn_bytes }).unwrap();
+            d.inject(Fault {
+                operation: fail_at,
+                torn_bytes,
+            })
+            .unwrap();
             let mut fs = FileSystem::open(d).unwrap();
             let mut tx = fs.begin();
             tx.write_file("/dataset/doc_0075", b"new-atomic").unwrap();
-            assert!(matches!(fs.commit(tx), Err(Error::InjectedCrash)),
-                "unexpected commit at operation {fail_at}");
+            assert!(
+                matches!(fs.commit(tx), Err(Error::InjectedCrash)),
+                "unexpected commit at operation {fail_at}"
+            );
             let mut fs = reopen(fs);
             let value = fs.read_file("/dataset/doc_0075").unwrap();
-            assert!(value == b"original:75" || value == b"new-atomic",
-                "partial commit at operation {fail_at} torn {torn_bytes:?}");
+            assert!(
+                value == b"original:75" || value == b"new-atomic",
+                "partial commit at operation {fail_at} torn {torn_bytes:?}"
+            );
             assert_eq!(fs.read_file("/dataset/doc_0076").unwrap(), b"original:76");
         }
     }
@@ -226,11 +261,18 @@ fn shared_nodes_are_protected_by_snapshot_and_reclamation() {
     fs.commit(tx).unwrap();
     for n in 3..12 {
         let mut tx = fs.begin();
-        tx.write_file("/dataset/doc_0007", format!("revised-{n}").as_bytes()).unwrap();
+        tx.write_file("/dataset/doc_0007", format!("revised-{n}").as_bytes())
+            .unwrap();
         fs.commit(tx).unwrap();
     }
     let mut fs = reopen(fs);
-    assert_eq!(fs.read_snapshot_file(1, "/dataset/doc_0007").unwrap(), b"original:7");
-    assert_eq!(fs.read_snapshot_file(1, "/dataset/doc_0129").unwrap(), b"original:129");
+    assert_eq!(
+        fs.read_snapshot_file(1, "/dataset/doc_0007").unwrap(),
+        b"original:7"
+    );
+    assert_eq!(
+        fs.read_snapshot_file(1, "/dataset/doc_0129").unwrap(),
+        b"original:129"
+    );
     assert_eq!(fs.read_file("/dataset/doc_0007").unwrap(), b"revised-11");
 }
