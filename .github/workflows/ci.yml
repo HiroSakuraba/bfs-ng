@@ -36,6 +36,8 @@ jobs:
         run: |
           cargo run --release -p bfs-ng-cache-lab -- replay --input crates/cache-lab/fixtures/golden.csv --capacity-bytes 8192 --output golden-results.csv
           python3 crates/cache-lab/scripts/lru_oracle.py crates/cache-lab/fixtures/golden.csv 8192
+      - name: Validate C4 comparison adapter
+        run: python3 -m unittest discover -s crates/cache-lab/scripts -p 'test_*.py' -v
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v5
