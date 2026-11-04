@@ -283,3 +283,39 @@ fn randomized_search_postings_match_independent_m0_scan() {
     }
     assert_eq!(oracle.len(),45);
 }
+
+#[test]
+fn actual_file_backed_image_persists_attributes_and_snapshot_searches() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "bfs-f4-{}-{nanos}.img", std::process::id(),
+    ));
+    let mut fs=FileSystem::format(FileDevice::create_new(&path,256).unwrap(),0xface).unwrap();
+    let mut tx=fs.begin();
+    tx.install_schema(schema()).unwrap();
+    tx.write_file("/axiom",b"source revision 1").unwrap();
+    tx.set_attributes("/axiom",vec![
+        ("corpus.split".into(),text("train")),
+        ("asset.sequence".into(),Value::Unsigned(1)),
+    ]).unwrap();
+    fs.commit(tx).unwrap();
+    let mut tx=fs.begin();
+    tx.pin_snapshot().unwrap();
+    tx.write_file("/axiom",b"source revision 2").unwrap();
+    tx.set_attributes("/axiom",vec![
+        ("corpus.split".into(),text("test")),
+        ("asset.sequence".into(),Value::Unsigned(2)),
+    ]).unwrap();
+    fs.commit(tx).unwrap();
+    drop(fs);
+    let mut fs=FileSystem::open(FileDevice::open(&path).unwrap()).unwrap();
+    assert_eq!(fs.read_file("/axiom").unwrap(),b"source revision 2");
+    assert_eq!(fs.read_snapshot_file(1,"/axiom").unwrap(),b"source revision 1");
+    assert_eq!(fs.search_attributes(
+        &[Predicate::eq("corpus.split",text("test"))],10).unwrap().files.len(),1);
+    assert_eq!(fs.search_snapshot_attributes(1,
+        &[Predicate::eq("corpus.split",text("train"))],10).unwrap().files.len(),1);
+    drop(fs);
+    std::fs::remove_file(path).unwrap();
+}
