@@ -299,69 +299,77 @@ fn inspect<D: BlockDevice>(
     if generation == 0 || !valid_address(root, generation, cursor, device.block_count()) {
         return Err(Error::CorruptTree);
     }
-    let mut counts = BTreeMap::new();
-    let mut visited = BTreeSet::new();
-    let mut last = None;
-    fn walk<D: BlockDevice>(
-        device: &mut D,
-        address: u64,
+    struct Walker<'a, D: BlockDevice> {
+        device: &'a mut D,
         generation: u64,
         cursor: u64,
-        expected_level: Option<u8>,
-        is_root: bool,
-        visited: &mut BTreeSet<u64>,
-        counts: &mut BTreeMap<u64, u16>,
-        last: &mut Option<u64>,
-    ) -> Result<Option<u64>> {
-        if !valid_address(address, generation, cursor, device.block_count())
-            || !visited.insert(address)
-            || visited.len() > MAX_PAGES
-        {
-            return Err(Error::CorruptTree);
-        }
-        let mut block = [0; BLOCK_SIZE];
-        device.read_block(address, &mut block)?;
-        let page = decode(&block, generation, cursor, device.block_count())?;
-        match page {
-            Page::Leaf(rows) => {
-                if expected_level.is_some_and(|level| level != 0)
-                    || (rows.is_empty() && !is_root)
-                {
-                    return Err(Error::CorruptTree);
-                }
-                for (key, refs) in rows {
-                    if last.is_some_and(|prev| key <= prev) || counts.insert(key, refs).is_some() {
-                        return Err(Error::CorruptTree);
-                    }
-                    *last = Some(key);
-                }
-                Ok(*last)
+        visited: BTreeSet<u64>,
+        counts: BTreeMap<u64, u16>,
+        last: Option<u64>,
+    }
+    impl<D: BlockDevice> Walker<'_, D> {
+        fn walk(
+            &mut self,
+            address: u64,
+            expected_level: Option<u8>,
+            is_root: bool,
+        ) -> Result<Option<u64>> {
+            if !valid_address(address, self.generation, self.cursor, self.device.block_count())
+                || !self.visited.insert(address)
+                || self.visited.len() > MAX_PAGES
+            {
+                return Err(Error::CorruptTree);
             }
-            Page::Branch { level, children } => {
-                if expected_level.is_some_and(|expected| expected != level) {
-                    return Err(Error::CorruptTree);
-                }
-                for child in children {
-                    let max = walk(
-                        device, child.address, generation, cursor, Some(child.level),
-                        false, visited, counts, last,
-                    )?;
-                    if max != Some(child.max) {
+            let mut block = [0; BLOCK_SIZE];
+            self.device.read_block(address, &mut block)?;
+            let page = decode(
+                &block, self.generation, self.cursor, self.device.block_count(),
+            )?;
+            match page {
+                Page::Leaf(rows) => {
+                    if expected_level.is_some_and(|level| level != 0)
+                        || (rows.is_empty() && !is_root)
+                    {
                         return Err(Error::CorruptTree);
                     }
+                    for (key, refs) in rows {
+                        if self.last.is_some_and(|prev| key <= prev)
+                            || self.counts.insert(key, refs).is_some()
+                        {
+                            return Err(Error::CorruptTree);
+                        }
+                        self.last = Some(key);
+                    }
+                    Ok(self.last)
                 }
-                Ok(*last)
+                Page::Branch { level, children } => {
+                    if expected_level.is_some_and(|expected| expected != level) {
+                        return Err(Error::CorruptTree);
+                    }
+                    for child in children {
+                        let max = self.walk(child.address, Some(child.level), false)?;
+                        if max != Some(child.max) {
+                            return Err(Error::CorruptTree);
+                        }
+                    }
+                    Ok(self.last)
+                }
             }
         }
     }
-    walk(
-        device, root, generation, cursor, None, true,
-        &mut visited, &mut counts, &mut last,
-    )?;
-    if visited.iter().any(|page| counts.contains_key(page)) {
+    let mut walker = Walker {
+        device,
+        generation,
+        cursor,
+        visited: BTreeSet::new(),
+        counts: BTreeMap::new(),
+        last: None,
+    };
+    walker.walk(root, None, true)?;
+    if walker.visited.iter().any(|page| walker.counts.contains_key(page)) {
         return Err(Error::CorruptTree);
     }
-    Ok((counts, visited))
+    Ok((walker.counts, walker.visited))
 }
 
 pub(super) fn read<D: BlockDevice>(
