@@ -201,8 +201,12 @@ fn entire_attribute_catalog_is_coherent_with_file_and_bounded_metadata_writes() 
     compare(&fs,&[Predicate::eq("corpus.split",text("train"))],1000);
     let mut fs=reopen(fs);
     compare(&fs,&[Predicate::eq("corpus.split",text("dev"))],1000);
-    assert_eq!(fs.search_attributes(&[Predicate::eq("corpus.split",text("dev"))],1000)
-        .unwrap().files.len(),1);
+    let rare = [Predicate::eq("corpus.split",text("dev"))];
+    let indexed = fs.search_attributes(&rare,1000).unwrap();
+    let scanned = fs.attribute_scan_oracle(&rare,1000).unwrap();
+    assert_eq!(indexed.files.len(),1);
+    assert!(indexed.postings_examined < scanned.postings_examined,
+        "selective query must scan fewer postings than files");
     assert_eq!(fs.read_file("/corpus/doc_0042").unwrap(),b"doc 42");
 }
 
