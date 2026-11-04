@@ -72,7 +72,7 @@ fn bulk_load_is_balanced_at_all_tree_levels() {
     for count in [13, 25, 150, 257] {
         let mut image = fs(1024);
         populate(&mut image, count);
-        let mut device = image.into_device().power_loss();
+        let device = image.into_device().power_loss();
         let (mut device, root) = current_tree(device);
         let mut seen = BTreeSet::new();
         let (_, leaves) = tree_occupancy(&mut device, root, true, &mut seen);
@@ -93,7 +93,7 @@ fn repeated_deletions_rebalance_and_collapse_tree_without_losing_files() {
     }
     image.commit(tx).unwrap();
     assert_eq!(image.list_dir("/dataset").unwrap().len(),30);
-    let mut dev = image.into_device().power_loss();
+    let dev = image.into_device().power_loss();
     let (mut dev, root) = current_tree(dev);
     let mut seen = BTreeSet::new();
     tree_occupancy(&mut dev, root, true, &mut seen);
@@ -277,7 +277,7 @@ fn f4_attributes_and_snapshot_queries_survive_balanced_namespace_deletes() {
     assert_eq!(image.search_attributes(&query, 500).unwrap().files.len(),25);
     assert_eq!(image.search_snapshot_attributes(1,&query,500).unwrap().files.len(),100);
     let mut dev=image.into_device().power_loss();
-    let root=current_tree(&mut dev);
+    let (mut dev, root)=current_tree(dev);
     tree_occupancy(&mut dev,root,true,&mut BTreeSet::new());
     let mut image=FileSystem::open(dev).unwrap();
     assert_eq!(image.search_attributes(&query,500).unwrap().files.len(),25);
