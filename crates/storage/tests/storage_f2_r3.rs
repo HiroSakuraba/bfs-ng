@@ -19,7 +19,7 @@ fn checkpoint_header(device: CrashDevice) -> (CrashDevice, u64, u32, u32, u64) {
     let mut volume = Volume::open(device).unwrap();
     let generation = volume.info().generation;
     let payload = volume.read_root().unwrap().unwrap();
-    assert_eq!(&payload[..8], b"BFSNGM7\0");
+    assert_eq!(&payload[..8], b"BFSNGM8\0");
     let pins = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let offset = 64 + pins * 40 + 16;
     let first = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
@@ -104,7 +104,7 @@ fn checksum_correct_early_promotion_of_fallback_block_is_quarantined() {
     assert!(runs > 0);
     let mut page = [0; BLOCK_SIZE];
     device.read_block(first, &mut page).unwrap();
-    assert_eq!(&page[..8], b"BFSFRJ7\0");
+    assert_eq!(&page[..8], b"BFSFRJ8\0");
     let original = u64::from_le_bytes(page[44..52].try_into().unwrap());
     assert_eq!(original, 3, "initial retired pages cannot be used in g2");
     page[44..52].copy_from_slice(&generation.to_le_bytes());
