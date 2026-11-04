@@ -10,8 +10,8 @@
 //! until a separate proof-carrying incremental allocator exists, F2's full
 //! reachability oracle remains the authority for selecting reusable blocks.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, ROOT_PAYLOAD_LAST, seal, u16_at, u32_at, u64_at,
-    valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, ROOT_PAYLOAD_LAST, Result, seal, u16_at, u32_at,
+    u64_at, valid_checksum,
 };
 use std::collections::BTreeSet;
 
