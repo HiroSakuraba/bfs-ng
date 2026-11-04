@@ -28,7 +28,6 @@ fn round_trip_and_alternating_root_slots() {
     assert_eq!(recovered.commit_root(b"third").unwrap().root_block, Some(4));
 }
 
-
 #[test]
 fn repeatedly_rotated_payloads_never_touch_the_two_recoverable_roots() {
     let mut volume = vol(5);
@@ -90,7 +89,10 @@ fn root_ring_torn_write_after_wrap_preserves_the_last_whole_payload() {
                 got == b"gen-three" || got == b"gen-four",
                 "torn payload/superblock accepted invalid root: op={operation}, bytes={torn_bytes}"
             );
-            assert_eq!(after.info().root_block, Some(if got == b"gen-three" { 4 } else { 2 }));
+            assert_eq!(
+                after.info().root_block,
+                Some(if got == b"gen-three" { 4 } else { 2 })
+            );
         }
     }
 }
@@ -107,7 +109,10 @@ fn corrupt_newer_payload_after_wrap_recovers_the_prior_ring_block() {
     let mut recovered = Volume::open(device).unwrap();
     assert_eq!(recovered.info().generation, 18);
     assert_eq!(recovered.info().root_block, Some(4));
-    assert_eq!(recovered.read_root().unwrap(), Some(b"generation-18".to_vec()));
+    assert_eq!(
+        recovered.read_root().unwrap(),
+        Some(b"generation-18".to_vec())
+    );
     // Recommit the failed g19 without ever overwriting surviving g18.
     recovered.commit_root(b"replacement-generation-19").unwrap();
     assert_eq!(
@@ -154,7 +159,10 @@ fn the_three_payload_blocks_are_reused_indefinitely_without_exhausting_f0() {
     }
     let mut v = Volume::open(v.into_device().power_loss()).unwrap();
     assert_eq!(v.info().generation, 240);
-    assert_eq!(v.read_root().unwrap(), Some(b"complete-root-00240".to_vec()));
+    assert_eq!(
+        v.read_root().unwrap(),
+        Some(b"complete-root-00240".to_vec())
+    );
 }
 
 #[test]
