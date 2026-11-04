@@ -1,4 +1,4 @@
-use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileDevice, FileSystem};
+use bfs_ng_storage::{BLOCK_SIZE, CrashDevice, Error, Fault, FileDevice, FileSystem};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn fresh() -> FileSystem<CrashDevice> {
@@ -133,11 +133,16 @@ fn deterministic_crashes_during_reuse_preserve_whole_recoverable_versions() {
                 result == b"third" || result == b"fourth",
                 "op={fault_op} torn={torn:?}, got {result:?}"
             );
-            if fault_op < 7 {
+            // A failed write of the alternate slot can still persist the
+            // *entire* 124-byte checksummed F0 header plus zero padding.
+            // It is safe to recover that complete new generation after op 6,
+            // even though the final sync (op 7) has not returned.
+            if fault_op < 6 {
                 assert_eq!(result, b"third");
             }
-            // Recovered root may be the new generation only after final sync
-            // (a complete alternate root header can be durable earlier).
+            if fault_op == 6 && torn.is_none_or(|n| n < 124) {
+                assert_eq!(result, b"third");
+            }
             if result == b"fourth" {
                 assert_eq!(fs.free_cursor(), cursor);
             }
