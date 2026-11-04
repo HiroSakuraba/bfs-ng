@@ -64,9 +64,15 @@ fn a_small_change_retains_unaffected_reference_leaves() {
     let index_writes = fs.last_reference_pages_written();
     assert!(index_writes > 0, "changed records must write a new path");
     let (mut device, next_root, next_pages) = ref_root(fs.into_device().power_loss());
-    assert_ne!(old_root, next_root, "a changed index must path-copy its root");
+    assert_ne!(
+        old_root, next_root,
+        "a changed index must path-copy its root"
+    );
     assert!(next_pages >= 5);
-    assert!(index_writes < old_pages, "a small edit should write fewer index pages than a complete rebuild");
+    assert!(
+        index_writes < old_pages,
+        "a small edit should write fewer index pages than a complete rebuild"
+    );
     let next_children = children(&mut device, next_root);
     assert!(
         old_children.intersection(&next_children).next().is_some(),
@@ -94,7 +100,10 @@ fn fallback_only_blocks_are_delayed_until_slot_rotation() {
     let mut fs = FileSystem::open(fs.into_device().power_loss()).unwrap();
     assert_eq!(fs.read_file("/k").unwrap(), b"second");
     let after_recovery = fs.allocation_report().unwrap();
-    assert_eq!(after_recovery.delayed_free_blocks, report.delayed_free_blocks);
+    assert_eq!(
+        after_recovery.delayed_free_blocks,
+        report.delayed_free_blocks
+    );
 
     let mut tx = fs.begin();
     tx.write_file("/k", b"third").unwrap();
