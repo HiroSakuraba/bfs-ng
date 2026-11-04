@@ -164,6 +164,93 @@ fn store_branch(
     Ok(parents)
 }
 
+const MIN_OCCUPANCY: usize = FANOUT / 2;
+
+fn page_len(page: &Page) -> usize {
+    match page {
+        Page::Leaf(entries) => entries.len(),
+        Page::Branch { children, .. } => children.len(),
+    }
+}
+
+/// Rebalance adjacent siblings through CoW copies. An underfilled page
+/// borrows by redistributing the combined ordered contents; two pages
+/// merge when they fit in one. Neither old page is modified in place.
+fn redistribute_pair<D: BlockDevice>(
+    volume: &mut Volume<D>,
+    builder: &mut Builder,
+    left: &Child,
+    right: &Child,
+    generation: u64,
+) -> Result<Vec<Child>> {
+    if left.level != right.level || left.max >= right.max {
+        return Err(Error::CorruptTree);
+    }
+    let a = read_page(volume, builder, left.block, generation)?;
+    let b = read_page(volume, builder, right.block, generation)?;
+    match (a, b) {
+        (Page::Leaf(mut first), Page::Leaf(second)) => {
+            if first.last().is_none_or(|(key, _)| *key >= second[0].0) {
+                return Err(Error::CorruptTree);
+            }
+            first.extend(second);
+            store_leaf(builder, &first, generation)
+        }
+        (
+            Page::Branch { level: la, children: mut first },
+            Page::Branch { level: lb, children: second },
+        ) if la == lb => {
+            if first.last().is_none_or(|child| child.max >= second[0].max) {
+                return Err(Error::CorruptTree);
+            }
+            first.extend(second);
+            store_branch(builder, &first, la, generation)
+        }
+        _ => Err(Error::CorruptTree),
+    }
+}
+
+/// Repair only siblings near the modified path, preserving physical sharing
+/// of unrelated branches. The root may have fewer than MIN_OCCUPANCY entries;
+/// non-root pages directly affected by deletion are redistributed/merged.
+fn rebalance_near<D: BlockDevice>(
+    volume: &mut Volume<D>,
+    builder: &mut Builder,
+    children: &mut Vec<Child>,
+    modified_at: usize,
+    generation: u64,
+) -> Result<()> {
+    if children.len() < 2 {
+        return Ok(());
+    }
+    let mut index = modified_at.saturating_sub(1);
+    let mut end = (modified_at + 2).min(children.len());
+    while index < end && children.len() > 1 {
+        let page = read_page(volume, builder, children[index].block, generation)?;
+        if page_len(&page) >= MIN_OCCUPANCY {
+            index += 1;
+            continue;
+        }
+        let left_index = if index + 1 < children.len() { index } else { index - 1 };
+        let updated = redistribute_pair(
+            volume,
+            builder,
+            &children[left_index],
+            &children[left_index + 1],
+            generation,
+        )?;
+        let count = updated.len();
+        children.splice(left_index..left_index + 2, updated);
+        end = (modified_at + 2).min(children.len());
+        if count == 1 {
+            index = left_index.saturating_sub(1);
+        } else {
+            index = left_index + count;
+        }
+    }
+    Ok(())
+}
+
 /// Returns replacement siblings at the original node level. Only the leaf
 /// containing the changed key and its ancestors are staged; sibling
 /// subtrees retain their existing physical addresses and birth generations.
@@ -216,6 +303,7 @@ fn patch_node<D: BlockDevice>(
             if children.is_empty() {
                 return Ok(Vec::new());
             }
+            rebalance_near(volume, builder, &mut children, index.min(children.len() - 1), generation)?;
             // Deletions may collapse a root with just one child; this avoids
             // keeping tall single-child root chains indefinitely.
             if root && children.len() == 1 {
