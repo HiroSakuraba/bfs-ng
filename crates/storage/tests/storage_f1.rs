@@ -264,10 +264,7 @@ fn cross_volume_transaction_rejected_even_at_same_generation() {
     let mut second = FileSystem::format(CrashDevice::new(48), 0x22).unwrap();
     let mut tx = first.begin();
     tx.write_file("/foreign", b"should-not-commit").unwrap();
-    assert!(matches!(
-        second.commit(tx),
-        Err(Error::InconsistentVolume)
-    ));
+    assert!(matches!(second.commit(tx), Err(Error::InconsistentVolume)));
     assert_eq!(second.file_count(), 0);
     assert_eq!(second.generation(), 0);
 }

@@ -481,7 +481,11 @@ fn read_nodes<D: BlockDevice>(
         if kind == 0 {
             // Depth-first traversal must produce a globally increasing path
             // sequence; child maximum keys alone are not sufficient.
-            if out.keys().next_back().is_some_and(|previous| key <= *previous) {
+            if out
+                .keys()
+                .next_back()
+                .is_some_and(|previous| key <= *previous)
+            {
                 return Ok(None);
             }
             let Some(raw) = rd.take(33) else {
