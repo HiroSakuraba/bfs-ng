@@ -1543,9 +1543,11 @@ impl<D: BlockDevice> FileSystem<D> {
         let prior_generation = self.generation();
         let prior_cursor = self.state.cursor;
         let previous = if prior_header.first != 0 {
-            self.volume.inspect(|device| {
-                reference_index::read(device, prior_header, prior_generation, prior_cursor)
-            })?.0
+            self.volume
+                .inspect(|device| {
+                    reference_index::read(device, prior_header, prior_generation, prior_cursor)
+                })?
+                .0
         } else {
             BTreeMap::new()
         };
