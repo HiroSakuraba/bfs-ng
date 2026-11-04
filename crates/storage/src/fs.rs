@@ -1626,7 +1626,7 @@ impl<D: BlockDevice> FileSystem<D> {
             return Err(Error::GenerationOverflow);
         }
         // F0 reserves [2, 4] for rotating payloads; this boundary is fixed.
-        if self.state.cursor <= ROOT_PAYLOAD_LAST + 1 {
+        if self.state.cursor <= ROOT_PAYLOAD_LAST {
             return Err(Error::NoSpace);
         }
         let (certificate, from_cache) = self.certified_for_commit()?;
