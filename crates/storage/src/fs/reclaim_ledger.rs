@@ -10,7 +10,8 @@
 //! until a separate proof-carrying incremental allocator exists, F2's full
 //! reachability oracle remains the authority for selecting reusable blocks.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, seal, u16_at, u32_at, u64_at, valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, Result, ROOT_PAYLOAD_LAST, seal, u16_at, u32_at, u64_at,
+    valid_checksum,
 };
 use std::collections::BTreeSet;
 
@@ -44,8 +45,8 @@ struct Run {
     eligible_generation: u64,
 }
 
-fn valid_address(address: u64, generation: u64, cursor: u64, total: u64) -> bool {
-    address > generation.saturating_add(1) && address >= cursor && address < total
+fn valid_address(address: u64, _generation: u64, cursor: u64, total: u64) -> bool {
+    address > ROOT_PAYLOAD_LAST && address >= cursor && address < total
 }
 
 fn encode_runs(
