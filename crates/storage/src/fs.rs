@@ -1265,13 +1265,16 @@ impl<D: BlockDevice> FileSystem<D> {
                 .filter(|n| !counts.contains_key(n))
                 .collect()
         };
-        let checkpoint = if self.state.journal.first != 0 {
+        let journal_header = self.state.journal;
+        let journal_generation = self.generation();
+        let journal_cursor = self.state.cursor;
+        let checkpoint = if journal_header.first != 0 {
             Some(self.volume.inspect(|device| {
                 reclaim_ledger::read(
                     device,
-                    self.state.journal,
-                    self.generation(),
-                    self.state.cursor,
+                    journal_header,
+                    journal_generation,
+                    journal_cursor,
                 )
             })?)
         } else {
