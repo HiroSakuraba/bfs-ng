@@ -56,7 +56,7 @@ The root update sequence follows the classical write-new-data-before-new-root pr
 - \`pending\`: visible to a running process, not yet guaranteed durable.
 - \`stable\`: changes made durable by \`sync\`, plus explicitly injected partial writes.
 
-A fault may fire after any of the four commit operations, and a write may partially reach stable storage (0..4096 leading bytes) even when the final sync did not occur. After \`power_loss()\`, pending writes vanish and recovery reads stable data. Tests enumerate all four failure points and a set of torn-write boundaries; assert that recovery produces an entire old or entire new root, never a partially accepted payload.
+A fault may fire after any of the four commit operations, and a write may partially reach stable storage (0..4096 leading bytes) even when the final sync did not occur. For this v1 encoding, a torn slot write containing the complete 124-byte checksummed header plus pre-existing zero padding can legitimately publish the **entire new root**, because its referenced payload was already synced. This is safe in the model and must not be mistaken for partial-data acceptance. After \`power_loss()\`, pending writes vanish and recovery reads stable data. Tests enumerate all four failure points and a set of torn-write boundaries; assert that recovery produces an entire old or entire new root, never a partially accepted payload.
 
 This is a **model-level crash test**; it does not prove atomic sectors, physical SSD behavior or host filesystem durability. File-based integration tests additionally close and reopen real image files, validate checksums and deliberately corrupt the newest payload.
 

@@ -153,9 +153,12 @@ impl<D: BlockDevice> Volume<D> {
         if volume_id == 0 || device.block_count() < 4 {
             return Err(Error::Geometry);
         }
-        for slot in 0..2 {
+        // F0 has no reclaimable allocation map. Formatting is permitted
+        // only on an entirely blank, disposable image, not merely empty
+        // root slots that might hide orphaned user data.
+        for block_number in 0..device.block_count() {
             let mut block = [0_u8; BLOCK_SIZE];
-            device.read_block(slot, &mut block)?;
+            device.read_block(block_number, &mut block)?;
             if block.iter().any(|b| *b != 0) {
                 return Err(Error::NotBlank);
             }

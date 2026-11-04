@@ -107,7 +107,10 @@ fn every_torn_write_prefix_falls_back_or_recovers_whole_root() {
                 root == b"original" || root == b"replacement",
                 "op={operation} bytes={torn_bytes} returned a bad root"
             );
-            if operation == 1 || torn_bytes < BLOCK_SIZE {
+            // The complete v1 superblock header and its CRC occupy
+            // bytes 0..124; its remaining bytes are required zero padding.
+            // A torn write can therefore publish a valid *whole* new root.
+            if operation == 1 || torn_bytes < 124 {
                 assert_eq!(root, b"original");
             } else {
                 assert_eq!(root, b"replacement");
