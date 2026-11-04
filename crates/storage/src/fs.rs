@@ -735,7 +735,7 @@ type TreeContents = (BTreeMap<String, Record>, BTreeSet<u64>);
 
 fn load_tree<D: BlockDevice>(device: &mut D, root: SnapshotRoot) -> Result<Option<TreeContents>> {
     if root.generation == 0
-        || root.cursor <= root.generation.saturating_add(1)
+        || root.cursor <= ROOT_PAYLOAD_LAST
         || root.cursor > device.block_count()
         || root.next_inode < 2
         || root.record_count > MAX_RECORDS as u64
