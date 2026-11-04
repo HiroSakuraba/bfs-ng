@@ -149,7 +149,8 @@ fn valid_crc_but_forged_reference_count_is_rejected_by_graph_oracle() {
     let refs = u16::from_le_bytes(block[40..42].try_into().unwrap());
     block[40..42].copy_from_slice(&(refs + 1).to_le_bytes());
     block[24..28].fill(0);
-    block[24..28].copy_from_slice(&crc32c(&block).to_le_bytes());
+    let checksum = crc32c(&block);
+    block[24..28].copy_from_slice(&checksum.to_le_bytes());
     // Explicitly write the *entire*, internally checksummed forged page so
     // rejecting it demonstrates independent semantics, not mere CRC failure.
     device.write_block(first, &block).unwrap();
@@ -180,7 +181,8 @@ fn invalid_reference_link_is_rejected_without_unsafe_reclamation() {
     // Make first page loop back to itself, with valid block checksum.
     block[16..24].copy_from_slice(&first.to_le_bytes());
     block[24..28].fill(0);
-    block[24..28].copy_from_slice(&crc32c(&block).to_le_bytes());
+    let checksum = crc32c(&block);
+    block[24..28].copy_from_slice(&checksum.to_le_bytes());
     device.write_block(first, &block).unwrap();
     device.sync().unwrap();
     let mut recovered = FileSystem::open(device.power_loss()).unwrap();
