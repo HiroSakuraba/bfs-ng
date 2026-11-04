@@ -28,7 +28,9 @@ pub trait Policy {
     /// `speculative` means prefetch, not a real demand touch. It can populate
     /// the cache but must not increase demand-frequency estimates.
     fn access(&mut self, key: u64, bytes: u64, speculative: bool) -> Outcome;
-    fn history_count(&self) -> usize { 0 }
+    fn history_count(&self) -> usize {
+        0
+    }
 }
 
 pub fn make_policy(name: &str, capacity: u64) -> Result<Box<dyn Policy>, String> {
@@ -37,7 +39,9 @@ pub fn make_policy(name: &str, capacity: u64) -> Result<Box<dyn Policy>, String>
         "lru" => Ok(Box::new(Lru::new(capacity))),
         "s3fifo" | "s3-fifo" => Ok(Box::new(S3Fifo::new(capacity))),
         "wtinylfu" | "w-tinylfu" => Ok(Box::new(WTinyLfu::new(capacity))),
-        _ => Err(format!("unknown policy '{name}'; valid: none,lru,s3fifo,wtinylfu")),
+        _ => Err(format!(
+            "unknown policy '{name}'; valid: none,lru,s3fifo,wtinylfu"
+        )),
     }
 }
 

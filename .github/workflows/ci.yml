@@ -30,8 +30,7 @@ jobs:
         run: cargo test --workspace --all-targets
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Formatting diagnostic (non-gating until existing files formatted)
-        continue-on-error: true
+      - name: Formatting check
         run: cargo fmt --all -- --check
       - name: Deterministic golden trace comparison
         run: |

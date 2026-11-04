@@ -120,9 +120,10 @@ cross-checking with libCacheSim or a known reference implementation.
 - [ ] Collect real BFS-NG/OS page-cache traces and latency measurements
 - [ ] Determine how much *additional* cache memory benefits application p99
 
-**Build status:** source and fixtures prepared; a Rust compiler was not
-available in the authoring environment, so compilation and Rust test success
-have **not** yet been verified. The CI workflow is provided for this next step.
+**Build status:** source and fixtures have compiled and passed 11 tests, Clippy,
+and the independent LRU golden-trace check in the initial GitHub Actions run.
+Formatting is now required in CI. Policy fidelity still requires independent
+comparison with reference implementations.
 
 ## Research sources
 

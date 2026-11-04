@@ -1,5 +1,5 @@
 use bfs_ng_cache_lab::simulator::{replay_all, report_csv};
-use bfs_ng_cache_lab::trace::{generate, load, save, Pattern};
+use bfs_ng_cache_lab::trace::{Pattern, generate, load, save};
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -23,20 +23,28 @@ NOTES
 "#;
 
 fn get<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.windows(2).find(|v| v[0] == flag).map(|v| v[1].as_str())
+    args.windows(2)
+        .find(|v| v[0] == flag)
+        .map(|v| v[1].as_str())
 }
 fn must<'a>(args: &'a [String], flag: &str) -> Result<&'a str, String> {
     get(args, flag).ok_or_else(|| format!("missing required {flag}\n\n{HELP}"))
 }
 fn number(args: &[String], flag: &str, default: u64) -> Result<u64, String> {
     match get(args, flag) {
-        Some(value) => value.parse::<u64>().map_err(|e| format!("invalid {flag}={value}: {e}")),
+        Some(value) => value
+            .parse::<u64>()
+            .map_err(|e| format!("invalid {flag}={value}: {e}")),
         None => Ok(default),
     }
 }
 fn capacities(s: &str) -> Result<Vec<u64>, String> {
-    let values: Vec<u64> = s.split(',')
-        .map(|v| v.parse::<u64>().map_err(|e| format!("invalid capacity '{v}': {e}")))
+    let values: Vec<u64> = s
+        .split(',')
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|e| format!("invalid capacity '{v}': {e}"))
+        })
         .collect::<Result<_, _>>()?;
     if values.is_empty() || values.len() > 128 {
         return Err("expected 1..=128 capacities".into());
@@ -44,14 +52,19 @@ fn capacities(s: &str) -> Result<Vec<u64>, String> {
     Ok(values)
 }
 fn names(args: &[String]) -> Vec<String> {
-    get(args, "--policies").unwrap_or("none,lru,s3fifo,wtinylfu")
-        .split(',').map(|s| s.to_string()).collect()
+    get(args, "--policies")
+        .unwrap_or("none,lru,s3fifo,wtinylfu")
+        .split(',')
+        .map(|s| s.to_string())
+        .collect()
 }
 fn output(args: &[String], results: &str) -> Result<(), Box<dyn Error>> {
     if let Some(path) = get(args, "--output") {
         fs::write(path, results)?;
         eprintln!("wrote {path}");
-    } else { print!("{results}"); }
+    } else {
+        print!("{results}");
+    }
     Ok(())
 }
 
@@ -66,14 +79,18 @@ fn run() -> Result<(), Box<dyn Error>> {
             let path = must(&args, "--output")?;
             let pattern = Pattern::parse(get(&args, "--pattern").unwrap_or("mixed"))?;
             let count = number(&args, "--events", 50_000)?;
-            if count > 10_000_000 { return Err("--events max is 10000000".into()); }
+            if count > 10_000_000 {
+                return Err("--events max is 10000000".into());
+            }
             let trace = generate(pattern, count as usize, number(&args, "--seed", 42)?);
             save(path, &trace)?;
             eprintln!("wrote {} events to {path}", trace.len());
         }
         "demo" => {
             let count = number(&args, "--events", 50_000)?;
-            if count > 10_000_000 { return Err("--events max is 10000000".into()); }
+            if count > 10_000_000 {
+                return Err("--events max is 10000000".into());
+            }
             let trace = generate(Pattern::Mixed, count as usize, number(&args, "--seed", 42)?);
             let cap = number(&args, "--capacity-bytes", 1_048_576)?;
             let results = replay_all(&trace, &names(&args), &[cap])?;
@@ -82,11 +99,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         "replay" | "sweep" => {
             let path = must(&args, "--input")?;
             let max = number(&args, "--max-events", 1_000_000)?;
-            if max > 10_000_000 { return Err("--max-events max is 10000000".into()); }
+            if max > 10_000_000 {
+                return Err("--max-events max is 10000000".into());
+            }
             let trace = load(path, max as usize)?;
             let caps = if args[0] == "replay" {
                 vec![must(&args, "--capacity-bytes")?.parse::<u64>()?]
-            } else { capacities(must(&args, "--capacities")?)? };
+            } else {
+                capacities(must(&args, "--capacities")?)?
+            };
             let results = replay_all(&trace, &names(&args), &caps)?;
             output(&args, &report_csv(&results))?;
         }

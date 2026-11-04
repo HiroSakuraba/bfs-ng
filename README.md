@@ -7,7 +7,7 @@ BFS-NG aims to combine searchable, typed file attributes with transactional meta
 ## Status
 
 - **Implemented (experimental):** Rust 2024 workspace and `crates/cache-lab`, with trace generation, CSV replay, byte-budgeted no-cache and LRU baselines, S3-FIFO-inspired and Window TinyLFU-inspired simulators, report generation, fixtures and tests.
-- **Unverified until CI completes:** Rust compilation, Clippy, and policy invariants on a supported toolchain.
+- **Validated by GitHub Actions:** Rust compilation, 11 tests, Clippy, and the independent LRU golden trace. Formatting is enforced from this tranche onward.
 - **Not implemented:** disk format, filesystem mounts, block-device driver, transactional engine, real metadata cache, indexed attributes, snapshots, Windows/Linux filesystem adapters.
 
 ## First run
