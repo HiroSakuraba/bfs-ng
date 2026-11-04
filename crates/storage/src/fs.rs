@@ -13,7 +13,6 @@ const MAX_PATH: usize = 240;
 const MAX_RECORDS: usize = 2048;
 const MAX_DATA: usize = 256 * 1024;
 const CHUNK: usize = BLOCK_SIZE - 32;
-const NONE: u64 = 0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stat {
@@ -523,12 +522,11 @@ fn load_state<D: BlockDevice>(
     }
     let mut records = BTreeMap::new();
     let mut seen = BTreeSet::new();
-    if root_node != 0 {
-        if read_nodes(device, root_node, cursor, info.generation, None, &mut seen,
+    if root_node != 0
+        && read_nodes(device, root_node, cursor, info.generation, None, &mut seen,
             &mut records)?.is_none()
-        {
-            return Ok(None);
-        }
+    {
+        return Ok(None);
     }
     if records.len() != count as usize {
         return Ok(None);
@@ -708,7 +706,7 @@ impl<D: BlockDevice> FileSystem<D> {
 struct ReaderDevice<'a, D: BlockDevice> {
     volume: &'a mut Volume<D>,
 }
-impl<'a, D: BlockDevice> BlockDevice for ReaderDevice<'a, D> {
+impl<D: BlockDevice> BlockDevice for ReaderDevice<'_, D> {
     fn block_count(&self) -> u64 { self.volume.block_count() }
     fn read_block(&mut self, block: u64, out: &mut [u8; BLOCK_SIZE]) -> Result<()> {
         *out = self.volume.read_data_block(block)?;
