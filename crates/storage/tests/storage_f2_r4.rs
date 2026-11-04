@@ -22,8 +22,13 @@ fn sweep_cursor(device: CrashDevice) -> (CrashDevice, u64, u64, u64) {
     assert_eq!(&payload[..8], b"BFSNGM8\0");
     let snapshots = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let journal_off = 64 + snapshots * 40 + 16;
-    let journal_root = u64::from_le_bytes(payload[journal_off..journal_off + 8].try_into().unwrap());
-    let cursor = u64::from_le_bytes(payload[journal_off + 16..journal_off + 24].try_into().unwrap());
+    let journal_root =
+        u64::from_le_bytes(payload[journal_off..journal_off + 8].try_into().unwrap());
+    let cursor = u64::from_le_bytes(
+        payload[journal_off + 16..journal_off + 24]
+            .try_into()
+            .unwrap(),
+    );
     (volume.into_device(), generation, journal_root, cursor)
 }
 
@@ -112,8 +117,7 @@ fn forged_quarantine_of_fallback_owned_block_is_fail_closed() {
     let mut fs = fresh(200);
     write(&mut fs, b"old");
     write(&mut fs, b"new"); // g2 has an explicitly pending retired g1 block
-    let (mut device, generation, journal_page, _) =
-        sweep_cursor(fs.into_device().power_loss());
+    let (mut device, generation, journal_page, _) = sweep_cursor(fs.into_device().power_loss());
     assert_eq!(generation, 2);
     let mut page = [0; BLOCK_SIZE];
     device.read_block(journal_page, &mut page).unwrap();
@@ -141,8 +145,7 @@ fn torn_sweep_checkpoint_never_advances_a_partial_cursor() {
         let mut fs = fresh(280);
         write(&mut fs, &[0x61; 42_000]);
         write(&mut fs, b"current"); // g2, old data now pending
-        let (_, g2, _, cursor2) =
-            sweep_cursor(fs.into_device().power_loss());
+        let (_, g2, _, cursor2) = sweep_cursor(fs.into_device().power_loss());
         assert_eq!(g2, 2);
         assert_eq!(cursor2, 0);
 
@@ -150,15 +153,16 @@ fn torn_sweep_checkpoint_never_advances_a_partial_cursor() {
         write(&mut fs, &[0x61; 42_000]);
         write(&mut fs, b"current");
         let mut device = fs.into_device();
-        device.inject(Fault {
-            operation,
-            torn_bytes: Some(64),
-        }).unwrap();
+        device
+            .inject(Fault {
+                operation,
+                torn_bytes: Some(64),
+            })
+            .unwrap();
         let mut fs = FileSystem::open(device).unwrap();
         let result = fs.reclaim_step();
         assert!(result.is_ok() || matches!(result, Err(Error::InjectedCrash)));
-        let (device, generation, _, persisted_cursor) =
-            sweep_cursor(fs.into_device().power_loss());
+        let (device, generation, _, persisted_cursor) = sweep_cursor(fs.into_device().power_loss());
         assert!(generation == 2 || generation == 3);
         if generation == 2 {
             assert_eq!(persisted_cursor, cursor2);
