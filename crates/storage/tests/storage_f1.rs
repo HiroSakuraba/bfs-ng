@@ -145,9 +145,9 @@ fn append_only_exhaustion_never_overwrites_old_root() {
 
 #[test]
 fn each_commit_crash_point_keeps_old_or_entire_new_namespace() {
-    // One data block + one leaf + one F5 reference page + stage sync,
-    // then the four ordered F0 root-publication operations.
-    for fail_at in 1..=8 {
+    // One data block + one leaf + one reference page + one F2.R3
+    // journal page + stage sync, then four F0 publication operations.
+    for fail_at in 1..=9 {
         let mut fs = fresh(48);
         let mut tx = fs.begin();
         tx.write_file("/file", b"old-valid").unwrap();
@@ -166,7 +166,7 @@ fn each_commit_crash_point_keeps_old_or_entire_new_namespace() {
         let mut fs = reopen(fs);
         let data = fs.read_file("/file").unwrap();
         assert!(data == b"old-valid" || data == b"new-valid");
-        if fail_at < 8 {
+        if fail_at < 9 {
             assert_eq!(data, b"old-valid");
         } else {
             assert_eq!(data, b"new-valid");

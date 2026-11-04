@@ -8,15 +8,17 @@ use std::collections::{BTreeMap, BTreeSet};
 mod attributes;
 use attributes::{Catalog, INTERNAL_PATH};
 
+mod reclaim_ledger;
 mod reference_index;
 mod tree_cow;
+use reclaim_ledger::JournalHeader;
 use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM6\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM7\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 6;
+const FORMAT: u32 = 7;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -83,6 +85,7 @@ struct State {
     records: BTreeMap<String, Record>,
     catalog: Option<Catalog>,
     reference: RefHeader,
+    journal: JournalHeader,
 }
 
 impl State {
@@ -95,6 +98,7 @@ impl State {
             records: BTreeMap::new(),
             catalog: None,
             reference: RefHeader::default(),
+            journal: JournalHeader::default(),
         }
     }
 }
@@ -304,7 +308,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 /// Snapshot pins are included in the same commit as the live namespace.
 fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     let catalog_end = 64 + state.snapshots.len() * 40;
-    let mut b = vec![0_u8; catalog_end + 16];
+    let mut b = vec![0_u8; catalog_end + 32];
     b[..8].copy_from_slice(META_MAGIC);
     b[8..12].copy_from_slice(&FORMAT.to_le_bytes());
     b[16..24].copy_from_slice(&state.cursor.to_le_bytes());
@@ -324,6 +328,9 @@ fn root_manifest(state: &State, generation: u64) -> Vec<u8> {
     b[catalog_end..catalog_end + 8].copy_from_slice(&state.reference.first.to_le_bytes());
     b[catalog_end + 8..catalog_end + 12].copy_from_slice(&state.reference.pages.to_le_bytes());
     b[catalog_end + 12..catalog_end + 16].copy_from_slice(&state.reference.entries.to_le_bytes());
+    b[catalog_end + 16..catalog_end + 24].copy_from_slice(&state.journal.first.to_le_bytes());
+    b[catalog_end + 24..catalog_end + 28].copy_from_slice(&state.journal.pages.to_le_bytes());
+    b[catalog_end + 28..catalog_end + 32].copy_from_slice(&state.journal.runs.to_le_bytes());
     b
 }
 
@@ -837,7 +844,7 @@ fn load_state<D: BlockDevice>(
         return Ok(None);
     }
     let snap_count = u32_at(bytes, 56) as usize;
-    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 16 {
+    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 + 32 {
         return Ok(None);
     }
     let root = SnapshotRoot {
@@ -884,17 +891,40 @@ fn load_state<D: BlockDevice>(
         pages: u32_at(bytes, trailer + 8),
         entries: u32_at(bytes, trailer + 12),
     };
-    let Ok((persisted, _index_blocks)) =
+    let journal = JournalHeader {
+        first: u64_at(bytes, trailer + 16),
+        pages: u32_at(bytes, trailer + 24),
+        runs: u32_at(bytes, trailer + 28),
+    };
+    let Ok((persisted, index_pages)) =
         reference_index::read(device, reference, root.generation, root.cursor)
     else {
         return Ok(None);
     };
+    let Ok(checkpoint) = reclaim_ledger::read(device, journal, root.generation, root.cursor) else {
+        return Ok(None);
+    };
+    if !checkpoint.pages.is_disjoint(&index_pages)
+        || !checkpoint.ready.is_disjoint(&checkpoint.pending)
+    {
+        return Ok(None);
+    }
     // Never trust a checksum alone for allocation safety. Reconstruct every
     // reference independently from live/snapshot trees and compare exactly.
     let Ok(reconstructed) = count_roots(device, root, &snapshots) else {
         return Ok(None);
     };
-    if persisted != reconstructed {
+    if persisted != reconstructed
+        || checkpoint
+            .ready
+            .iter()
+            .chain(&checkpoint.pending)
+            .any(|id| reconstructed.contains_key(id) || index_pages.contains(id))
+        || checkpoint
+            .pages
+            .iter()
+            .any(|id| reconstructed.contains_key(id))
+    {
         return Ok(None);
     }
     Ok(Some(State {
@@ -905,6 +935,7 @@ fn load_state<D: BlockDevice>(
         records,
         catalog,
         reference,
+        journal,
     }))
 }
 
@@ -936,6 +967,24 @@ pub struct AllocationReport {
     /// First commit generation that may BEGIN with those blocks free,
     /// provided a new root was successfully published in between.
     pub delayed_free_eligible_generation: u64,
+    /// Immutable journal pages rooted in the selected F0 manifest.
+    pub reclaim_journal_pages: usize,
+    /// Persisted free runs: immediately available plus one-rotation deferred.
+    pub reclaim_journal_runs: usize,
+    /// Number of persisted, CRC-checked blocks immediately eligible for reuse.
+    /// This may be a conservative subset of the full-scan free pool.
+    pub journal_ready_blocks: usize,
+    /// Blocks in the selected root's delayed-free journal, eligible only
+    /// after the next successful F0 candidate rotation.
+    pub journal_pending_blocks: usize,
+}
+
+/// Internal result of the independent two-root ownership scrub.
+struct Scrub {
+    report: AllocationReport,
+    free: BTreeSet<u64>,
+    rotated_out: BTreeSet<u64>,
+    current_owned: BTreeSet<u64>,
 }
 
 /// Page of checksummed on-disk F3 namespace entries. `next_after` is only
@@ -1105,7 +1154,7 @@ impl<D: BlockDevice> FileSystem<D> {
     ///
     /// If even one checksummed candidate has damaged F1 metadata, fail
     /// *closed* for reclamation: use fresh blocks only on this commit.
-    fn allocation_state(&mut self) -> Result<(AllocationReport, BTreeSet<u64>)> {
+    fn allocation_state(&mut self) -> Result<Scrub> {
         let candidates = self.volume.candidate_roots()?;
         let mut counts = BTreeMap::<u64, usize>::new();
         let mut visited_roots = BTreeSet::new();
@@ -1171,12 +1220,39 @@ impl<D: BlockDevice> FileSystem<D> {
                 owned_in_slot.insert(block);
                 *counts.entry(block).or_default() += 1;
             }
+            // The free journal itself is immutable CoW metadata and is
+            // protected by both F0 candidates, just like the reference tree.
+            let Ok(checkpoint) = self.volume.inspect(|device| {
+                reclaim_ledger::read(device, state.journal, info.generation, state.cursor)
+            }) else {
+                suspect = true;
+                continue;
+            };
+            for block in checkpoint.pages {
+                owned_in_slot.insert(block);
+                *counts.entry(block).or_default() += 1;
+            }
             slot_owned.insert(info.generation, owned_in_slot);
         }
 
         // A block still referenced ONLY by the fallback F0 slot has a
         // delayed-free retirement epoch. Do not reuse it in the next commit:
         // that commit must first atomically rotate away the fallback slot.
+        let current_owned = slot_owned
+            .get(&self.generation())
+            .cloned()
+            .unwrap_or_default();
+        // The older root's exclusive blocks are released only AFTER
+        // successfully publishing the new generation; the new journal
+        // may list them as ready, but cannot allocate from them today.
+        let mut rotated_out: BTreeSet<u64> = if slot_owned.len() == 2 && !suspect {
+            let mut iter = slot_owned.values();
+            let old = iter.next().expect("two slots");
+            let newest = iter.next().expect("two slots");
+            old.difference(newest).copied().collect()
+        } else {
+            BTreeSet::new()
+        };
         let delayed_free_blocks = if slot_owned.len() == 2 {
             let mut iter = slot_owned.values();
             let old = iter.next().expect("two slots");
@@ -1187,13 +1263,34 @@ impl<D: BlockDevice> FileSystem<D> {
         };
         // Fail closed if ownership is unknown for *any* F0-checksummed
         // root candidate. Even an unreferenced-looking block may be live.
-        let free = if suspect {
+        let mut free = if suspect {
             BTreeSet::new()
         } else {
             (self.state.cursor..total)
                 .filter(|n| !counts.contains_key(n))
                 .collect()
         };
+        let journal_header = self.state.journal;
+        let journal_generation = self.generation();
+        let journal_cursor = self.state.cursor;
+        let checkpoint = if journal_header.first != 0 {
+            Some(self.volume.inspect(|device| {
+                reclaim_ledger::read(device, journal_header, journal_generation, journal_cursor)
+            })?)
+        } else {
+            None
+        };
+        // Fail-closed witness check. A checksum-valid forged free run is not
+        // a proof that any of its addresses are free in both F0 candidates.
+        if !suspect
+            && checkpoint
+                .as_ref()
+                .is_some_and(|journal| !journal.ready.is_subset(&free))
+        {
+            suspect = true;
+            free.clear();
+            rotated_out.clear();
+        }
         let next_root = self.generation().saturating_add(2);
         let report = AllocationReport {
             generation: self.generation(),
@@ -1211,18 +1308,28 @@ impl<D: BlockDevice> FileSystem<D> {
             reference_index_entries: self.state.reference.entries as usize,
             delayed_free_blocks,
             delayed_free_eligible_generation: self.generation().saturating_add(2),
+            reclaim_journal_pages: self.state.journal.pages as usize,
+            reclaim_journal_runs: self.state.journal.runs as usize,
+            journal_ready_blocks: checkpoint.as_ref().map_or(0, |j| j.ready.len()),
+            journal_pending_blocks: checkpoint.as_ref().map_or(0, |j| j.pending.len()),
         };
-        Ok((report, free))
+        Ok(Scrub {
+            report,
+            free,
+            rotated_out,
+            current_owned,
+        })
     }
 
     /// Recompute reachability across *both* root slots and all pinned
     /// snapshots, validating metadata and data checksums during the scan.
     pub fn allocation_report(&mut self) -> Result<AllocationReport> {
-        self.allocation_state().map(|(report, _)| report)
+        self.allocation_state().map(|scrub| scrub.report)
     }
 
-    fn reusable_blocks(&mut self) -> Result<BTreeSet<u64>> {
-        self.allocation_state().map(|(_, free)| free)
+    fn reusable_blocks(&mut self) -> Result<(BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
+        self.allocation_state()
+            .map(|scrub| (scrub.free, scrub.rotated_out, scrub.current_owned))
     }
 
     fn range_page(
@@ -1425,7 +1532,7 @@ impl<D: BlockDevice> FileSystem<D> {
         if root_block >= self.state.cursor {
             return Err(Error::NoSpace);
         }
-        let reusable = self.reusable_blocks()?;
+        let (reusable, rotated_out, current_owned) = self.reusable_blocks()?;
         let mut builder = Builder::new(self.state.cursor, root_block, reusable);
         let mut state = State {
             cursor: self.state.cursor,
@@ -1435,6 +1542,7 @@ impl<D: BlockDevice> FileSystem<D> {
             records: tx.records,
             catalog: tx.catalog,
             reference: RefHeader::default(),
+            journal: JournalHeader::default(),
         };
         let mut new_data = tx.new_data;
         if tx.catalog_dirty {
@@ -1559,6 +1667,35 @@ impl<D: BlockDevice> FileSystem<D> {
             &previous,
             &counts,
         )?;
+        let new_ref_pages = {
+            let mut overlay = StagedReader {
+                volume: &mut self.volume,
+                staged: &builder.staged,
+            };
+            reference_index::read(&mut overlay, state.reference, generation, builder.cursor)?.1
+        };
+        let new_owned: BTreeSet<u64> = counts.keys().copied().chain(new_ref_pages).collect();
+        let pending: BTreeSet<u64> = current_owned.difference(&new_owned).copied().collect();
+        state.journal = reclaim_ledger::persist(&mut builder, generation, &rotated_out, &pending)?;
+        // Independently verify the complete staged journal before F0
+        // publication. Its pages must not alias the namespace/ref index.
+        {
+            let mut overlay = StagedReader {
+                volume: &mut self.volume,
+                staged: &builder.staged,
+            };
+            let checkpoint =
+                reclaim_ledger::read(&mut overlay, state.journal, generation, builder.cursor)?;
+            if !checkpoint.pages.is_disjoint(&new_owned)
+                || checkpoint
+                    .ready
+                    .iter()
+                    .chain(&checkpoint.pending)
+                    .any(|id| new_owned.contains(id))
+            {
+                return Err(Error::CorruptTree);
+            }
+        }
         state.cursor = builder.cursor;
         let reference_writes = reference_index::staged_page_count(&builder);
         let manifest = root_manifest(&state, generation);
