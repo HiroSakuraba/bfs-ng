@@ -393,6 +393,14 @@ pub(super) fn read<D: BlockDevice>(
     Ok((counts, pages))
 }
 
+/// Number of actual CoW reference pages that will reach the disk in this
+/// commit, excluding superseded intermediate path copies.
+pub(super) fn staged_page_count(builder: &Builder) -> usize {
+    builder.staged.iter().filter(|(_, page)| {
+        &page[..8] == LEAF_MAGIC || &page[..8] == BRANCH_MAGIC
+    }).count()
+}
+
 fn discard_intermediate(builder: &mut Builder, root: u64) -> Result<()> {
     let staged: BTreeMap<u64, [u8; BLOCK_SIZE]> = builder.staged
         .iter()
