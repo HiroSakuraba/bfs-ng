@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cache-lab"]
+members = ["crates/cache-lab", "crates/metadata-cache", "crates/attribute-index"]
 resolver = "3"
 
 [workspace.package]

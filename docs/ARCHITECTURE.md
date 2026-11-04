@@ -25,8 +25,8 @@ The research sequence is:
 - C1: deterministic trace schema, reproducible generators, replay baseline.
 - C2: compare LRU, S3-FIFO, W-TinyLFU policies under identical byte capacity.
 - C3: cost-weighted reports and golden reference invariants.
-- C4: validate policy behavior against independently implemented references; fix deviations.
-- C5: add an opt-in read-only generation-safe metadata cache with explicit invalidation.
+- C4: comparison runner against independent libCacheSim LRU/S3-FIFO/W-TinyLFU; assess and document variant deltas (full upstream run pending).
+- C5: safe-Rust read-only metadata cache keyed by volume+physical address+generation, with CRC32C validation and immutable handles. Snapshot pin/retirement and persistence are not implemented.
 - C6: measure real query p50/p99, CPU L1/LLC/TLB misses, page-cache overlap and write amplification.
 
 ## First filesystem milestones
@@ -35,8 +35,10 @@ The research sequence is:
 - F1: image-backed storage, validated block/inode parsing, directory structure.
 - F2: choose and implement a *single* transaction durability mechanism.
 - F3: checksums, scrub and recoverability tests under injected failures.
-- F4: typed attributes, stable index keys and transactional query consistency.
+- F4: typed attributes, stable index keys and transactional query consistency. The M0 in-memory reference implementation is in `crates/attribute-index`; durable CoW indexing remains future work.
 - F5: optional snapshots, reflinks, live-query stream and mature caching.
+
+**M0 milestone:** `crates/attribute-index` implements typed attributes, full-record in-memory transactional updates, immutable snapshots, BTreeSet posting indexes and independently scanned query oracles. It is intentionally neither an image-backed index nor crash-safe. [Detailed M0 contract](M0_SEARCHABLE_ATTRIBUTES.md).
 
 No cache result is a proof of filesystem safety. No filesystem semantics are implemented yet.
 

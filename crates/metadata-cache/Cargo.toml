@@ -1,0 +1,10 @@
+[package]
+name = "bfs-ng-metadata-cache"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "Generation-checked, read-only filesystem metadata block cache"
+
+[lints.rust]
+unsafe_code = "forbid"

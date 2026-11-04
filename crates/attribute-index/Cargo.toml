@@ -1,0 +1,10 @@
+[package]
+name = "bfs-ng-attribute-index"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+description = "In-memory typed searchable metadata and snapshot differential oracle"
+
+[lints.rust]
+unsafe_code = "forbid"

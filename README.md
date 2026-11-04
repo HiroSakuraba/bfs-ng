@@ -2,23 +2,23 @@
 
 **Experimental Rust filesystem research, inspired by the Be File System.**
 
-BFS-NG aims to combine searchable, typed file attributes with transactional metadata, crash safety, checksums, and cache-aware performance. It is **not currently a usable filesystem**: the first implementation tranche is a deterministic cache-policy laboratory.
+BFS-NG aims to combine searchable, typed file attributes with transactional metadata, crash safety, checksums, and cache-aware performance. It is **not currently a usable filesystem**: its implementation currently consists of research components, not a mountable filesystem.
 
 ## Status
 
-- **Implemented (experimental):** Rust 2024 workspace and `crates/cache-lab`, with trace generation, CSV replay, byte-budgeted no-cache and LRU baselines, S3-FIFO-inspired and Window TinyLFU-inspired simulators, report generation, fixtures and tests.
+- **Implemented (experimental):** Rust 2024 workspace, `crates/cache-lab`, and `crates/metadata-cache` with generation-checked immutable metadata reads, checksums and concurrent tests. The lab retains trace generation, CSV replay, byte-budgeted no-cache and LRU baselines, S3-FIFO-inspired and Window TinyLFU-inspired simulators, report generation, fixtures and tests.
 - **Validated by GitHub Actions:** Rust compilation, 11 tests, Clippy, and the independent LRU golden trace. Formatting is enforced from this tranche onward.
-- **Not implemented:** disk format, filesystem mounts, block-device driver, transactional engine, real metadata cache, indexed attributes, snapshots, Windows/Linux filesystem adapters.
+- **C4 reference comparison:** independent libCacheSim 0.3.5 comparison runner and workflow, with verified LRU control. Research S3-FIFO/TinyLFU variants differ measurably; see results and limitations in the C4 report. S3-FIFO/TinyLFU remain research variants.
+- **M0 searchable metadata (in-memory only):** typed attribute schemas, stable volume/inode IDs, ordered index postings, atomic in-memory update publication, immutable snapshots, equality/range/prefix/membership queries, and a full-scan differential oracle. See [M0 design and limits](docs/M0_SEARCHABLE_ATTRIBUTES.md).
+- **Not implemented:** production disk format, mounts, persistent block-device driver, transactional allocator, **durable** indexes, persistent snapshot retention, authorization-aware queries, Windows/Linux adapters.
 
 ## Searchable metadata design
 
-A [typed-attribute and transactional query proposal](docs/SEARCHABLE_METADATA.md) documents the intended native indexes for AxiomZig diagnostic searches and DVE dependency discovery. **The persistent metadata index and query API are not implemented yet.**
+The [metadata query architecture](docs/SEARCHABLE_METADATA.md) explains how the experimental M0 typed in-memory query engine can eventually become a persistent, transactionally consistent CoW index. The durable query engine and live-query feed are **not implemented**.
 
-## Real-world workload benchmarks
+## Real-world corpus and asset benchmarks
 
-The [AxiomZig, DVE, and AxiomMegaDoc benchmark suite](benchmarks/real-world/README.md) generates compiler-unvalidated AxiomZig fixtures, inventories checked-out corpus archives, and produces recorded or modeled page-level traces from DVE scenes and assets. It feeds the existing cache-policy simulator; **it does not mount BFS-NG or measure kernel page-cache misses**.
-
-The [AxiomMegaDoc integration](benchmarks/real-world/MEGADOC.md) benchmarks generated long documents and their source-record/attribute reads without pretending to measure kernel cache misses.
+The [AxiomZig, DVE, and AxiomMegaDoc suite](benchmarks/real-world/README.md) collects source-backed deterministic modeled or benchmark-owned read traces, suitable for cache policy comparisons. It does **not** measure kernel cache misses or operate on a BFS-NG filesystem. The [AxiomMegaDoc walkthrough](benchmarks/real-world/MEGADOC.md) covers long-document assembly, training-style reads and provenance workloads. Bulk training data remains versioned in [AxiomMegaDoc](https://github.com/HiroSakuraba/AxiomMegadoc/tree/main/corpus/v0.12).
 
 ## First run
 
@@ -26,6 +26,7 @@ Install Rust 1.85 or later. From the repository root:
 
 ```sh
 cargo test --workspace --all-targets
+cargo test -p bfs-ng-attribute-index
 cargo run --release -p bfs-ng-cache-lab -- demo --events 50000 --seed 42 --capacity-bytes 1048576
 cargo run --release -p bfs-ng-cache-lab -- sweep --input crates/cache-lab/fixtures/golden.csv --capacities 4096,8192,16384
 python3 crates/cache-lab/scripts/lru_oracle.py crates/cache-lab/fixtures/golden.csv 8192
@@ -38,7 +39,9 @@ Cache miss costs are **trace-supplied model parameters**, not observed SSD or ap
 ```text
 Cargo.toml
 crates/cache-lab/     # Standalone safe-Rust trace simulator
-benchmarks/real-world/ # AxiomZig/DVE corpus and trace workload harness
+crates/metadata-cache/ # Generation-safe read-only metadata cache
+crates/attribute-index/ # M0 typed in-memory query/index reference
+benchmarks/real-world/ # AxiomZig/DVE/AxiomMegaDoc access-pattern harness
 docs/ARCHITECTURE.md  # Design decisions and roadmap
 .github/workflows/    # Compilation, tests, lint and golden replay
 ```
@@ -47,7 +50,7 @@ The first crate is isolated so that cache experiments cannot corrupt future on-d
 
 ## Research and references
 
-See [the cache lab README](crates/cache-lab/README.md) and [architecture and milestones](docs/ARCHITECTURE.md). The foundational reference is Dominic Giampaolo's *Practical File System Design: The Be File System*, with modern directions from OpenZFS, XFS, Btrfs, S3-FIFO and TinyLFU research.
+See [M0 searchable attributes](docs/M0_SEARCHABLE_ATTRIBUTES.md), [C4 independent comparison](docs/C4_REFERENCE_VALIDATION.md), [C5 cache contract](docs/C5_METADATA_CACHE.md), [the cache lab README](crates/cache-lab/README.md) and [architecture and milestones](docs/ARCHITECTURE.md). The foundational reference is Dominic Giampaolo's *Practical File System Design: The Be File System*, with modern directions from OpenZFS, XFS, Btrfs, S3-FIFO and TinyLFU research.
 
 ## Contribution and safety
 
