@@ -1151,7 +1151,10 @@ impl<D: BlockDevice> FileSystem<D> {
         limit: usize,
     ) -> Result<NamespacePage> {
         if prefix != "/" {
-            validate_user_path(prefix)?;
+            // Range prefixes may end in '/' for direct-child scans, unlike
+            // complete file paths used by normal namespace operations.
+            let stem = prefix.strip_suffix('/').unwrap_or(prefix);
+            validate_user_path(stem)?;
         }
         if let Some(previous) = after {
             validate_user_path(previous)?;
