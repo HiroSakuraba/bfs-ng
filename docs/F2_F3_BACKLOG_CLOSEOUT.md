@@ -51,3 +51,8 @@ Eight additional tests inspect tree occupancy, compare paginated disk walks to t
 ## Remaining actual backlog
 
 F2 still needs a durable, independently verifiable allocation/reference-count tree with delayed-free epochs, write interruption journaling, crash-resumable reclamation, data relocation/compaction, a root-payload addressing redesign to avoid monotonically consuming low-end blocks, and device-level fault testing. F3 still clones the in-memory namespace per transaction, lacks leaf links and query-plan-aware streaming cursors, and cannot guarantee logarithmic **end-to-end** cost while F2 rescans all retained roots. These require separate format/design milestones. Do not mark them implemented on the strength of the above audit and cursor work.
+
+
+## F2.R1 durable reference-index follow-up
+
+The subsequent [F2.R1 batch](F2_R1_DURABLE_REFERENCES.md) persists a bounded checksummed page chain containing exact per-root block-reference counts; recovery independently validates those counts against current and pinned F3 trees. F2's allocator protects index pages alongside data and metadata. **It is not yet an incremental CoW reference B+tree or durable free-run allocator**; the older full-scan oracle remains active, and the disk image magic/version advances to v5.
