@@ -375,7 +375,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
     if root == 0 {
         return Ok((Vec::new(), 0));
     }
-    let empty = Builder::new(cursor, generation.saturating_add(1), BTreeSet::new());
+    let empty = Builder::new(cursor, BTreeSet::new());
     let mut result = Vec::new();
     let mut visited = BTreeSet::new();
     let mut reads = 0;
@@ -400,7 +400,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
                 return Ok(());
             }
             if address < self.cursor
-                || address <= self.generation.saturating_add(1)
+                || address <= ROOT_PAYLOAD_LAST
                 || !self.visited.insert(address)
                 || self.visited.len() > 4096
             {
