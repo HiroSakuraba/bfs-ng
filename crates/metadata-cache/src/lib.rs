@@ -40,6 +40,12 @@ pub trait BlockReader: Send + Sync {
     fn read_block(&self, physical_block: u64, destination: &mut [u8]) -> io::Result<()>;
 }
 
+impl<T: BlockReader + ?Sized> BlockReader for Arc<T> {
+    fn read_block(&self, physical_block: u64, destination: &mut [u8]) -> io::Result<()> {
+        (**self).read_block(physical_block, destination)
+    }
+}
+
 #[derive(Debug)]
 pub enum CacheError {
     InvalidBlockSize,

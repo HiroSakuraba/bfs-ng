@@ -37,7 +37,7 @@ impl MemoryReader {
     }
 }
 
-impl BlockReader for Arc<MemoryReader> {
+impl BlockReader for MemoryReader {
     fn read_block(&self, address: u64, destination: &mut [u8]) -> io::Result<()> {
         let guard = self.0.read().unwrap();
         let source = guard
