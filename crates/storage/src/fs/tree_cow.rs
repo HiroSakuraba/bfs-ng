@@ -376,13 +376,14 @@ pub(super) fn scan_pages<D: BlockDevice>(
         prefix: &'a str,
         after: Option<&'a str>,
         wanted: usize,
+        finished_prefix: bool,
         visited: &'a mut BTreeSet<u64>,
         reads: &'a mut usize,
         result: &'a mut Vec<(String, Record)>,
     }
     impl<D: BlockDevice> Walker<'_, D> {
         fn walk(&mut self, address: u64, level: Option<u8>) -> Result<()> {
-            if self.result.len() >= self.wanted {
+            if self.result.len() >= self.wanted || self.finished_prefix {
                 return Ok(());
             }
             if address < self.cursor
@@ -409,6 +410,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
                         if !key.starts_with(self.prefix) {
                             // All following keys are greater: prefix results
                             // form one contiguous lexicographic interval.
+                            self.finished_prefix = true;
                             break;
                         }
                         self.result.push((key, record));
@@ -428,7 +430,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
                             continue;
                         }
                         self.walk(child.block, Some(actual - 1))?;
-                        if self.result.len() >= self.wanted {
+                        if self.result.len() >= self.wanted || self.finished_prefix {
                             break;
                         }
                     }
@@ -446,6 +448,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
         prefix,
         after,
         wanted,
+        finished_prefix: false,
         visited: &mut visited,
         reads: &mut reads,
         result: &mut result,
