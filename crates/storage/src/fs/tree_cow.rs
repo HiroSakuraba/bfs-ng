@@ -90,7 +90,7 @@ fn read_page<D: BlockDevice>(
             }
             let raw = rd.take(8).ok_or(Error::CorruptTree)?;
             let address = u64_at(raw, 0);
-            if address <= generation + 1 || address >= volume.block_count() {
+            if address <= ROOT_PAYLOAD_LAST || address >= volume.block_count() {
                 return Err(Error::CorruptTree);
             }
             previous = max.clone();
