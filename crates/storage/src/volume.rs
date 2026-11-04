@@ -65,8 +65,7 @@ impl Super {
         block[48..52].copy_from_slice(&self.root_crc.to_le_bytes());
         block[56..64].copy_from_slice(&self.blocks.to_le_bytes());
         let checksum = crc32c(&block[..CHECKSUM_OFFSET]);
-        block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4]
-            .copy_from_slice(&checksum.to_le_bytes());
+        block[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 4].copy_from_slice(&checksum.to_le_bytes());
         block
     }
 
@@ -227,7 +226,9 @@ impl<D: BlockDevice> Volume<D> {
         if self.head.root_block.is_none() {
             return Ok(None);
         }
-        read_payload(&mut self.device, self.head)?.ok_or(Error::CorruptRoot).map(Some)
+        read_payload(&mut self.device, self.head)?
+            .ok_or(Error::CorruptRoot)
+            .map(Some)
     }
 
     /// Only one new, immutable root payload block per generation (no allocator).
@@ -245,9 +246,7 @@ impl<D: BlockDevice> Volume<D> {
             .generation
             .checked_add(1)
             .ok_or(Error::GenerationOverflow)?;
-        let next_block = generation
-            .checked_add(1)
-            .ok_or(Error::GenerationOverflow)?;
+        let next_block = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
         if next_block >= self.head.blocks {
             return Err(Error::NoSpace);
         }

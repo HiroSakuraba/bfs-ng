@@ -52,7 +52,13 @@ fn out_of_space_preserves_last_root() {
     assert!(matches!(v.commit_root(b"c"), Err(Error::NoSpace)));
     assert_eq!(v.info().generation, 2);
     assert_eq!(v.read_root().unwrap(), Some(b"b".to_vec()));
-    assert_eq!(Volume::open(v.into_device().power_loss()).unwrap().info().generation, 2);
+    assert_eq!(
+        Volume::open(v.into_device().power_loss())
+            .unwrap()
+            .info()
+            .generation,
+        2
+    );
 }
 
 #[test]
@@ -61,13 +67,21 @@ fn all_four_crash_points_preserve_old_or_entire_new_root() {
         let mut v = vol(10);
         v.commit_root(b"committed-v1").unwrap();
         let mut device = v.into_device();
-        device.inject(Fault {
-            operation,
-            torn_bytes: None,
-        }).unwrap();
+        device
+            .inject(Fault {
+                operation,
+                torn_bytes: None,
+            })
+            .unwrap();
         let mut v = Volume::open(device).unwrap();
-        assert!(matches!(v.commit_root(b"committed-v2"), Err(Error::InjectedCrash)));
-        assert!(matches!(v.commit_root(b"retry-without-reopen"), Err(Error::Poisoned)));
+        assert!(matches!(
+            v.commit_root(b"committed-v2"),
+            Err(Error::InjectedCrash)
+        ));
+        assert!(matches!(
+            v.commit_root(b"retry-without-reopen"),
+            Err(Error::Poisoned)
+        ));
         let mut recovered = Volume::open(v.into_device().power_loss()).unwrap();
         let result = recovered.read_root().unwrap().unwrap();
         assert!(
@@ -92,10 +106,12 @@ fn every_torn_write_prefix_falls_back_or_recovers_whole_root() {
             let mut v = vol(10);
             v.commit_root(b"original").unwrap();
             let mut device = v.into_device();
-            device.inject(Fault {
-                operation,
-                torn_bytes: Some(torn_bytes),
-            }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes: Some(torn_bytes),
+                })
+                .unwrap();
             let mut in_flight = Volume::open(device).unwrap();
             assert!(matches!(
                 in_flight.commit_root(b"replacement"),
@@ -156,8 +172,14 @@ fn damaged_both_slots_and_blank_images_are_rejected() {
 fn formatting_cannot_clobber_an_existing_image() {
     let device = vol(8).into_device().power_loss();
     assert!(matches!(Volume::format(device, 19), Err(Error::NotBlank)));
-    assert!(matches!(Volume::format(CrashDevice::new(3), 19), Err(Error::Geometry)));
-    assert!(matches!(Volume::format(CrashDevice::new(8), 0), Err(Error::Geometry)));
+    assert!(matches!(
+        Volume::format(CrashDevice::new(3), 19),
+        Err(Error::Geometry)
+    ));
+    assert!(matches!(
+        Volume::format(CrashDevice::new(8), 0),
+        Err(Error::Geometry)
+    ));
 }
 
 #[test]
@@ -182,10 +204,9 @@ impl TempImage {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        Self(std::env::temp_dir().join(format!(
-            "bfs-ng-f0-{}-{nanos}-{id}.img",
-            std::process::id()
-        )))
+        Self(
+            std::env::temp_dir().join(format!("bfs-ng-f0-{}-{nanos}-{id}.img", std::process::id())),
+        )
     }
 }
 impl Drop for TempImage {
@@ -205,7 +226,10 @@ fn real_file_device_persists_across_close_and_reopen() {
     drop(volume);
     let mut reopened = Volume::open(FileDevice::open(&name.0).unwrap()).unwrap();
     assert_eq!(reopened.info().generation, 2);
-    assert_eq!(reopened.read_root().unwrap(), Some(b"durable-gen2".to_vec()));
+    assert_eq!(
+        reopened.read_root().unwrap(),
+        Some(b"durable-gen2".to_vec())
+    );
     drop(reopened);
     assert!(FileDevice::create_new(&name.0, 12).is_err());
 }
