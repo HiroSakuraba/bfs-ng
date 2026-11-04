@@ -1363,9 +1363,57 @@ impl<D: BlockDevice> FileSystem<D> {
         self.allocation_state().map(|scrub| scrub.report)
     }
 
-    fn reusable_blocks(&mut self) -> Result<(BTreeSet<u64>, BTreeSet<u64>, BTreeSet<u64>)> {
-        self.allocation_state()
-            .map(|scrub| (scrub.free, scrub.rotated_out, scrub.current_owned))
+    /// One expensive independent certification per opened single-writer
+    /// handle. After that, only successful F0 publications advance the
+    /// ownership certificate; no speculative/staged state is trusted.
+    fn certified_for_commit(&mut self) -> Result<(Certificate, bool)> {
+        if let Some(cert) = &self.certified {
+            if cert.generation == self.generation() {
+                return Ok((cert.clone(), true));
+            }
+        }
+        let scrub = self.allocation_state()?;
+        self.certification_scans += 1;
+        let valid = !scrub.report.reuse_blocked;
+        let generation = self.generation();
+        let cache = Certificate {
+            generation,
+            current_owned: scrub.current_owned.clone(),
+            fallback_owned: if valid {
+                scrub.fallback_owned
+            } else {
+                // The prior F0 slot is not a trusted source for retirement.
+                // Commit only with virgin blocks; never promote its pages.
+                scrub.current_owned
+            },
+            ready: if valid { scrub.ready } else { BTreeSet::new() },
+            pending: if valid { scrub.pending } else { BTreeSet::new() },
+            deferred: if valid { scrub.deferred } else { BTreeSet::new() },
+            sweep_cursor: if valid { self.state.journal.sweep_cursor } else { 0 },
+        };
+        Ok((cache, false))
+    }
+
+    /// Independent full-graph scans needed to seed commit-time certificates.
+    /// Explicit read-only allocation reports remain independent scrubs.
+    pub fn certification_scans(&self) -> u64 {
+        self.certification_scans
+    }
+
+    /// True when the most recent successful commit used the in-handle
+    /// certificate rather than rebuilding allocation state from both roots.
+    pub fn last_commit_used_certificate(&self) -> bool {
+        self.last_commit_used_certificate
+    }
+
+    /// Advance at most one budget of deferred retirements and publish the
+    /// resulting progress cursor even without any namespace changes.
+    /// This uses the ordinary ordered F0 transaction and consumes a new
+    /// generation/root payload, so it is intentionally explicit.
+    pub fn reclaim_step(&mut self) -> Result<u64> {
+        let mut tx = self.begin();
+        tx.dirty = true;
+        self.commit(tx)
     }
 
     fn range_page(
@@ -1568,8 +1616,8 @@ impl<D: BlockDevice> FileSystem<D> {
         if root_block >= self.state.cursor {
             return Err(Error::NoSpace);
         }
-        let (reusable, rotated_out, current_owned) = self.reusable_blocks()?;
-        let mut builder = Builder::new(self.state.cursor, root_block, reusable);
+        let (certificate, from_cache) = self.certified_for_commit()?;
+        let mut builder = Builder::new(self.state.cursor, root_block, certificate.ready.clone());
         let mut state = State {
             cursor: self.state.cursor,
             next_inode: tx.next_inode,
