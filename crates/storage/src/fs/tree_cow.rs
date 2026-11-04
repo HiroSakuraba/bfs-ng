@@ -190,7 +190,7 @@ fn redistribute_pair<D: BlockDevice>(
     let b = read_page(volume, builder, right.block, generation)?;
     match (a, b) {
         (Page::Leaf(mut first), Page::Leaf(second)) => {
-            if first.last().is_none_or(|(key, _)| *key >= second[0].0) {
+            if first.last().is_none_or(|(key, _)| key >= &second[0].0) {
                 return Err(Error::CorruptTree);
             }
             first.extend(second);
@@ -200,7 +200,7 @@ fn redistribute_pair<D: BlockDevice>(
             Page::Branch { level: la, children: mut first },
             Page::Branch { level: lb, children: second },
         ) if la == lb => {
-            if first.last().is_none_or(|child| child.max >= second[0].max) {
+            if first.last().is_none_or(|child| child.max.as_str() >= second[0].max.as_str()) {
                 return Err(Error::CorruptTree);
             }
             first.extend(second);
@@ -303,7 +303,8 @@ fn patch_node<D: BlockDevice>(
             if children.is_empty() {
                 return Ok(Vec::new());
             }
-            rebalance_near(volume, builder, &mut children, index.min(children.len() - 1), generation)?;
+            let touched = index.min(children.len() - 1);
+            rebalance_near(volume, builder, &mut children, touched, generation)?;
             // Deletions may collapse a root with just one child; this avoids
             // keeping tall single-child root chains indefinitely.
             if root && children.len() == 1 {
