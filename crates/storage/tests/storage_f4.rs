@@ -265,7 +265,7 @@ fn randomized_search_postings_match_independent_m0_scan() {
         tx.write_file(&path,format!("payload{i}").as_bytes()).unwrap();
         tx.set_attributes(&path,vec![
             ("asset.kind".into(),text(if i%2==0{"shader"}else{"texture"})),
-            ("corpus.score".into(),Value::Signed(i-22)),
+            ("corpus.score".into(),Value::Signed((i as i64)-22)),
             ("asset.sequence".into(),Value::Unsigned(i as u64)),
         ]).unwrap();
         fs.commit(tx).unwrap();
