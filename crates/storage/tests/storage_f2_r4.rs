@@ -40,7 +40,8 @@ fn crc32c(data: &[u8]) -> u32 {
 
 fn repair_crc(page: &mut [u8; BLOCK_SIZE]) {
     page[24..28].fill(0);
-    page[24..28].copy_from_slice(&crc32c(page).to_le_bytes());
+    let crc = crc32c(page);
+    page[24..28].copy_from_slice(&crc.to_le_bytes());
 }
 
 #[test]
