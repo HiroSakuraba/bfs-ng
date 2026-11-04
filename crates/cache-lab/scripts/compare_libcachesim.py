@@ -69,7 +69,16 @@ def reference_reports(events, capacity, libcachesim):
         ("wtinylfu", libcachesim.WTinyLFU),
     )
     for name, constructor in constructors:
-        cache = constructor(cache_size=capacity)
+        if name == "wtinylfu":
+            # Match the BFS-NG variant's minimum 4 KiB window in bytes.
+            # The upstream default 1% window can be smaller than a 4 KiB block,
+            # making even basic admission behavior incomparable.
+            window_bytes = min(capacity, max(capacity // 100, 4096))
+            cache = constructor(
+                cache_size=capacity, window_size=window_bytes / capacity
+            )
+        else:
+            cache = constructor(cache_size=capacity)
         hits = 0
         miss_bytes = 0
         for event in events:

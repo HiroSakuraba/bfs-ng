@@ -21,12 +21,12 @@ python3 crates/cache-lab/scripts/compare_libcachesim.py \
   --require-lru-match --output c4-mixed.json
 ```
 
-The runner replays exactly the same demand object IDs, sizes and order against the independent library and Rust. It outputs request and byte miss deltas. LRU acts as an exact-match control; S3-FIFO/TinyLFU deltas are descriptive, **not** a claim that implementations are incorrect.
+The runner normalizes the reference W-TinyLFU window fraction to the Rust model's minimum 4 KiB window. That aligns the window budget in bytes, but not the policies' frequency sketches, admission decisions or protected-region behavior. It replays exactly the same demand object IDs, sizes and order against the independent library and Rust. It outputs request and byte miss deltas. LRU acts as an exact-match control; S3-FIFO/TinyLFU deltas are descriptive, **not** a claim that implementations are incorrect.
 
 Traces with speculative access, size-mutating identities, zero sizes or zero capacity cannot currently be compared fairly. The supplied miss-cost estimates are not physical storage measurements.
 
 ## Reproducibility and acceptance
 
-The `reference-comparison.yml` manual GitHub Actions workflow installs libCacheSim, records the installed distribution versions, and uploads evidence as JSON. It is intentionally **not a required branch-protection check** while the upstream Python package version remains unpinned.
+The `reference-comparison.yml` manual GitHub Actions workflow pins libCacheSim 0.3.5, records installed distribution versions, and uploads evidence as JSON. It is intentionally **not a required branch-protection check** while the upstream Python package version remains unpinned.
 
 C4 is only independently validated once that job completes successfully, artifacts have been preserved, the exact upstream version is recorded and unexpected LRU mismatches investigated. A subsequent tranche can drive Caffeine's own simulator and align TinyLFU configuration in more depth.
