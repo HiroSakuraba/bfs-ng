@@ -1,0 +1,36 @@
+{
+  "format": "DVOXSCENE",
+  "version": 1,
+  "name": "TraceFixtureScene",
+  "objects": [
+    {
+      "index": 0,
+      "id": 1001,
+      "name": "Block",
+      "nodePath": "/Block",
+      "file": "block.dvox",
+      "parent": null,
+      "anchored": true,
+      "structural": true,
+      "generateCollision": true,
+      "worldMatrix": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  ]
+}

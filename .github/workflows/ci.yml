@@ -36,6 +36,14 @@ jobs:
         run: |
           cargo run --release -p bfs-ng-cache-lab -- replay --input crates/cache-lab/fixtures/golden.csv --capacity-bytes 8192 --output golden-results.csv
           python3 crates/cache-lab/scripts/lru_oracle.py crates/cache-lab/fixtures/golden.csv 8192
+      - name: Real-world AxiomZig/DVE trace harness and replay
+        run: |
+          python3 -m unittest discover -s benchmarks/real-world -p 'test_*.py' -v
+          python3 benchmarks/real-world/bench.py generate-axiomzig --output /tmp/bfsng-az-ci --count 12 --seed 42
+          python3 benchmarks/real-world/bench.py trace --project axiomzig --root /tmp/bfsng-az-ci --revision az-fixture-v1 --pattern compile --passes 2 --mode model --output /tmp/bfsng-az.csv
+          python3 benchmarks/real-world/bench.py trace --project dve --root benchmarks/real-world/fixtures/dve --revision dve-fixture-v1 --pattern scene --passes 2 --mode record --output /tmp/bfsng-dve.csv --summary /tmp/bfsng-dve.json
+          cargo run --quiet --release -p bfs-ng-cache-lab -- replay --input /tmp/bfsng-az.csv --capacity-bytes 65536 --policies none,lru,s3fifo,wtinylfu --output /tmp/bfsng-az-report.csv
+          cargo run --quiet --release -p bfs-ng-cache-lab -- replay --input /tmp/bfsng-dve.csv --capacity-bytes 65536 --policies none,lru,s3fifo,wtinylfu --output /tmp/bfsng-dve-report.csv
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v5

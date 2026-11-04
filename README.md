@@ -10,6 +10,10 @@ BFS-NG aims to combine searchable, typed file attributes with transactional meta
 - **Validated by GitHub Actions:** Rust compilation, 11 tests, Clippy, and the independent LRU golden trace. Formatting is enforced from this tranche onward.
 - **Not implemented:** disk format, filesystem mounts, block-device driver, transactional engine, real metadata cache, indexed attributes, snapshots, Windows/Linux filesystem adapters.
 
+## Real-world workload benchmarks
+
+The [AxiomZig and DVE benchmark harness](benchmarks/real-world/README.md) generates compiler-unvalidated AxiomZig fixtures, inventories checked-out corpus archives, and produces recorded or modeled page-level traces from DVE scenes and assets. It feeds the existing cache-policy simulator; **it does not mount BFS-NG or measure kernel page-cache misses**.
+
 ## First run
 
 Install Rust 1.85 or later. From the repository root:
@@ -28,6 +32,7 @@ Cache miss costs are **trace-supplied model parameters**, not observed SSD or ap
 ```text
 Cargo.toml
 crates/cache-lab/     # Standalone safe-Rust trace simulator
+benchmarks/real-world/ # AxiomZig/DVE corpus and trace workload harness
 docs/ARCHITECTURE.md  # Design decisions and roadmap
 .github/workflows/    # Compilation, tests, lint and golden replay
 ```

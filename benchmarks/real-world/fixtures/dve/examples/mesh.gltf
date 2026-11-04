@@ -1,0 +1,12 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "BFS-NG trace fixture (not DVE runtime)"
+  },
+  "buffers": [
+    {
+      "uri": "mesh.bin",
+      "byteLength": 16
+    }
+  ]
+}
