@@ -132,3 +132,9 @@ A successful pinned-source run against AxiomZig `e22f28424bc2f7589b5779e23bd1790
 DVE `scene-record` completed **18 real harness file-read calls** totaling **8,692 bytes**. These figures quantify what the harness read; they do not mean 8,692 bytes came from a physical SSD. AxiomZig had one mislabeled/non-ZIP archive that was explicitly reported and treated as an opaque blob. The full policy results, including W-TinyLFU, no-cache, and request/byte miss counts, are in the [real-source workflow artifact](https://github.com/HiroSakuraba/bfs-ng/actions/runs/41776494500). This was a smoke test on highly selected access sequences, not a general benchmark of the source projects.
 
 Before making a performance claim, compare equal-size workloads at multiple capacities, include physical OS cache telemetry, and increase DVE's real dependency graph coverage. In particular, only 18 scene reads is insufficient to characterize DVE's general streaming behavior.
+
+## AxiomMegaDoc v0.12 output as a fourth workload
+
+The [AxiomMegaDoc benchmark guide](MEGADOC.md) documents a distinct source from AxiomZig: three-language long-form training-document assembly, provenance lookups, and sequential reading of generated megadocs. Run `megadoc.py` on the generated corpus from `HiroSakuraba/AxiomMegadoc`; it accepts `assemble`, `train`, `provenance`, and `mixed`. Both the original v0.11 archive and the v0.12 generator revision are pinned by the external-source CI job.
+
+The source generator distinguishes **paper-aligned checker-grounded latent documents** from wider **benchmark-only source-pair views**. These views are not evidence of semantic correctness or model-learning gains. No actual OS page-cache misses are measured by this harness.

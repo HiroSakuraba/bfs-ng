@@ -1,0 +1,84 @@
+name: AxiomMegaDoc generated-data benchmark
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  megadoc-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout pinned AxiomMegaDoc generator
+        uses: actions/checkout@v5
+        with:
+          repository: HiroSakuraba/AxiomMegadoc
+          ref: ffd3db462296e4812218c14bc1f9b3b8eafe0883
+          path: benchmark_sources/axiommegadoc
+          persist-credentials: false
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85.0'
+          components: rustfmt, clippy
+      - name: Generate provenance-checked AxiomMegaDoc corpus
+        run: |
+          python3 benchmark_sources/axiommegadoc/src/build_v012.py \
+            --output /tmp/bfsng-megadoc-data
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path("/tmp/bfsng-megadoc-data")
+          m = json.loads((root / "manifest.json").read_text())
+          assert m["generated_docs"] == 17, m["generated_docs"]
+          assert m["benchmark_views"] == 260, m["benchmark_views"]
+          assert m["selected_source_records"] == 520
+          assert m["source_bundle"] == "v0.11"
+          assert m["no_invented_compiler_results"]
+          assert not m["runtime_traces_executed"]
+          print("Generated", m["generated_docs"], "grounded latent documents and",
+                m["benchmark_views"], "nontraining provenance views.")
+          PY
+      - name: Replay assembly, training and metadata access patterns
+        run: |
+          mkdir -p /tmp/bfsng-megadoc-results
+          for pattern in assemble train provenance mixed; do
+            mode=model
+            if [ "$pattern" = assemble ]; then mode=record; fi
+            python3 benchmarks/real-world/megadoc.py \
+              --root /tmp/bfsng-megadoc-data \
+              --pattern "$pattern" --mode "$mode" --split all \
+              --passes 3 --seed 42 \
+              --output "/tmp/bfsng-megadoc-results/$pattern.csv" \
+              --summary "/tmp/bfsng-megadoc-results/$pattern.json"
+            cargo run --quiet --release -p bfs-ng-cache-lab -- sweep \
+              --input "/tmp/bfsng-megadoc-results/$pattern.csv" \
+              --capacities 65536,262144,1048576,4194304 \
+              --policies none,lru,s3fifo,wtinylfu \
+              --output "/tmp/bfsng-megadoc-results/$pattern-cache.csv"
+          done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          out = Path("/tmp/bfsng-megadoc-results")
+          for pattern in ("assemble", "train", "provenance", "mixed"):
+              summary = json.loads((out / f"{pattern}.json").read_text())
+              assert summary["events"] > 0, pattern
+              assert summary["generated_docs"] == 17, pattern
+              assert (out / f"{pattern}-cache.csv").stat().st_size > 0
+              print(pattern, "events", summary["events"])
+          assert json.loads((out / "assemble.json").read_text())["observed_file_read_bytes"] > 0
+          PY
+      - name: Upload summaries and comparisons (no corpus source data)
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: axiommegadoc-cache-sweeps
+          path: |
+            /tmp/bfsng-megadoc-results/*.json
+            /tmp/bfsng-megadoc-results/*-cache.csv
+          if-no-files-found: warn
