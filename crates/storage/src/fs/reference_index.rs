@@ -9,7 +9,7 @@
 //! The persisted entries are untrusted: load_state independently traverses
 //! current and pinned trees and rejects an index not exactly matching them.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, crc32c, seal, u16_at, u64_at,
+    BLOCK_SIZE, BlockDevice, Builder, Error, Result, seal, u16_at, u64_at,
     valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,7 +42,7 @@ pub(super) fn persist(
     if page_count > MAX_PAGES {
         return Err(Error::TooLarge);
     }
-    let mut next = 0;
+    let mut next: u64 = 0;
     for index in (0..page_count).rev() {
         let start = index * PAGE_ENTRIES;
         let end = usize::min(start + PAGE_ENTRIES, rows.len());
@@ -142,7 +142,6 @@ pub(super) fn read<D: BlockDevice>(
     }
     // Per-block checksums protect all bytes. A map mismatch is detected by
     // the independent current + pinned snapshot graph walk in load_state.
-    let _ = crc32c; // The seal/checksum helpers share the existing F0 CRC32C.
     Ok((counts, index_pages))
 }
 
