@@ -66,7 +66,10 @@ fn encode_runs(
             if address < end {
                 return Err(Error::CorruptTree);
             }
-            if address == end && last.eligible_generation == eligible_generation && last.length < u32::MAX {
+            if address == end
+                && last.eligible_generation == eligible_generation
+                && last.length < u32::MAX
+            {
                 last.length += 1;
                 continue;
             }
@@ -173,9 +176,7 @@ pub(super) fn read<D: BlockDevice>(
     let mut total_runs = 0usize;
     let mut total_blocks = 0u64;
     for i in 0..header.pages {
-        if !valid_address(next, generation, cursor, device.block_count())
-            || !pages.insert(next)
-        {
+        if !valid_address(next, generation, cursor, device.block_count()) || !pages.insert(next) {
             return Err(Error::CorruptTree);
         }
         let mut block = [0; BLOCK_SIZE];
@@ -212,7 +213,9 @@ pub(super) fn read<D: BlockDevice>(
                 return Err(Error::CorruptTree);
             }
             previous_end = Some(end);
-            total_blocks = total_blocks.checked_add(u64::from(length)).ok_or(Error::CorruptTree)?;
+            total_blocks = total_blocks
+                .checked_add(u64::from(length))
+                .ok_or(Error::CorruptTree)?;
             if total_blocks > device.block_count() {
                 return Err(Error::CorruptTree);
             }
@@ -228,10 +231,16 @@ pub(super) fn read<D: BlockDevice>(
     }
     if next != 0
         || total_runs != header.runs as usize
-        || pages.iter().any(|id| ready.contains(id) || pending.contains(id))
+        || pages
+            .iter()
+            .any(|id| ready.contains(id) || pending.contains(id))
         || !ready.is_disjoint(&pending)
     {
         return Err(Error::CorruptTree);
     }
-    Ok(Journal { pages, ready, pending })
+    Ok(Journal {
+        pages,
+        ready,
+        pending,
+    })
 }
