@@ -504,8 +504,19 @@ pub(super) fn discard_superseded_nodes(builder: &mut Builder, root: u64) -> Resu
             }
         }
     }
+    // Every superseded CoW node was allocated from certified free space
+    // or the virgin cursor during THIS transaction, but never published.
+    // Return its address to Builder before the durable ready-run journal is
+    // constructed. Otherwise each multi-page path copy permanently leaks
+    // physical space even though the full two-root scrub sees it as free.
+    let abandoned: BTreeSet<u64> = staged
+        .keys()
+        .filter(|id| !reachable.contains(id))
+        .copied()
+        .collect();
     builder
         .staged
         .retain(|(addr, page)| &page[..8] != NODE_MAGIC || reachable.contains(addr));
+    builder.reusable.extend(abandoned);
     Ok(reachable.len())
 }
