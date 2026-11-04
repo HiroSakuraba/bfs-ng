@@ -47,15 +47,15 @@ fn a_small_change_retains_unaffected_reference_leaves() {
     let mut fs = blank(4096);
     let mut tx = fs.begin();
     tx.mkdir("/bulk").unwrap();
-    for n in 0..180 {
+    for n in 0..260 {
         tx.write_file(&format!("/bulk/f{n:03}"), &vec![n as u8; 19_000])
             .unwrap();
     }
     fs.commit(tx).unwrap();
     let (mut device, old_root, old_pages) = ref_root(fs.into_device().power_loss());
-    assert!(old_pages >= 4, "at least three leaves plus root");
+    assert!(old_pages >= 5, "at least four leaves plus root");
     let old_children = children(&mut device, old_root);
-    assert!(old_children.len() >= 3);
+    assert!(old_children.len() >= 4);
 
     let mut fs = FileSystem::open(device).unwrap();
     let mut tx = fs.begin();
@@ -65,7 +65,7 @@ fn a_small_change_retains_unaffected_reference_leaves() {
     assert!(index_writes > 0, "changed records must write a new path");
     let (mut device, next_root, next_pages) = ref_root(fs.into_device().power_loss());
     assert_ne!(old_root, next_root, "a changed index must path-copy its root");
-    assert!(next_pages >= 4);
+    assert!(next_pages >= 5);
     assert!(index_writes < old_pages, "a small edit should write fewer index pages than a complete rebuild");
     let next_children = children(&mut device, next_root);
     assert!(
@@ -74,7 +74,7 @@ fn a_small_change_retains_unaffected_reference_leaves() {
     );
     let mut fs = FileSystem::open(device).unwrap();
     assert_eq!(fs.read_file("/bulk/f000").unwrap(), b"updated record");
-    assert_eq!(fs.read_file("/bulk/f179").unwrap(), vec![179; 19_000]);
+    assert_eq!(fs.read_file("/bulk/f259").unwrap(), vec![259 as u8; 19_000]);
 }
 
 #[test]
