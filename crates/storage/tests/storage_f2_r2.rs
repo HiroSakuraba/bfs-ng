@@ -74,7 +74,7 @@ fn a_small_change_retains_unaffected_reference_leaves() {
     );
     let mut fs = FileSystem::open(device).unwrap();
     assert_eq!(fs.read_file("/bulk/f000").unwrap(), b"updated record");
-    assert_eq!(fs.read_file("/bulk/f259").unwrap(), vec![259 as u8; 19_000]);
+    assert_eq!(fs.read_file("/bulk/f259").unwrap(), vec![3_u8; 19_000]);
 }
 
 #[test]
