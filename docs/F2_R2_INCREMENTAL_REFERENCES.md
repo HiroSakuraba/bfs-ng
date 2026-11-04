@@ -13,6 +13,7 @@ The manifest trailer remains three little-endian fields: `reference_root:u64`, `
 - Leaf pages: `BFSRLF6\0` magic, `birth_generation:u64`, reserved zeros, CRC32C at byte 24, `record_count:u16` at byte 28, `level:u8=0` at byte 30. Packed sorted `(physical_address:u64, roots:u16)` rows begin at byte 32; maximum 406 per 4 KiB leaf.
 - Branch pages: `BFSRBR6\0` magic, the same header with level in 1–8, and packed `(child_max_physical_address:u64, child_page:u64)` separators; maximum 254 children. All unused bytes are zero and included in CRC.
 - Old child pages remain immutable and keep their birth generation. New generations copy only modified leaves and ancestor branches. Separators are checked against **actual child subtree maxima**, not trusted on their own.
+- `FileSystem::last_reference_pages_written()` reports physical reference-index pages actually staged in the last successful commit; the differential large-tree test requires fewer pages than a full rewrite for one small edit.
 - Deletes can underfill nodes. Empty leaves are removed and single-child roots can collapse; this is a bounded research tree, not a proven production-grade occupancy-balanced B+tree.
 - A new empty reference tree is one checked empty leaf. Index pages are *not* counted in their own postings. They are separately protected by both recoverable F0 manifests.
 
