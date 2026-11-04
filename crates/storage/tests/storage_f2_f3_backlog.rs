@@ -276,7 +276,7 @@ fn f4_attributes_and_snapshot_queries_survive_balanced_namespace_deletes() {
     let query = [Predicate::eq("asset.kind",Value::Text("shader".into()))];
     assert_eq!(image.search_attributes(&query, 500).unwrap().files.len(),25);
     assert_eq!(image.search_snapshot_attributes(1,&query,500).unwrap().files.len(),100);
-    let mut dev=image.into_device().power_loss();
+    let dev=image.into_device().power_loss();
     let (mut dev, root)=current_tree(dev);
     tree_occupancy(&mut dev,root,true,&mut BTreeSet::new());
     let mut image=FileSystem::open(dev).unwrap();
