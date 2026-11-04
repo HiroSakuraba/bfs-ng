@@ -631,6 +631,85 @@ fn read_nodes<D: BlockDevice>(
     Ok(Some((last_key, kind)))
 }
 
+/// Verifies a complete immutable tree and returns its exact data/node reachability.
+/// A snapshot uses its original generation and cursor, not the live root's.
+fn load_tree<D: BlockDevice>(
+    device: &mut D,
+    root: SnapshotRoot,
+) -> Result<Option<(BTreeMap<String, Record>, BTreeSet<u64>)>> {
+    if root.generation == 0
+        || root.cursor <= root.generation.saturating_add(1)
+        || root.cursor > device.block_count()
+        || root.next_inode < 2
+        || root.record_count > MAX_RECORDS as u64
+        || (root.tree_root == 0) != (root.record_count == 0)
+    {
+        return Ok(None);
+    }
+    let mut records = BTreeMap::new();
+    let mut owned = BTreeSet::new();
+    if root.tree_root != 0
+        && read_nodes(
+            device,
+            root.tree_root,
+            root.cursor,
+            root.generation,
+            None,
+            &mut owned,
+            &mut records,
+        )?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    if records.len() != root.record_count as usize {
+        return Ok(None);
+    }
+    let mut inodes = BTreeSet::new();
+    for (path, record) in &records {
+        if record.inode >= root.next_inode || !inodes.insert(record.inode) {
+            return Ok(None);
+        }
+        let slash = path.rfind('/').expect("validated absolute path");
+        if slash > 0 && !records.get(&path[..slash]).is_some_and(|r| r.directory) {
+            return Ok(None);
+        }
+        if record.directory {
+            if record.start != 0 || record.count != 0
+                || record.length != 0 || record.checksum != 0
+                || record.birth_generation != 0
+            {
+                return Ok(None);
+            }
+        } else {
+            if record.length > MAX_DATA as u64
+                || record.count as usize > MAX_DATA.div_ceil(CHUNK)
+            {
+                return Ok(None);
+            }
+            if record.count > 0 {
+                let Some(end) = record.start.checked_add(record.count as u64) else {
+                    return Ok(None);
+                };
+                if record.start < root.cursor || record.start <= root.generation + 1
+                    || end > device.block_count()
+                {
+                    return Ok(None);
+                }
+                for pos in record.start..end {
+                    if !owned.insert(pos) {
+                        return Ok(None);
+                    }
+                }
+            }
+            if data_read(device, record, root.cursor, root.generation)?.is_none() {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some((records, owned)))
+}
+
 fn load_state<D: BlockDevice>(
     device: &mut D,
     info: RootInfo,
@@ -639,87 +718,59 @@ fn load_state<D: BlockDevice>(
     let Some(bytes) = payload else {
         return Ok((info.generation == 0).then(|| State::empty(device.block_count())));
     };
-    if bytes.len() != 56
+    if bytes.len() < 64
         || &bytes[..8] != META_MAGIC
         || u32_at(bytes, 8) != FORMAT
         || bytes[12..16].iter().any(|b| *b != 0)
         || u64_at(bytes, 48) != info.generation
+        || bytes[60..64].iter().any(|b| *b != 0)
     {
         return Ok(None);
     }
-    let cursor = u64_at(bytes, 16);
-    let root_node = u64_at(bytes, 24);
-    let next_inode = u64_at(bytes, 32);
-    let count = u64_at(bytes, 40);
-    if info.generation == 0
-        || next_inode < 2
-        || cursor <= info.generation + 1
-        || cursor > device.block_count()
-        || count > MAX_RECORDS as u64
-        || (root_node == 0) != (count == 0)
-    {
+    let snap_count = u32_at(bytes, 56) as usize;
+    if snap_count > MAX_SNAPSHOTS || bytes.len() != 64 + snap_count * 40 {
         return Ok(None);
     }
-    let mut records = BTreeMap::new();
-    let mut seen = BTreeSet::new();
-    if root_node != 0
-        && read_nodes(
-            device,
-            root_node,
-            cursor,
-            info.generation,
-            None,
-            &mut seen,
-            &mut records,
-        )?
-        .is_none()
-    {
+    let root = SnapshotRoot {
+        generation: info.generation,
+        cursor: u64_at(bytes, 16),
+        tree_root: u64_at(bytes, 24),
+        next_inode: u64_at(bytes, 32),
+        record_count: u64_at(bytes, 40),
+    };
+    if root.generation == 0 {
         return Ok(None);
     }
-    if records.len() != count as usize {
+    let Some((records, _)) = load_tree(device, root)? else {
         return Ok(None);
-    }
-    let mut inodes = BTreeSet::new();
-    let mut active_blocks = BTreeSet::new();
-    for (path, record) in &records {
-        if record.inode >= next_inode || !inodes.insert(record.inode) {
+    };
+    let mut snapshots = BTreeMap::new();
+    let mut last_generation = 0;
+    for i in 0..snap_count {
+        let at = 64 + i * 40;
+        let snap = SnapshotRoot {
+            generation: u64_at(bytes, at),
+            tree_root: u64_at(bytes, at + 8),
+            cursor: u64_at(bytes, at + 16),
+            next_inode: u64_at(bytes, at + 24),
+            record_count: u64_at(bytes, at + 32),
+        };
+        if snap.generation <= last_generation
+            || snap.generation >= root.generation
+            || snap.cursor < root.cursor
+            || snap.next_inode > root.next_inode
+            || load_tree(device, snap)?.is_none()
+        {
             return Ok(None);
         }
-        let slash = path.rfind('/').expect("validated absolute path");
-        if slash > 0 && !records.get(&path[..slash]).is_some_and(|r| r.directory) {
-            return Ok(None);
-        }
-        if record.directory {
-            if record.start != 0 || record.count != 0 || record.length != 0 || record.checksum != 0
-            {
-                return Ok(None);
-            }
-        } else {
-            if record.length > MAX_DATA as u64 || record.count as usize > MAX_DATA.div_ceil(CHUNK) {
-                return Ok(None);
-            }
-            if record.count > 0 {
-                let end = record
-                    .start
-                    .checked_add(record.count as u64)
-                    .ok_or(Error::CorruptTree)?;
-                for pos in record.start..end {
-                    if !active_blocks.insert(pos) || seen.contains(&pos) {
-                        return Ok(None);
-                    }
-                }
-            }
-            if data_read(device, record, cursor, info.generation)?.is_none() {
-                return Ok(None);
-            }
-        }
-    }
-    if seen.iter().any(|n| active_blocks.contains(n)) {
-        return Ok(None);
+        last_generation = snap.generation;
+        snapshots.insert(snap.generation, snap);
     }
     Ok(Some(State {
-        cursor,
-        next_inode,
+        cursor: root.cursor,
+        next_inode: root.next_inode,
+        tree_root: root.tree_root,
+        snapshots,
         records,
     }))
 }
