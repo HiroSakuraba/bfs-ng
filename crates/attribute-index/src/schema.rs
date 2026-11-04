@@ -229,6 +229,13 @@ impl AttributeDef {
         }
     }
 
+    /// Canonical tagged, byte-sortable posting keys used by the F4
+    /// persistent attribute catalog. These are **not** a stable disk-format
+    /// contract outside the versioned F4 catalog container.
+    pub fn index_keys(&self, value: &Value) -> Vec<Vec<u8>> {
+        self.index_values(value)
+    }
+
     pub(crate) fn index_values(&self, value: &Value) -> Vec<Vec<u8>> {
         if !self.indexed {
             return Vec::new();
