@@ -13,10 +13,10 @@ mod tree_cow;
 use reference_index::{RefHeader, count_roots};
 use tree_cow::{discard_superseded_nodes, patch_tree, scan_pages};
 
-const META_MAGIC: &[u8; 8] = b"BFSNGM5\0";
+const META_MAGIC: &[u8; 8] = b"BFSNGM6\0";
 const NODE_MAGIC: &[u8; 8] = b"BFSNGN1\0";
 const DATA_MAGIC: &[u8; 8] = b"BFSNGD1\0";
-const FORMAT: u32 = 5;
+const FORMAT: u32 = 6;
 const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
@@ -930,6 +930,12 @@ pub struct AllocationReport {
     pub reference_index_pages: usize,
     /// Independently verified physical block records in its index.
     pub reference_index_entries: usize,
+    /// Blocks visible only to the older recoverable F0 candidate; these
+    /// remain unavailable until the slot holding that root is rotated out.
+    pub delayed_free_blocks: usize,
+    /// First commit generation that may BEGIN with those blocks free,
+    /// provided a new root was successfully published in between.
+    pub delayed_free_eligible_generation: u64,
 }
 
 /// Page of checksummed on-disk F3 namespace entries. `next_after` is only
@@ -1098,6 +1104,7 @@ impl<D: BlockDevice> FileSystem<D> {
         let mut suspect = false;
         let total = self.volume.block_count();
         let roots_examined = candidates.len();
+        let mut slot_owned = BTreeMap::<u64, BTreeSet<u64>>::new();
 
         for (info, payload) in candidates {
             let Some(state) = self
@@ -1117,6 +1124,7 @@ impl<D: BlockDevice> FileSystem<D> {
                 next_inode: state.next_inode,
                 record_count: state.records.len() as u64,
             };
+            let mut owned_in_slot = BTreeSet::new();
             for (i, held) in std::iter::once(current)
                 .chain(state.snapshots.values().copied())
                 .enumerate()
@@ -1129,16 +1137,16 @@ impl<D: BlockDevice> FileSystem<D> {
                     // independently of the traversal deduplication below.
                     historical_seen.insert((held.generation, held.tree_root));
                 }
-                if !visited_roots.insert((held.generation, held.tree_root)) {
-                    continue;
-                }
                 let Some((_, owned)) = self.volume.inspect(|device| load_tree(device, held))?
                 else {
                     suspect = true;
                     continue;
                 };
                 for block in owned {
-                    *counts.entry(block).or_default() += 1;
+                    owned_in_slot.insert(block);
+                    if visited_roots.insert((held.generation, held.tree_root, block)) {
+                        *counts.entry(block).or_default() += 1;
+                    }
                 }
             }
             // Index pages are rooted directly in each F0 manifest. They are
@@ -1151,10 +1159,23 @@ impl<D: BlockDevice> FileSystem<D> {
                 continue;
             };
             for block in index_blocks {
+                owned_in_slot.insert(block);
                 *counts.entry(block).or_default() += 1;
             }
+            slot_owned.insert(info.generation, owned_in_slot);
         }
 
+        // A block still referenced ONLY by the fallback F0 slot has a
+        // delayed-free retirement epoch. Do not reuse it in the next commit:
+        // that commit must first atomically rotate away the fallback slot.
+        let delayed_free_blocks = if slot_owned.len() == 2 {
+            let mut iter = slot_owned.values();
+            let old = iter.next().expect("two slots");
+            let newest = iter.next().expect("two slots");
+            old.difference(newest).count()
+        } else {
+            0
+        };
         // Fail closed if ownership is unknown for *any* F0-checksummed
         // root candidate. Even an unreferenced-looking block may be live.
         let free = if suspect {
@@ -1179,6 +1200,8 @@ impl<D: BlockDevice> FileSystem<D> {
             reuse_blocked: suspect,
             reference_index_pages: self.state.reference.pages as usize,
             reference_index_entries: self.state.reference.entries as usize,
+            delayed_free_blocks,
+            delayed_free_eligible_generation: self.generation().saturating_add(2),
         };
         Ok((report, free))
     }
@@ -1507,7 +1530,23 @@ impl<D: BlockDevice> FileSystem<D> {
                 &state.snapshots,
             )?
         };
-        state.reference = reference_index::persist(&mut builder, generation, &counts)?;
+        let previous = if self.state.reference.first != 0 {
+            self.volume.inspect(|device| {
+                reference_index::read(
+                    device, self.state.reference, self.generation(), self.state.cursor,
+                )
+            })?.0
+        } else {
+            BTreeMap::new()
+        };
+        state.reference = reference_index::persist_incremental(
+            &mut self.volume,
+            &mut builder,
+            generation,
+            self.state.reference,
+            &previous,
+            &counts,
+        )?;
         state.cursor = builder.cursor;
         let manifest = root_manifest(&state, generation);
         self.volume
