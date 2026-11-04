@@ -1062,8 +1062,8 @@ impl<D: BlockDevice> FileSystem<D> {
         let candidates = self.volume.candidate_roots()?;
         let mut counts = BTreeMap::<u64, usize>::new();
         let mut visited_roots = BTreeSet::new();
+        let mut historical_seen = BTreeSet::new();
         let mut suspect = false;
-        let mut historical = 0;
         let total = self.volume.block_count();
         let roots_examined = candidates.len();
 
@@ -1089,11 +1089,16 @@ impl<D: BlockDevice> FileSystem<D> {
                 .chain(state.snapshots.values().copied())
                 .enumerate()
             {
+                if i > 0 {
+                    // A root retained in any candidate's snapshot catalog
+                    // is historical, even when the same root is also an
+                    // older candidate's current root and traversal reaches
+                    // it there first. Count distinct pinned roots here,
+                    // independently of the traversal deduplication below.
+                    historical_seen.insert((held.generation, held.tree_root));
+                }
                 if !visited_roots.insert((held.generation, held.tree_root)) {
                     continue;
-                }
-                if i > 0 {
-                    historical += 1;
                 }
                 let Some((_, owned)) = self.volume.inspect(|device| load_tree(device, held))?
                 else {
@@ -1121,7 +1126,7 @@ impl<D: BlockDevice> FileSystem<D> {
             image_blocks: total,
             high_watermark: self.state.cursor,
             root_candidates: roots_examined,
-            historical_roots: historical,
+            historical_roots: historical_seen.len(),
             referenced_blocks: counts.len(),
             shared_blocks: counts.values().filter(|n| **n > 1).count(),
             reclaimable_blocks: free.len(),

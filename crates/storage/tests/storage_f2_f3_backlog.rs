@@ -383,3 +383,23 @@ fn deleting_a_page_during_crash_preserves_complete_old_or_new_namespace() {
         }
     }
 }
+
+#[test]
+fn f2_audit_counts_snapshot_pinned_from_immediately_preceding_generation() {
+    let mut image = fs(128);
+    let mut tx = image.begin();
+    tx.write_file("/data", b"rev:0").unwrap();
+    image.commit(tx).unwrap();
+    assert_eq!(image.generation(), 1);
+    // Pin generation 1 in the very next transaction. Generation 1 is then
+    // both the older F0 candidate's current root and a snapshot retained by
+    // generation 2's catalog; the audit must still count it as historical.
+    let mut tx = image.begin();
+    assert_eq!(tx.pin_snapshot().unwrap(), 1);
+    tx.write_file("/data", b"rev:1").unwrap();
+    image.commit(tx).unwrap();
+    assert_eq!(image.snapshots(), vec![1]);
+    let report = image.allocation_report().unwrap();
+    assert_eq!(report.historical_roots, 1);
+    assert!(!report.reuse_blocked);
+}
