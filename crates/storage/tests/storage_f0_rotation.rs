@@ -44,7 +44,10 @@ fn f0_v1_header_with_repaired_crc_cannot_mount_as_rotating_v2() {
     superblock[120..124].copy_from_slice(&checksum.to_le_bytes());
     disk.write_block(0, &superblock).unwrap();
     disk.sync().unwrap();
-    assert!(matches!(Volume::open(disk.power_loss()), Err(Error::NoValidRoot)));
+    assert!(matches!(
+        Volume::open(disk.power_loss()),
+        Err(Error::NoValidRoot)
+    ));
 }
 
 #[test]
@@ -93,10 +96,12 @@ fn root_ring_wrap_faults_preserve_entire_f2_generation_and_ownership() {
                 replace(&mut fs, generation);
             }
             let mut device = fs.into_device().power_loss();
-            device.inject(Fault {
-                operation,
-                torn_bytes: Some(torn_bytes),
-            }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes: Some(torn_bytes),
+                })
+                .unwrap();
             let mut fs = FileSystem::open(device).unwrap();
             let mut tx = fs.begin();
             tx.write_file("/entry", b"value-8").unwrap();
@@ -109,7 +114,11 @@ fn root_ring_wrap_faults_preserve_entire_f2_generation_and_ownership() {
             assert!(matches!(recovered.generation(), 7 | 8));
             assert_eq!(
                 recovered.read_file("/entry").unwrap(),
-                if recovered.generation() == 7 { b"value-7" } else { b"value-8" }
+                if recovered.generation() == 7 {
+                    b"value-7"
+                } else {
+                    b"value-8"
+                }
             );
             // Independently inspect two F0 candidates. A corrupt candidate
             // can quarantine reuse, but never authorize an unsafe free block.
