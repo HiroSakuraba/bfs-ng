@@ -255,7 +255,8 @@ impl<D: BlockDevice> Volume<D> {
         let root_block = payload_block(next_generation).ok_or(Error::GenerationOverflow)?;
         let mut seen = std::collections::BTreeSet::new();
         for (number, _) in blocks {
-            if *number <= ROOT_PAYLOAD_LAST || *number >= self.head.blocks || !seen.insert(*number) {
+            if *number <= ROOT_PAYLOAD_LAST || *number >= self.head.blocks || !seen.insert(*number)
+            {
                 return Err(Error::Geometry);
             }
         }
