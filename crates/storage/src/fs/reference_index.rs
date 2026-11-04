@@ -5,8 +5,8 @@
 //! counted in their own postings. Each CoW page has a birth generation and CRC.
 //! Allocation MUST still protect both F0 candidates and verify their F3 graph.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, Result, StagedReader, Volume, seal, u16_at, u64_at,
-    valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, ROOT_PAYLOAD_LAST, Result, StagedReader, Volume, seal,
+    u16_at, u64_at, valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,8 +39,8 @@ enum Page {
     Branch { level: u8, children: Vec<Child> },
 }
 
-fn valid_address(address: u64, generation: u64, cursor: u64, total: u64) -> bool {
-    address > generation.saturating_add(1) && address >= cursor && address < total
+fn valid_address(address: u64, _generation: u64, cursor: u64, total: u64) -> bool {
+    address > ROOT_PAYLOAD_LAST && address >= cursor && address < total
 }
 
 /// Decode exactly one checked immutable page; child subtree integrity is
@@ -448,9 +448,19 @@ fn discard_intermediate(builder: &mut Builder, root: u64) -> Result<()> {
             }
         }
     }
+    // Unreachable path-copy intermediates never reached a published root.
+    // Explicitly return their certified addresses to the free journal; F2's
+    // fast allocator cannot rediscover them on the next generation without
+    // an expensive independent full-graph scrub.
+    let abandoned: BTreeSet<u64> = staged
+        .keys()
+        .filter(|id| !visited.contains(id))
+        .copied()
+        .collect();
     builder.staged.retain(|(id, page)| {
         (&page[..8] != LEAF_MAGIC && &page[..8] != BRANCH_MAGIC) || visited.contains(id)
     });
+    builder.reusable.extend(abandoned);
     Ok(())
 }
 

@@ -19,7 +19,7 @@ fn checkpoint_header(device: CrashDevice) -> (CrashDevice, u64, u32, u32, u64) {
     let mut volume = Volume::open(device).unwrap();
     let generation = volume.info().generation;
     let payload = volume.read_root().unwrap().unwrap();
-    assert_eq!(&payload[..8], b"BFSNGM8\0");
+    assert_eq!(&payload[..8], b"BFSNGM9\0");
     let pins = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let offset = 64 + pins * 40 + 16;
     let first = u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
@@ -56,7 +56,9 @@ fn journal_is_durable_and_fallback_pages_mature_only_after_rotation() {
     write(&mut fs, b"second");
     let g2 = fs.allocation_report().unwrap();
     assert!(g2.journal_pending_blocks > 0);
-    assert_eq!(g2.journal_ready_blocks, 0);
+    // Never-published path-copy intermediates may already be free at g2.
+    // Fallback-owned pages must still remain in the pending class.
+    assert!(g2.journal_ready_blocks <= g2.reclaimable_blocks);
     assert!(!g2.reuse_blocked);
     fs = reopen(fs);
     assert_eq!(
@@ -105,9 +107,15 @@ fn checksum_correct_early_promotion_of_fallback_block_is_quarantined() {
     let mut page = [0; BLOCK_SIZE];
     device.read_block(first, &mut page).unwrap();
     assert_eq!(&page[..8], b"BFSFRJ8\0");
-    let original = u64::from_le_bytes(page[44..52].try_into().unwrap());
-    assert_eq!(original, 3, "initial retired pages cannot be used in g2");
-    page[44..52].copy_from_slice(&generation.to_le_bytes());
+    let count = u16::from_le_bytes(page[28..30].try_into().unwrap()) as usize;
+    let eligible_at = (0..count)
+        .map(|index| 32 + index * 20 + 12)
+        .find(|&at| u64::from_le_bytes(page[at..at + 8].try_into().unwrap()) == generation + 1)
+        .expect("the oldest fallback must have pending journal blocks");
+    // Earlier ready runs can now exist for never-published staged pages.
+    // Deliberately forge a *pending* fallback-owned address, not a safe
+    // transient page that was abandoned within the same transaction.
+    page[eligible_at..eligible_at + 8].copy_from_slice(&generation.to_le_bytes());
     commit_crc(&mut page);
     device.write_block(first, &page).unwrap();
     device.sync().unwrap();
@@ -130,8 +138,8 @@ fn corrupted_f0_payload_with_valid_superblock_never_authorizes_reuse() {
     write(&mut fs, b"original");
     write(&mut fs, b"latest");
     let mut device = fs.into_device().power_loss();
-    // F0 is still the generation+1 payload protocol: the old g1 payload
-    // is block 2 and remains referenced by its valid F0 superblock.
+    // The old g1 payload occupies ring block 2 and remains referenced by
+    // its valid F0 superblock until that candidate is rotated out.
     device.corrupt_stable_for_testing(2, 56, 0x82);
     let mut fs = FileSystem::open(device.power_loss()).unwrap();
     assert_eq!(fs.generation(), 2);

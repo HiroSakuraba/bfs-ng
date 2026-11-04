@@ -29,6 +29,102 @@ fn round_trip_and_alternating_root_slots() {
 }
 
 #[test]
+fn repeatedly_rotated_payloads_never_touch_the_two_recoverable_roots() {
+    let mut volume = vol(5);
+    for generation in 1..=90_u64 {
+        let data = format!("root-{generation}");
+        let current = volume.commit_root(data.as_bytes()).unwrap();
+        // The previous generation must remain recoverable even though the
+        // next generation's payload shares one of the earlier ring blocks.
+        if generation > 1 {
+            let mut device = volume.into_device().power_loss();
+            let latest_slot = generation % 2;
+            let mut original = [0; BLOCK_SIZE];
+            device.read_block(latest_slot, &mut original).unwrap();
+            device.corrupt_stable_for_testing(latest_slot as usize, 18, 0xb7);
+            let mut fallback = Volume::open(device).unwrap();
+            assert_eq!(fallback.info().generation, generation - 1);
+            assert_eq!(
+                fallback.read_root().unwrap(),
+                Some(format!("root-{}", generation - 1).into_bytes())
+            );
+            // Restore the original slot and continue from the same physical
+            // image. No fake fresh format or reconstructed generations.
+            let mut device = fallback.into_device();
+            device.write_block(latest_slot, &original).unwrap();
+            device.sync().unwrap();
+            volume = Volume::open(device.power_loss()).unwrap();
+            assert_eq!(volume.info().generation, generation);
+        }
+        assert_eq!(current.root_block, Some(2 + (generation - 1) % 3));
+    }
+}
+
+#[test]
+fn root_ring_torn_write_after_wrap_preserves_the_last_whole_payload() {
+    // g3 -> g4 is the first reuse of payload block 2 (g1), while g2 and
+    // g3 are still the two recoverable F0 candidates.
+    let prefixes = [0, 1, 8, 16, 63, 119, 123, 124, 128, 2048, BLOCK_SIZE];
+    for operation in 1..=4 {
+        for torn_bytes in prefixes {
+            let mut v = vol(5);
+            for value in [b"gen-one".as_slice(), b"gen-two", b"gen-three"] {
+                v.commit_root(value).unwrap();
+            }
+            let mut device = v.into_device().power_loss();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes: Some(torn_bytes),
+                })
+                .unwrap();
+            let mut v = Volume::open(device).unwrap();
+            assert!(matches!(
+                v.commit_root(b"gen-four"),
+                Err(Error::InjectedCrash)
+            ));
+            let mut after = Volume::open(v.into_device().power_loss()).unwrap();
+            let got = after.read_root().unwrap().unwrap();
+            assert!(
+                got == b"gen-three" || got == b"gen-four",
+                "torn payload/superblock accepted invalid root: op={operation}, bytes={torn_bytes}"
+            );
+            assert_eq!(
+                after.info().root_block,
+                Some(if got == b"gen-three" { 4 } else { 2 })
+            );
+        }
+    }
+}
+
+#[test]
+fn corrupt_newer_payload_after_wrap_recovers_the_prior_ring_block() {
+    let mut v = vol(5);
+    for g in 1..=19 {
+        v.commit_root(format!("generation-{g}").as_bytes()).unwrap();
+    }
+    let mut device = v.into_device().power_loss();
+    // g19's payload is block 2, and g18's payload is block 4.
+    device.corrupt_stable_for_testing(2, 32, 0xa5);
+    let mut recovered = Volume::open(device).unwrap();
+    assert_eq!(recovered.info().generation, 18);
+    assert_eq!(recovered.info().root_block, Some(4));
+    assert_eq!(
+        recovered.read_root().unwrap(),
+        Some(b"generation-18".to_vec())
+    );
+    // Recommit the failed g19 without ever overwriting surviving g18.
+    recovered.commit_root(b"replacement-generation-19").unwrap();
+    assert_eq!(
+        Volume::open(recovered.into_device().power_loss())
+            .unwrap()
+            .read_root()
+            .unwrap(),
+        Some(b"replacement-generation-19".to_vec())
+    );
+}
+
+#[test]
 fn empty_and_capacity_payloads_are_distinct_from_unformatted() {
     let mut v = vol(8);
     assert_eq!(v.read_root().unwrap(), None);
@@ -45,19 +141,27 @@ fn empty_and_capacity_payloads_are_distinct_from_unformatted() {
 }
 
 #[test]
-fn out_of_space_preserves_last_root() {
-    let mut v = vol(4);
-    v.commit_root(b"a").unwrap();
-    v.commit_root(b"b").unwrap();
-    assert!(matches!(v.commit_root(b"c"), Err(Error::NoSpace)));
-    assert_eq!(v.info().generation, 2);
-    assert_eq!(v.read_root().unwrap(), Some(b"b".to_vec()));
+fn the_three_payload_blocks_are_reused_indefinitely_without_exhausting_f0() {
+    // Five blocks is now sufficient for F0 alone: two superblocks and a
+    // three-block ring. No per-generation address is reserved beyond 4.
+    let mut v = vol(5);
+    for generation in 1..=240_u64 {
+        let value = format!("complete-root-{generation:05}");
+        let info = v.commit_root(value.as_bytes()).unwrap();
+        assert_eq!(info.generation, generation);
+        assert_eq!(info.root_block, Some(2 + (generation - 1) % 3));
+        assert_eq!(v.read_root().unwrap(), Some(value.into_bytes()));
+        // Verify every recovery, not only the head held by this writer.
+        if generation % 7 == 0 {
+            v = Volume::open(v.into_device().power_loss()).unwrap();
+            assert_eq!(v.info().generation, generation);
+        }
+    }
+    let mut v = Volume::open(v.into_device().power_loss()).unwrap();
+    assert_eq!(v.info().generation, 240);
     assert_eq!(
-        Volume::open(v.into_device().power_loss())
-            .unwrap()
-            .info()
-            .generation,
-        2
+        v.read_root().unwrap(),
+        Some(b"complete-root-00240".to_vec())
     );
 }
 
@@ -173,7 +277,7 @@ fn formatting_cannot_clobber_an_existing_image() {
     let device = vol(8).into_device().power_loss();
     assert!(matches!(Volume::format(device, 19), Err(Error::NotBlank)));
     assert!(matches!(
-        Volume::format(CrashDevice::new(3), 19),
+        Volume::format(CrashDevice::new(4), 19),
         Err(Error::Geometry)
     ));
     assert!(matches!(

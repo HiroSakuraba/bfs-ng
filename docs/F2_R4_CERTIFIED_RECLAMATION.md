@@ -1,5 +1,9 @@
 # F2.R4 — certified allocation fast path and crash-resumable bounded reclamation
 
+**Historical v8 description:** F0.R1 subsequently replaced monotonic root-payload allocation with a fixed three-block CoW ring and moved the root manifest to version 9. See [F0.R1](F0_R1_ROTATING_ROOTS.md). References below to F0's monotonic root-payload exhaustion describe the v8 baseline.
+**F0.R1 correction:** The v9 filesystem also reclaims *never-published* intermediate namespace/reference CoW pages into the durable ready set before journal publication. They do not require fallback retirement; this prevents virgin-cursor exhaustion from discarded staged allocations. See [F0.R1](F0_R1_ROTATING_ROOTS.md).
+
+
 **Status:** experimental implementation in PR #15. Version 8 is a breaking disposable-image format; recreate v7 images. The journal is still a sorted page chain rewritten each generation. F0 still spends the low-end root-payload block `generation + 1`; this is not a production filesystem.
 
 ## Why the change

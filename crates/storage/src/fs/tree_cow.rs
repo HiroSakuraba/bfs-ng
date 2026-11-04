@@ -2,8 +2,8 @@
 //! This is a bounded B+tree-style prototype: leaves may be underfilled after
 //! deletion. It is not a production-grade balanced B+tree implementation.
 use super::{
-    BLOCK_SIZE, BlockDevice, Builder, Error, FANOUT, NODE_MAGIC, Reader, Record, Result, Volume,
-    encode_branch, encode_leaf, u16_at, u32_at, u64_at, valid_checksum,
+    BLOCK_SIZE, BlockDevice, Builder, Error, FANOUT, NODE_MAGIC, ROOT_PAYLOAD_LAST, Reader, Record,
+    Result, Volume, encode_branch, encode_leaf, u16_at, u32_at, u64_at, valid_checksum,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,7 +90,7 @@ fn read_page<D: BlockDevice>(
             }
             let raw = rd.take(8).ok_or(Error::CorruptTree)?;
             let address = u64_at(raw, 0);
-            if address <= generation + 1 || address >= volume.block_count() {
+            if address <= ROOT_PAYLOAD_LAST || address >= volume.block_count() {
                 return Err(Error::CorruptTree);
             }
             previous = max.clone();
@@ -375,7 +375,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
     if root == 0 {
         return Ok((Vec::new(), 0));
     }
-    let empty = Builder::new(cursor, generation.saturating_add(1), BTreeSet::new());
+    let empty = Builder::new(cursor, BTreeSet::new());
     let mut result = Vec::new();
     let mut visited = BTreeSet::new();
     let mut reads = 0;
@@ -400,7 +400,7 @@ pub(super) fn scan_pages<D: BlockDevice>(
                 return Ok(());
             }
             if address < self.cursor
-                || address <= self.generation.saturating_add(1)
+                || address <= ROOT_PAYLOAD_LAST
                 || !self.visited.insert(address)
                 || self.visited.len() > 4096
             {
@@ -504,8 +504,19 @@ pub(super) fn discard_superseded_nodes(builder: &mut Builder, root: u64) -> Resu
             }
         }
     }
+    // Every superseded CoW node was allocated from certified free space
+    // or the virgin cursor during THIS transaction, but never published.
+    // Return its address to Builder before the durable ready-run journal is
+    // constructed. Otherwise each multi-page path copy permanently leaks
+    // physical space even though the full two-root scrub sees it as free.
+    let abandoned: BTreeSet<u64> = staged
+        .keys()
+        .filter(|id| !reachable.contains(id))
+        .copied()
+        .collect();
     builder
         .staged
         .retain(|(addr, page)| &page[..8] != NODE_MAGIC || reachable.contains(addr));
+    builder.reusable.extend(abandoned);
     Ok(reachable.len())
 }

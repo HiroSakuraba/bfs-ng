@@ -19,7 +19,7 @@ fn sweep_cursor(device: CrashDevice) -> (CrashDevice, u64, u64, u64) {
     let mut volume = Volume::open(device).unwrap();
     let generation = volume.info().generation;
     let payload = volume.read_root().unwrap().unwrap();
-    assert_eq!(&payload[..8], b"BFSNGM8\0");
+    assert_eq!(&payload[..8], b"BFSNGM9\0");
     let snapshots = u32::from_le_bytes(payload[56..60].try_into().unwrap()) as usize;
     let journal_off = 64 + snapshots * 40 + 16;
     let journal_root =
@@ -90,7 +90,11 @@ fn bounded_retirement_sweep_resumes_after_power_loss() {
     let g3 = fs.allocation_report().unwrap();
     assert_eq!(g3.generation, 3);
     assert!(g3.journal_ready_blocks > 0);
-    assert!(g3.journal_ready_blocks <= 32);
+    // The 32-block budget applies to *new promotions*, not to the entire
+    // ready journal: safely abandoned same-transaction nodes may already
+    // be ready from prior generations.
+    assert!(g3.journal_deferred_blocks >= g2.journal_pending_blocks.saturating_sub(32));
+    assert!(g3.journal_ready_blocks <= g3.reclaimable_blocks);
     assert!(g3.journal_deferred_blocks > 0);
     let (device, gen3, _, cursor3) = sweep_cursor(fs.into_device().power_loss());
     assert_eq!(gen3, 3);
@@ -126,8 +130,12 @@ fn forged_quarantine_of_fallback_owned_block_is_fail_closed() {
     // Forcing a pending run into the deferred class changes an eligibility
     // boundary without changing the referenced roots. Even with a valid CRC,
     // it cannot become certified by the independent two-root auditor.
-    assert_eq!(u64::from_le_bytes(page[44..52].try_into().unwrap()), 3);
-    page[44..52].copy_from_slice(&0_u64.to_le_bytes());
+    let count = u16::from_le_bytes(page[28..30].try_into().unwrap()) as usize;
+    let eligible_at = (0..count)
+        .map(|index| 32 + index * 20 + 12)
+        .find(|&at| u64::from_le_bytes(page[at..at + 8].try_into().unwrap()) == 3)
+        .expect("must find a pending fallback-owned range");
+    page[eligible_at..eligible_at + 8].copy_from_slice(&0_u64.to_le_bytes());
     repair_crc(&mut page);
     device.write_block(journal_page, &page).unwrap();
     device.sync().unwrap();
@@ -170,7 +178,13 @@ fn torn_sweep_checkpoint_never_advances_a_partial_cursor() {
         let mut fs = FileSystem::open(device).unwrap();
         assert_eq!(fs.read_file("/item").unwrap(), b"current");
         let check = fs.allocation_report().unwrap();
-        assert!(check.journal_ready_blocks <= check.reclaimable_blocks);
-        assert!(check.journal_deferred_blocks <= check.reclaimable_blocks);
+        if check.reuse_blocked {
+            // A torn, structurally valid F0 candidate may still have unknown
+            // ownership. Full scrub must quarantine all physical reuse.
+            assert_eq!(check.reclaimable_blocks, 0);
+        } else {
+            assert!(check.journal_ready_blocks <= check.reclaimable_blocks);
+            assert!(check.journal_deferred_blocks <= check.reclaimable_blocks);
+        }
     }
 }

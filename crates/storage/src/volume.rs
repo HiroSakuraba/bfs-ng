@@ -1,10 +1,20 @@
-//! Two alternating, CRC32C-protected root slots and append-only root payloads.
-//! The durable ordering is: payload write -> sync -> root slot write -> sync.
+//! Two alternating CRC32C root slots and three rotating CoW payload blocks.
+//! The durable ordering is: data -> sync -> payload -> sync -> root slot -> sync.
 use crate::{BLOCK_SIZE, BlockDevice, Error, ROOT_CAPACITY, Result};
 
 const SUPER_MAGIC: [u8; 8] = *b"BFSNGF0\0";
 const PAYLOAD_MAGIC: [u8; 8] = *b"BFSNGR0\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Fixed, permanently reserved root-payload region [2, 4]. Every pair of
+/// consecutive generations uses distinct blocks, and the next commit always
+/// targets the third (unreferenced) block. These addresses NEVER belong to F1.
+pub(crate) const ROOT_PAYLOAD_LAST: u64 = 4;
+const ROOT_RING_SIZE: u64 = ROOT_PAYLOAD_LAST - 1;
+const MIN_BLOCKS: u64 = ROOT_PAYLOAD_LAST + 1;
+
+fn payload_block(generation: u64) -> Option<u64> {
+    (generation > 0).then_some(2 + generation.saturating_sub(1) % ROOT_RING_SIZE)
+}
 const NO_ROOT: u64 = u64::MAX;
 const CHECKSUM_OFFSET: usize = 120;
 
@@ -94,7 +104,7 @@ impl Super {
             }
             None
         } else {
-            let expected = generation.checked_add(1)?;
+            let expected = payload_block(generation)?;
             if block_number != expected || block_number >= blocks {
                 return None;
             }
@@ -149,7 +159,7 @@ impl<D: BlockDevice> Volume<D> {
     /// Only formats a *blank, disposable* image. Reserved blocks 0/1 must be
     /// zero; all later blocks are treated as unused.
     pub fn format(mut device: D, volume_id: u128) -> Result<Self> {
-        if volume_id == 0 || device.block_count() < 4 {
+        if volume_id == 0 || device.block_count() < MIN_BLOCKS {
             return Err(Error::Geometry);
         }
         // F0 has no reclaimable allocation map. Formatting is permitted
@@ -179,7 +189,7 @@ impl<D: BlockDevice> Volume<D> {
         mut device: D,
         mut verify: impl FnMut(&mut D, RootInfo, Option<&[u8]>) -> Result<Option<T>>,
     ) -> Result<(Self, T)> {
-        if device.block_count() < 4 {
+        if device.block_count() < MIN_BLOCKS {
             return Err(Error::Geometry);
         }
         let mut candidates = Vec::new();
@@ -242,12 +252,11 @@ impl<D: BlockDevice> Volume<D> {
             .generation
             .checked_add(1)
             .ok_or(Error::GenerationOverflow)?;
-        let root_block = next_generation
-            .checked_add(1)
-            .ok_or(Error::GenerationOverflow)?;
+        let root_block = payload_block(next_generation).ok_or(Error::GenerationOverflow)?;
         let mut seen = std::collections::BTreeSet::new();
         for (number, _) in blocks {
-            if *number <= root_block || *number >= self.head.blocks || !seen.insert(*number) {
+            if *number <= ROOT_PAYLOAD_LAST || *number >= self.head.blocks || !seen.insert(*number)
+            {
                 return Err(Error::Geometry);
             }
         }
@@ -311,7 +320,7 @@ impl<D: BlockDevice> Volume<D> {
     /// A damaged latest root falls back to the previous valid slot. A malformed
     /// image with no valid root is refused, never silently formatted.
     pub fn open(mut device: D) -> Result<Self> {
-        if device.block_count() < 4 {
+        if device.block_count() < MIN_BLOCKS {
             return Err(Error::Geometry);
         }
         let mut candidates = Vec::new();
@@ -366,7 +375,8 @@ impl<D: BlockDevice> Volume<D> {
             .map(Some)
     }
 
-    /// Only one new, immutable root payload block per generation (no allocator).
+    /// Publish into the third slot of a three-block rotating CoW payload ring.
+    /// The new payload is never in either current/fallback recoverable root.
     /// A successful return means both sync barriers succeeded. A failed commit
     /// poisons this handle; reopen from disk before another attempt.
     pub fn commit_root(&mut self, payload: &[u8]) -> Result<RootInfo> {
@@ -381,7 +391,7 @@ impl<D: BlockDevice> Volume<D> {
             .generation
             .checked_add(1)
             .ok_or(Error::GenerationOverflow)?;
-        let next_block = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        let next_block = payload_block(generation).ok_or(Error::GenerationOverflow)?;
         if next_block >= self.head.blocks {
             return Err(Error::NoSpace);
         }

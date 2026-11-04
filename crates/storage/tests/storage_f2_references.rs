@@ -21,7 +21,7 @@ fn index_header(device: CrashDevice) -> (CrashDevice, u64, u32, u32) {
     let manifest = vol.read_root().unwrap().unwrap();
     let snap_count = u32::from_le_bytes(manifest[56..60].try_into().unwrap()) as usize;
     let offset = 64 + snap_count * 40;
-    assert_eq!(&manifest[..8], b"BFSNGM8\0");
+    assert_eq!(&manifest[..8], b"BFSNGM9\0");
     let first = u64::from_le_bytes(manifest[offset..offset + 8].try_into().unwrap());
     let pages = u32::from_le_bytes(manifest[offset + 8..offset + 12].try_into().unwrap());
     let entries = u32::from_le_bytes(manifest[offset + 12..offset + 16].try_into().unwrap());

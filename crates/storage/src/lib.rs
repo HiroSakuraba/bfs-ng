@@ -59,7 +59,7 @@ impl fmt::Display for Error {
             Self::NoValidRoot => write!(f, "no recoverable checksummed root"),
             Self::CorruptRoot => write!(f, "root payload corrupted"),
             Self::InconsistentVolume => write!(f, "root slots disagree on image identity"),
-            Self::NoSpace => write!(f, "append-only root area is full"),
+            Self::NoSpace => write!(f, "no free data/metadata blocks remain"),
             Self::TooLarge => write!(f, "root payload exceeds fixed block capacity"),
             Self::GenerationOverflow => write!(f, "root generation overflow"),
             Self::Poisoned => write!(f, "prior failed commit; reopen device to recover"),
