@@ -1095,8 +1095,7 @@ impl<D: BlockDevice> FileSystem<D> {
                 if i > 0 {
                     historical += 1;
                 }
-                let Some((_, owned)) =
-                    self.volume.inspect(|device| load_tree(device, held))?
+                let Some((_, owned)) = self.volume.inspect(|device| load_tree(device, held))?
                 else {
                     suspect = true;
                     continue;
@@ -1183,15 +1182,18 @@ impl<D: BlockDevice> FileSystem<D> {
         } else {
             None
         };
-        let entries = rows.into_iter().map(|(path, record)| {
-            let stat = Stat {
-                inode: record.inode,
-                directory: record.directory,
-                bytes: record.length,
-                generation: root.generation,
-            };
-            (path, stat)
-        }).collect();
+        let entries = rows
+            .into_iter()
+            .map(|(path, record)| {
+                let stat = Stat {
+                    inode: record.inode,
+                    directory: record.directory,
+                    bytes: record.length,
+                    generation: root.generation,
+                };
+                (path, stat)
+            })
+            .collect();
         Ok(NamespacePage {
             generation: root.generation,
             entries,
@@ -1231,7 +1233,10 @@ impl<D: BlockDevice> FileSystem<D> {
         after: Option<&str>,
         limit: usize,
     ) -> Result<NamespacePage> {
-        let root = *self.state.snapshots.get(&generation)
+        let root = *self
+            .state
+            .snapshots
+            .get(&generation)
             .ok_or(Error::InvalidSnapshot)?;
         self.range_page(root, prefix, after, limit)
     }

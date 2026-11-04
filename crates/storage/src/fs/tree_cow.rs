@@ -197,10 +197,19 @@ fn redistribute_pair<D: BlockDevice>(
             store_leaf(builder, &first, generation)
         }
         (
-            Page::Branch { level: la, children: mut first },
-            Page::Branch { level: lb, children: second },
+            Page::Branch {
+                level: la,
+                children: mut first,
+            },
+            Page::Branch {
+                level: lb,
+                children: second,
+            },
         ) if la == lb => {
-            if first.last().is_none_or(|child| child.max.as_str() >= second[0].max.as_str()) {
+            if first
+                .last()
+                .is_none_or(|child| child.max.as_str() >= second[0].max.as_str())
+            {
                 return Err(Error::CorruptTree);
             }
             first.extend(second);
@@ -231,7 +240,11 @@ fn rebalance_near<D: BlockDevice>(
             index += 1;
             continue;
         }
-        let left_index = if index + 1 < children.len() { index } else { index - 1 };
+        let left_index = if index + 1 < children.len() {
+            index
+        } else {
+            index - 1
+        };
         let updated = redistribute_pair(
             volume,
             builder,
@@ -419,7 +432,10 @@ pub(super) fn scan_pages<D: BlockDevice>(
                         }
                     }
                 }
-                Page::Branch { level: actual, children } => {
+                Page::Branch {
+                    level: actual,
+                    children,
+                } => {
                     if level.is_some_and(|expected| expected != actual) {
                         return Err(Error::CorruptTree);
                     }
@@ -452,7 +468,8 @@ pub(super) fn scan_pages<D: BlockDevice>(
         visited: &mut visited,
         reads: &mut reads,
         result: &mut result,
-    }.walk(root, None)?;
+    }
+    .walk(root, None)?;
 
     Ok((result, reads))
 }
