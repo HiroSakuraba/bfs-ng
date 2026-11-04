@@ -926,6 +926,10 @@ pub struct AllocationReport {
     /// A structurally valid F0 root failed F2/F4 graph verification.
     /// Its unknown block ownership quarantines the entire reuse pool.
     pub reuse_blocked: bool,
+    /// Number of immutable F5 reference-index pages in the selected root.
+    pub reference_index_pages: usize,
+    /// Independently verified physical block records in its index.
+    pub reference_index_entries: usize,
 }
 
 /// Page of checksummed on-disk F3 namespace entries. `next_after` is only
@@ -1137,6 +1141,23 @@ impl<D: BlockDevice> FileSystem<D> {
                     *counts.entry(block).or_default() += 1;
                 }
             }
+            // Index pages are rooted directly in each F0 manifest. They are
+            // outside its F3 tree and must be protected while either F0 slot
+            // can recover them, including while a snapshot pin is dropped.
+            let Ok((_, index_blocks)) = self.volume.inspect(|device| {
+                reference_index::read(
+                    device,
+                    state.reference,
+                    info.generation,
+                    state.cursor,
+                )
+            }) else {
+                suspect = true;
+                continue;
+            };
+            for block in index_blocks {
+                *counts.entry(block).or_default() += 1;
+            }
         }
 
         // Fail closed if ownership is unknown for *any* F0-checksummed
@@ -1161,6 +1182,8 @@ impl<D: BlockDevice> FileSystem<D> {
             fresh_blocks_for_next_commit: self.state.cursor.saturating_sub(next_root + 1),
             root_generations_remaining: self.state.cursor.saturating_sub(next_root),
             reuse_blocked: suspect,
+            reference_index_pages: self.state.reference.pages as usize,
+            reference_index_entries: self.state.reference.entries as usize,
         };
         Ok((report, free))
     }
