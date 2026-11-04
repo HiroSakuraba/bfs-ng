@@ -1,0 +1,10 @@
+/target/
+**/__pycache__/
+*.pyc
+*.profraw
+*.profdata
+.DS_Store
+*.swp
+/replay.csv
+/mrc.csv
+/golden-results.csv

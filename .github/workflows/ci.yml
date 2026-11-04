@@ -1,0 +1,45 @@
+name: Rust workspace CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85.0'
+          components: rustfmt, clippy
+      - name: Check compilation
+        run: cargo check --workspace --all-targets
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Formatting check
+        run: cargo fmt --all -- --check
+      - name: Deterministic golden trace comparison
+        run: |
+          cargo run --release -p bfs-ng-cache-lab -- replay --input crates/cache-lab/fixtures/golden.csv --capacity-bytes 8192 --output golden-results.csv
+          python3 crates/cache-lab/scripts/lru_oracle.py crates/cache-lab/fixtures/golden.csv 8192
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: golden-results
+          path: golden-results.csv
+          if-no-files-found: ignore

@@ -1,0 +1,19 @@
+[package]
+name = "bfs-ng-cache-lab"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["BFS-NG contributors"]
+description = "Dependency-free Rust trace-replay laboratory for BFS-NG cache policy experiments"
+license = "MIT"
+
+[lib]
+name = "bfs_ng_cache_lab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bfs-cache-lab"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
