@@ -35,8 +35,10 @@ The research sequence is:
 - F1: image-backed storage, validated block/inode parsing, directory structure.
 - F2: choose and implement a *single* transaction durability mechanism.
 - F3: checksums, scrub and recoverability tests under injected failures.
-- F4: typed attributes, stable index keys and transactional query consistency.
+- F4: typed attributes, stable index keys and transactional query consistency. The M0 in-memory reference implementation is in `crates/attribute-index`; durable CoW indexing remains future work.
 - F5: optional snapshots, reflinks, live-query stream and mature caching.
+
+**M0 milestone:** `crates/attribute-index` implements typed attributes, full-record in-memory transactional updates, immutable snapshots, BTreeSet posting indexes and independently scanned query oracles. It is intentionally neither an image-backed index nor crash-safe. [Detailed M0 contract](M0_SEARCHABLE_ATTRIBUTES.md).
 
 No cache result is a proof of filesystem safety. No filesystem semantics are implemented yet.
 
