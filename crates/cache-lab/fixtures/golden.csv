@@ -1,0 +1,6 @@
+timestamp_ns,stream_id,key,charged_bytes,kind,refill_cost_ns,speculative
+0,0,1,4096,metadata,100,0
+1,0,2,4096,metadata,100,0
+2,0,1,4096,metadata,100,0
+3,0,3,4096,metadata,100,0
+4,0,1,4096,metadata,100,0
