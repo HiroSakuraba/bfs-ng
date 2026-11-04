@@ -102,6 +102,19 @@ class RealWorldBenchmarkTests(unittest.TestCase):
                              None, 4, "zip-rev", "record", 1, 4096, 4096, 1000)
         self.assertGreater(result["observed_file_read_bytes"], 0)
 
+    def test_invalid_zip_is_explicit_opaque_file(self):
+        root = self.root / "ax"
+        root.mkdir()
+        (root / "broken.zip").write_bytes(b"NOT A ZIP")
+        items = bench.inventory(root, "axiomzig", True, 20)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].name, "broken.zip")
+        self.assertIsNone(items[0].member)
+        out = self.root / "badzip.csv"
+        result = bench.trace(root, items, "axiomzig", "compile", out,
+                             None, 2, "source-pinned", "record", 1, 4096, 4096, 100)
+        self.assertGreater(result["observed_file_read_bytes"], 0)
+
     def test_dve_real_dependency_paths(self):
         root = self.root / "dve"
         examples = root / "examples"

@@ -111,7 +111,14 @@ def inventory(root: Path, project: str, zip_members: bool, max_items: int) -> li
                             if len(assets) > max_items:
                                 raise ValueError(f"inventory exceeds --max-items={max_items}")
                 except (zipfile.BadZipFile, OSError) as error:
-                    raise ValueError(f"unreadable archive {rel}: {error}") from error
+                    # Real repositories sometimes contain mislabeled or incomplete
+                    # ZIPs. Preserve their opaque-file access pattern, but do not
+                    # invent any archive member entries.
+                    print(f"warning: not a readable ZIP: {rel} ({error}); indexing as opaque file",
+                          file=sys.stderr)
+                    assets.append(Asset(rel, path.stat().st_size, rel))
+                    if len(assets) > max_items:
+                        raise ValueError(f"inventory exceeds --max-items={max_items}")
             else:
                 assets.append(Asset(rel, path.stat().st_size, rel))
                 if len(assets) > max_items:

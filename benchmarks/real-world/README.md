@@ -53,7 +53,7 @@ python3 benchmarks/real-world/bench.py trace --project axiomzig \
   --output benchmarks/real-world/results/axiomzig-real-model.csv
 \`\`\`
 
-\`--zip-members\` enumerates supported archive members without extraction. Under \`--mode record\`, the selected members are actually decompressed up to \`--max-read\` bytes per scheduled access. Archives are scanned with bounded item counts; path traversal entries, encrypted entries and symlink entries are excluded. For compressed shard scans, **CPU decompression costs confound storage latency**; use \`model\` to isolate the cache-policy trace, or retain separate decompress/read timing measurements.
+\`--zip-members\` enumerates supported archive members without extraction. Under \`--mode record\`, the selected members are actually decompressed up to \`--max-read\` bytes per scheduled access. Archives are scanned with bounded item counts; path traversal entries, encrypted entries and symlink entries are excluded. A file named `.zip` that cannot be opened as ZIP is **reported with a warning and treated as one opaque file** rather than inventing member records. This is necessary for incomplete or mislabeled corpus bundles and changes the corresponding workload from record-level access to blob access. For compressed shard scans, **CPU decompression costs confound storage latency**; use \`model\` to isolate the cache-policy trace, or retain separate decompress/read timing measurements.
 
 By default an indexed ZIP archive is treated as a single file; \`--zip-members\` instead treats eligible contained objects as logical cache objects, not literal physical blocks.
 
