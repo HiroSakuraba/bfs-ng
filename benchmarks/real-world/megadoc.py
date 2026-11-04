@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import defaultdict
 import hashlib
 import json
 from pathlib import Path
@@ -151,6 +152,8 @@ def trace(root: Path, output: Path, pattern: str = "mixed",
         raise ValueError("unsupported mode")
     if split not in ("train", "dev", "test", "all"):
         raise ValueError("unsupported split")
+    if pattern in ("train", "mixed") and split == "all":
+        raise ValueError("training-style workloads must select a single split")
     if not 1 <= passes <= 100:
         raise ValueError("passes must be 1..100")
     if seed < 0 or seed >= 2**128:
@@ -172,13 +175,15 @@ def trace(root: Path, output: Path, pattern: str = "mixed",
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(HEADER)
         emitter = Emitter(writer, seed, revision, mode, chunk, max_events)
-        for n, (stream, name, operation) in enumerate(requests):
+        read_ordinals: dict[str, int] = defaultdict(int)
+        for stream, name, operation in requests:
             if operation == "index":
                 # This synthetic query-result-page event has no corresponding file.
                 emitter.emit(stream, "index", name)
             else:
                 emitter.access(root, objects[name], stream, max_read,
-                               n // max(1, len(objects)))
+                               read_ordinals[name])
+                read_ordinals[name] += 1
     info = {
         "schema": "bfs-ng-megadoc-benchmark-summary-v1",
         "project": "AxiomMegaDoc",

@@ -54,7 +54,9 @@ cargo run --release -p bfs-ng-cache-lab -- sweep \
   --output $BASE/results/megadoc-cache-sweep.csv
 \`\`\`
 
-All trace events conform to BFS-NG's strict \`timestamp_ns,stream_id,key,charged_bytes,kind,refill_cost_ns,speculative\` schema. Chunk identities are opaque salted hashes of source archive+builder+ledger revisions, kind, relative object identity and logical block index. \`--chunk\` defaults to 4 KiB and \`--max-read\` to 64 KiB; \`--mode record\` actually opens/reads bounded file portions.
+Training-style (`train`, `mixed`) workloads reject `--split all` to prevent accidental train/dev/test mixing. The `assemble` and `provenance` research traces may use `all` when needed to stress cache behavior, but should not be consumed as a training stream.
+
+All trace events conform to BFS-NG's strict \`timestamp_ns,stream_id,key,charged_bytes,kind,refill_cost_ns,speculative\` schema. Chunk identities are opaque salted hashes of source archive+builder+ledger revisions, kind, relative object identity and logical block index. Repeated file accesses walk successive bounded logical read windows where the file is larger than the per-access maximum. \`--chunk\` defaults to 4 KiB and \`--max-read\` to 64 KiB; \`--mode record\` actually opens/reads bounded file portions.
 
 ### Meaning of trace classes
 

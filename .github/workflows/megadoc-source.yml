@@ -55,9 +55,11 @@ jobs:
           for pattern in assemble train provenance mixed; do
             mode=model
             if [ "$pattern" = assemble ]; then mode=record; fi
+            split=all
+            if [ "$pattern" = train ] || [ "$pattern" = mixed ]; then split=train; fi
             python3 benchmarks/real-world/megadoc.py \
               --root /tmp/bfsng-megadoc-data \
-              --pattern "$pattern" --mode "$mode" --split all \
+              --pattern "$pattern" --mode "$mode" --split "$split" \
               --passes 3 --seed 42 \
               --output "/tmp/bfsng-megadoc-results/$pattern.csv" \
               --summary "/tmp/bfsng-megadoc-results/$pattern.json"

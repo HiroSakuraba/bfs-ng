@@ -121,6 +121,14 @@ class MegaDocBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid path"):
             megadoc.load_manifest(self.root)
 
+    def test_training_cannot_mix_splits(self):
+        with self.assertRaisesRegex(ValueError, "single split"):
+            megadoc.trace(self.root, self.root.parent / "out.csv",
+                          pattern="train", split="all")
+        with self.assertRaisesRegex(ValueError, "single split"):
+            megadoc.trace(self.root, self.root.parent / "out.csv",
+                          pattern="mixed", split="all")
+
     def test_reject_empty_split_and_invalid_modes(self):
         with self.assertRaisesRegex(ValueError, "no generated"):
             megadoc.trace(self.root, self.root.parent / "out.csv", split="test")
