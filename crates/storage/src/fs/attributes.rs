@@ -161,7 +161,7 @@ impl Catalog {
             return Err(Error::CorruptTree);
         }
         let mut d = Decoder::new(bytes);
-        if d.take(8)? != MAGIC || d.u16()? != VERSION {
+        if d.take(8)? != MAGIC.as_slice() || d.u16()? != VERSION {
             return Err(Error::CorruptTree);
         }
         let ndefs = d.u16()? as usize;
@@ -317,14 +317,14 @@ impl Catalog {
         }
         let prepared = match kind {
             Input::Equal(v) => {
-                if matches!(def.ty, AttributeType::TextSet { .. }) {
+                if matches!(&def.ty, AttributeType::TextSet { .. }) {
                     return Err(Error::Attribute("use Contains for text sets".into()));
                 }
                 let v = def.normalize(v.clone()).map_err(attribute_error)?;
                 Condition::Equal(def.index_keys(&v)[0].clone())
             }
             Input::Contains(value) => {
-                if !matches!(def.ty, AttributeType::TextSet { .. }) {
+                if !matches!(&def.ty, AttributeType::TextSet { .. }) {
                     return Err(Error::Attribute("Contains requires TextSet".into()));
                 }
                 let set = Value::TextSet(BTreeSet::from([value.clone()]));
@@ -332,14 +332,14 @@ impl Catalog {
                 Condition::Equal(def.index_keys(&v)[0].clone())
             }
             Input::Prefix(value) => {
-                if !matches!(def.ty, AttributeType::Text { .. }) || value.is_empty() {
+                if !matches!(&def.ty, AttributeType::Text { .. }) || value.is_empty() {
                     return Err(Error::Attribute("Prefix requires nonempty Text".into()));
                 }
                 let v = def.normalize(Value::Text(value.clone())).map_err(attribute_error)?;
                 Condition::Prefix(def.index_keys(&v)[0].clone())
             }
             Input::Range(low, high) => {
-                if !matches!(def.ty, AttributeType::Signed |
+                if !matches!(&def.ty, AttributeType::Signed |
                     AttributeType::Unsigned | AttributeType::TimestampNs)
                 {
                     return Err(Error::Attribute("Range requires integer or timestamp".into()));
