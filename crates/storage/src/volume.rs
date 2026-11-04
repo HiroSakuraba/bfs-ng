@@ -247,10 +247,7 @@ impl<D: BlockDevice> Volume<D> {
             .ok_or(Error::GenerationOverflow)?;
         let mut seen = std::collections::BTreeSet::new();
         for (number, _) in blocks {
-            if *number <= root_block
-                || *number >= self.head.blocks
-                || !seen.insert(*number)
-            {
+            if *number <= root_block || *number >= self.head.blocks || !seen.insert(*number) {
                 return Err(Error::Geometry);
             }
         }

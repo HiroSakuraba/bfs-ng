@@ -1,4 +1,6 @@
-use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileDevice, FileSystem, Volume};
+use bfs_ng_storage::{
+    BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileDevice, FileSystem, Volume,
+};
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -40,7 +42,11 @@ fn multilevel_sorted_tree_and_update_delete_roundtrip() {
     let mut tx = fs.begin();
     tx.mkdir("/docs").unwrap();
     for i in 0..150 {
-        tx.write_file(&format!("/docs/record_{i:04}"), format!("v1-{i}").as_bytes()).unwrap();
+        tx.write_file(
+            &format!("/docs/record_{i:04}"),
+            format!("v1-{i}").as_bytes(),
+        )
+        .unwrap();
     }
     fs.commit(tx).unwrap();
     fs = reopen(fs);
@@ -54,18 +60,35 @@ fn multilevel_sorted_tree_and_update_delete_roundtrip() {
     assert_eq!(fs.list_dir("/docs").unwrap().len(), 150);
     assert_eq!(fs.read_file("/docs/record_0000").unwrap(), b"revised");
     assert_eq!(fs.read_file("/docs/record_0099").unwrap(), b"v1-99");
-    assert!(matches!(fs.read_file("/docs/record_0100"), Err(Error::NotFound)));
+    assert!(matches!(
+        fs.read_file("/docs/record_0100"),
+        Err(Error::NotFound)
+    ));
 }
 
 #[test]
 fn invalid_paths_and_namespace_invariants_are_rejected() {
     let mut fs = fresh(80);
     let mut tx = fs.begin();
-    for path in ["/", "", "relative", "/a//b", "/a/", "/../b", "/a/./b",
-        "/back\\slash", "/bad\0name"]
-    {
-        assert!(matches!(tx.mkdir(path), Err(Error::InvalidPath)), "{path:?}");
-        assert!(matches!(tx.write_file(path, b"x"), Err(Error::InvalidPath)), "{path:?}");
+    for path in [
+        "/",
+        "",
+        "relative",
+        "/a//b",
+        "/a/",
+        "/../b",
+        "/a/./b",
+        "/back\\slash",
+        "/bad\0name",
+    ] {
+        assert!(
+            matches!(tx.mkdir(path), Err(Error::InvalidPath)),
+            "{path:?}"
+        );
+        assert!(
+            matches!(tx.write_file(path, b"x"), Err(Error::InvalidPath)),
+            "{path:?}"
+        );
     }
     assert!(matches!(tx.mkdir("/missing/child"), Err(Error::NotFound)));
     tx.mkdir("/a").unwrap();
@@ -102,10 +125,14 @@ fn append_only_exhaustion_never_overwrites_old_root() {
     let mut failed = false;
     for i in 0..10 {
         let mut tx = fs.begin();
-        tx.write_file("/a", format!("generation-{i}").as_bytes()).unwrap();
+        tx.write_file("/a", format!("generation-{i}").as_bytes())
+            .unwrap();
         match fs.commit(tx) {
             Ok(_) => {}
-            Err(Error::NoSpace) => { failed = true; break; }
+            Err(Error::NoSpace) => {
+                failed = true;
+                break;
+            }
             Err(e) => panic!("{e}"),
         }
     }
@@ -125,7 +152,12 @@ fn each_commit_crash_point_keeps_old_or_entire_new_namespace() {
         tx.write_file("/file", b"old-valid").unwrap();
         fs.commit(tx).unwrap();
         let mut device = fs.into_device();
-        device.inject(Fault { operation: fail_at, torn_bytes: None }).unwrap();
+        device
+            .inject(Fault {
+                operation: fail_at,
+                torn_bytes: None,
+            })
+            .unwrap();
         let mut fs = FileSystem::open(device).unwrap();
         let mut tx = fs.begin();
         tx.write_file("/file", b"new-valid").unwrap();
@@ -133,8 +165,11 @@ fn each_commit_crash_point_keeps_old_or_entire_new_namespace() {
         let mut fs = reopen(fs);
         let data = fs.read_file("/file").unwrap();
         assert!(data == b"old-valid" || data == b"new-valid");
-        if fail_at < 7 { assert_eq!(data, b"old-valid"); }
-        else { assert_eq!(data, b"new-valid"); }
+        if fail_at < 7 {
+            assert_eq!(data, b"old-valid");
+        } else {
+            assert_eq!(data, b"new-valid");
+        }
     }
 }
 
@@ -147,7 +182,11 @@ fn torn_writes_never_accept_partial_data() {
             tx.write_file("/a", b"old").unwrap();
             fs.commit(tx).unwrap();
             let mut d = fs.into_device();
-            d.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
+            d.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            })
+            .unwrap();
             let mut fs = FileSystem::open(d).unwrap();
             let mut tx = fs.begin();
             tx.write_file("/a", b"new").unwrap();
@@ -207,12 +246,16 @@ impl Temp {
     fn new() -> Self {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        Self(std::env::temp_dir().join(format!("bfs-ng-f1-{}-{time}-{n}.img",std::process::id())))
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        Self(std::env::temp_dir().join(format!("bfs-ng-f1-{}-{time}-{n}.img", std::process::id())))
     }
 }
 impl Drop for Temp {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[test]
@@ -227,7 +270,10 @@ fn actual_file_image_persists_records_across_commits() {
     let mut fs = FileSystem::open(FileDevice::open(&path.0).unwrap()).unwrap();
     assert_eq!(fs.read_file("/axiom/example.az").unwrap(), b"initial");
     let mut tx = fs.begin();
-    assert_eq!(tx.write_file("/axiom/example.az", b"modified").unwrap(), inode);
+    assert_eq!(
+        tx.write_file("/axiom/example.az", b"modified").unwrap(),
+        inode
+    );
     fs.commit(tx).unwrap();
     drop(fs);
     let mut fs = FileSystem::open(FileDevice::open(&path.0).unwrap()).unwrap();
@@ -250,8 +296,13 @@ fn file_image_tree_corruption_recovers_preceding_generation() {
     let manifest = f0.read_root().unwrap().unwrap();
     let root = u64::from_le_bytes(manifest[24..32].try_into().unwrap());
     drop(f0);
-    let mut file = OpenOptions::new().read(true).write(true).open(&path.0).unwrap();
-    file.seek(SeekFrom::Start(root * BLOCK_SIZE as u64 + 52)).unwrap();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path.0)
+        .unwrap();
+    file.seek(SeekFrom::Start(root * BLOCK_SIZE as u64 + 52))
+        .unwrap();
     file.write_all(&[0x88]).unwrap();
     file.sync_all().unwrap();
     drop(file);

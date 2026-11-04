@@ -1,7 +1,7 @@
 //! F1: bounded, append-only CoW namespace with checksummed metadata/data.
 //! This intentionally rewrites the *entire* sorted tree per transaction.
-use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use crate::volume::{RootInfo, crc32c};
+use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::{BTreeMap, BTreeSet};
 
 const META_MAGIC: &[u8; 8] = b"BFSNGM1\0";
@@ -171,9 +171,10 @@ fn validate_path(path: &str) -> Result<()> {
         || path.ends_with('/')
         || path.contains('\0')
         || path.contains('\\')
-        || path.split('/').skip(1).any(|component| {
-            component.is_empty() || component == "." || component == ".."
-        })
+        || path
+            .split('/')
+            .skip(1)
+            .any(|component| component.is_empty() || component == "." || component == "..")
     {
         return Err(Error::InvalidPath);
     }
@@ -210,7 +211,11 @@ struct Builder {
 
 impl Builder {
     fn new(cursor: u64, next_root: u64) -> Self {
-        Self { cursor, root_limit: next_root, staged: Vec::new() }
+        Self {
+            cursor,
+            root_limit: next_root,
+            staged: Vec::new(),
+        }
     }
 
     fn reserve(&mut self, amount: u64) -> Result<u64> {
@@ -260,19 +265,25 @@ fn data_read<D: BlockDevice>(
     generation: u64,
 ) -> Result<Option<Vec<u8>>> {
     if record.directory {
-        return Ok((record.start == 0 && record.count == 0
-            && record.length == 0 && record.checksum == 0).then(Vec::new));
+        return Ok((record.start == 0
+            && record.count == 0
+            && record.length == 0
+            && record.checksum == 0)
+            .then(Vec::new));
     }
     if record.length == 0 {
-        return Ok((record.start == 0 && record.count == 0
-            && record.checksum == crc32c(&[])).then(Vec::new));
+        return Ok(
+            (record.start == 0 && record.count == 0 && record.checksum == crc32c(&[]))
+                .then(Vec::new),
+        );
     }
     let len = usize::try_from(record.length).map_err(|_| Error::CorruptTree)?;
     if len > MAX_DATA || record.count as usize != len.div_ceil(CHUNK) {
         return Ok(None);
     }
     let end = record.start.checked_add(record.count as u64);
-    if record.start < cursor || record.start <= generation + 1
+    if record.start < cursor
+        || record.start <= generation + 1
         || end.is_none_or(|n| n > device.block_count())
     {
         return Ok(None);
@@ -338,9 +349,11 @@ fn encode_leaf(entries: &[(&String, &Record)], generation: u64) -> Result<[u8; B
     Ok(seal(b))
 }
 
-fn encode_branch(children: &[(String, u64)], level: u8, generation: u64)
-    -> Result<[u8; BLOCK_SIZE]>
-{
+fn encode_branch(
+    children: &[(String, u64)],
+    level: u8,
+    generation: u64,
+) -> Result<[u8; BLOCK_SIZE]> {
     let mut b = encode_node_header(level, children.len(), generation);
     let mut at = 32;
     for (key, block) in children {
@@ -425,8 +438,10 @@ fn read_nodes<D: BlockDevice>(
     visited: &mut BTreeSet<u64>,
     out: &mut BTreeMap<String, Record>,
 ) -> Result<Option<(String, u8)>> {
-    if address < cursor || address <= generation + 1
-        || address >= device.block_count() || !visited.insert(address)
+    if address < cursor
+        || address <= generation + 1
+        || address >= device.block_count()
+        || !visited.insert(address)
         || visited.len() > 2048
     {
         return Ok(None);
@@ -436,15 +451,24 @@ fn read_nodes<D: BlockDevice>(
     let kind = b[8];
     let count = u16_at(&b, 10) as usize;
     let birth = u64_at(&b, 12);
-    if &b[..8] != NODE_MAGIC || b[9] != 0 || count == 0
-        || count > FANOUT || birth == 0 || birth > generation
-        || !valid_checksum(&b) || b[20..24].iter().any(|n| *n != 0)
+    if &b[..8] != NODE_MAGIC
+        || b[9] != 0
+        || count == 0
+        || count > FANOUT
+        || birth == 0
+        || birth > generation
+        || !valid_checksum(&b)
+        || b[20..24].iter().any(|n| *n != 0)
         || b[28..32].iter().any(|n| *n != 0)
-        || level.is_some_and(|expected| expected != kind) || kind > 8
+        || level.is_some_and(|expected| expected != kind)
+        || kind > 8
     {
         return Ok(None);
     }
-    let mut rd = Reader { block: &b, offset: 32 };
+    let mut rd = Reader {
+        block: &b,
+        offset: 32,
+    };
     let mut last_key = String::new();
     for _ in 0..count {
         let Some(key) = rd.key() else {
@@ -479,8 +503,15 @@ fn read_nodes<D: BlockDevice>(
             };
             let child_addr = u64_at(raw, 0);
             let Some((max_key, child_level)) = read_nodes(
-                device, child_addr, cursor, generation, Some(kind - 1), visited, out,
-            )? else {
+                device,
+                child_addr,
+                cursor,
+                generation,
+                Some(kind - 1),
+                visited,
+                out,
+            )?
+            else {
                 return Ok(None);
             };
             if child_level != kind - 1 || max_key != key {
@@ -503,8 +534,10 @@ fn load_state<D: BlockDevice>(
     let Some(bytes) = payload else {
         return Ok((info.generation == 0).then(|| State::empty(device.block_count())));
     };
-    if bytes.len() != 56 || &bytes[..8] != META_MAGIC
-        || u32_at(bytes, 8) != FORMAT || bytes[12..16].iter().any(|b| *b != 0)
+    if bytes.len() != 56
+        || &bytes[..8] != META_MAGIC
+        || u32_at(bytes, 8) != FORMAT
+        || bytes[12..16].iter().any(|b| *b != 0)
         || u64_at(bytes, 48) != info.generation
     {
         return Ok(None);
@@ -513,9 +546,11 @@ fn load_state<D: BlockDevice>(
     let root_node = u64_at(bytes, 24);
     let next_inode = u64_at(bytes, 32);
     let count = u64_at(bytes, 40);
-    if info.generation == 0 || next_inode < 2
+    if info.generation == 0
+        || next_inode < 2
         || cursor <= info.generation + 1
-        || cursor > device.block_count() || count > MAX_RECORDS as u64
+        || cursor > device.block_count()
+        || count > MAX_RECORDS as u64
         || (root_node == 0) != (count == 0)
     {
         return Ok(None);
@@ -523,8 +558,16 @@ fn load_state<D: BlockDevice>(
     let mut records = BTreeMap::new();
     let mut seen = BTreeSet::new();
     if root_node != 0
-        && read_nodes(device, root_node, cursor, info.generation, None, &mut seen,
-            &mut records)?.is_none()
+        && read_nodes(
+            device,
+            root_node,
+            cursor,
+            info.generation,
+            None,
+            &mut seen,
+            &mut records,
+        )?
+        .is_none()
     {
         return Ok(None);
     }
@@ -542,19 +585,18 @@ fn load_state<D: BlockDevice>(
             return Ok(None);
         }
         if record.directory {
-            if record.start != 0 || record.count != 0 || record.length != 0
-                || record.checksum != 0
+            if record.start != 0 || record.count != 0 || record.length != 0 || record.checksum != 0
             {
                 return Ok(None);
             }
         } else {
-            if record.length > MAX_DATA as u64
-                || record.count as usize > MAX_DATA.div_ceil(CHUNK)
-            {
+            if record.length > MAX_DATA as u64 || record.count as usize > MAX_DATA.div_ceil(CHUNK) {
                 return Ok(None);
             }
             if record.count > 0 {
-                let end = record.start.checked_add(record.count as u64)
+                let end = record
+                    .start
+                    .checked_add(record.count as u64)
                     .ok_or(Error::CorruptTree)?;
                 for pos in record.start..end {
                     if !active_blocks.insert(pos) || seen.contains(&pos) {
@@ -570,7 +612,11 @@ fn load_state<D: BlockDevice>(
     if seen.iter().any(|n| active_blocks.contains(n)) {
         return Ok(None);
     }
-    Ok(Some(State { cursor, next_inode, records }))
+    Ok(Some(State {
+        cursor,
+        next_inode,
+        records,
+    }))
 }
 
 /// F1 namespace backed by a checksummed, append-only immutable block tree.
@@ -606,7 +652,12 @@ impl<D: BlockDevice> FileSystem<D> {
 
     pub fn stat(&self, path: &str) -> Result<Stat> {
         if path == "/" {
-            return Ok(Stat { inode: 1, directory: true, bytes: 0, generation: self.generation() });
+            return Ok(Stat {
+                inode: 1,
+                directory: true,
+                bytes: 0,
+                generation: self.generation(),
+            });
         }
         validate_path(path)?;
         let record = self.state.records.get(path).ok_or(Error::NotFound)?;
@@ -625,11 +676,19 @@ impl<D: BlockDevice> FileSystem<D> {
                 return Err(Error::NotDirectory);
             }
         }
-        let prefix = if path == "/" { "/".to_owned() } else { format!("{path}/") };
-        Ok(self.state.records.keys()
+        let prefix = if path == "/" {
+            "/".to_owned()
+        } else {
+            format!("{path}/")
+        };
+        Ok(self
+            .state
+            .records
+            .keys()
             .filter(|entry| entry.starts_with(&prefix))
             .filter(|entry| !entry[prefix.len()..].contains('/'))
-            .cloned().collect())
+            .cloned()
+            .collect())
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
@@ -641,7 +700,9 @@ impl<D: BlockDevice> FileSystem<D> {
         // Validation runs at mount too; repeat to catch subsequent media damage.
         let cursor = self.state.cursor;
         let generation = self.generation();
-        let mut reader = ReaderDevice { volume: &mut self.volume };
+        let mut reader = ReaderDevice {
+            volume: &mut self.volume,
+        };
         data_read(&mut reader, &entry, cursor, generation)?.ok_or(Error::CorruptTree)
     }
 
@@ -662,7 +723,10 @@ impl<D: BlockDevice> FileSystem<D> {
         if !tx.dirty {
             return Ok(self.generation());
         }
-        let generation = self.generation().checked_add(1).ok_or(Error::GenerationOverflow)?;
+        let generation = self
+            .generation()
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
         let root_block = generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
         let mut builder = Builder::new(self.state.cursor, root_block);
         let mut state = State {
@@ -681,8 +745,10 @@ impl<D: BlockDevice> FileSystem<D> {
             for i in 0..chunks {
                 let from = i * CHUNK;
                 let to = usize::min(from + CHUNK, bytes.len());
-                builder.staged.push((start + i as u64,
-                    encode_data(entry.inode, i as u32, &bytes[from..to])));
+                builder.staged.push((
+                    start + i as u64,
+                    encode_data(entry.inode, i as u32, &bytes[from..to]),
+                ));
             }
             entry.start = start;
             entry.count = chunks as u32;
@@ -692,7 +758,8 @@ impl<D: BlockDevice> FileSystem<D> {
         let root_node = build_nodes(&mut builder, &state.records, generation)?;
         state.cursor = builder.cursor;
         let manifest = root_manifest(&state, root_node, generation);
-        self.volume.commit_root_with_blocks(&builder.staged, &manifest)?;
+        self.volume
+            .commit_root_with_blocks(&builder.staged, &manifest)?;
         self.state = state;
         Ok(generation)
     }
@@ -707,7 +774,9 @@ struct ReaderDevice<'a, D: BlockDevice> {
     volume: &'a mut Volume<D>,
 }
 impl<D: BlockDevice> BlockDevice for ReaderDevice<'_, D> {
-    fn block_count(&self) -> u64 { self.volume.block_count() }
+    fn block_count(&self) -> u64 {
+        self.volume.block_count()
+    }
     fn read_block(&mut self, block: u64, out: &mut [u8; BLOCK_SIZE]) -> Result<()> {
         *out = self.volume.read_data_block(block)?;
         Ok(())
@@ -715,5 +784,7 @@ impl<D: BlockDevice> BlockDevice for ReaderDevice<'_, D> {
     fn write_block(&mut self, _block: u64, _data: &[u8; BLOCK_SIZE]) -> Result<()> {
         Err(Error::Poisoned)
     }
-    fn sync(&mut self) -> Result<()> { Err(Error::Poisoned) }
+    fn sync(&mut self) -> Result<()> {
+        Err(Error::Poisoned)
+    }
 }
