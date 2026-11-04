@@ -522,8 +522,8 @@ fn load_state<D: BlockDevice>(
         return Ok(None);
     }
     let mut records = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     if root_node != 0 {
-        let mut seen = BTreeSet::new();
         if read_nodes(device, root_node, cursor, info.generation, None, &mut seen,
             &mut records)?.is_none()
         {
