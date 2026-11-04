@@ -1,4 +1,4 @@
-//! F2.R1: durable reference counts are never authoritative without the
+//! F2.R2: incremental CoW reference counts remain checked against the
 //! independent live + snapshot graph reconstruction.
 use bfs_ng_storage::{
     AllocationReport, AttributeDef, AttributeType, BLOCK_SIZE, BlockDevice, CrashDevice, Error,
@@ -21,7 +21,7 @@ fn index_header(device: CrashDevice) -> (CrashDevice, u64, u32, u32) {
     let manifest = vol.read_root().unwrap().unwrap();
     let snap_count = u32::from_le_bytes(manifest[56..60].try_into().unwrap()) as usize;
     let offset = 64 + snap_count * 40;
-    assert_eq!(&manifest[..8], b"BFSNGM5\0");
+    assert_eq!(&manifest[..8], b"BFSNGM6\0");
     let first = u64::from_le_bytes(manifest[offset..offset + 8].try_into().unwrap());
     let pages = u32::from_le_bytes(manifest[offset + 8..offset + 12].try_into().unwrap());
     let entries = u32::from_le_bytes(manifest[offset + 12..offset + 16].try_into().unwrap());
@@ -114,7 +114,7 @@ fn multi_page_reference_chain_is_sorted_and_recovers_large_namespace() {
     assert!(first > 2 && pages >= 2 && entries > 405);
     let mut raw = [0; BLOCK_SIZE];
     device.read_block(first, &mut raw).unwrap();
-    assert_eq!(&raw[..8], b"BFSREF5\0");
+    assert_eq!(&raw[..8], b"BFSRBR6\0");
     fs = FileSystem::open(device).unwrap();
     assert_eq!(fs.file_count(), 97);
     assert_eq!(fs.read_file("/bulk/item_0095").unwrap(), data);
@@ -156,7 +156,7 @@ fn valid_crc_but_forged_reference_count_is_rejected_by_graph_oracle() {
     let (mut device, first, _, _) = index_header(fs.into_device().power_loss());
     let mut block = [0; BLOCK_SIZE];
     device.read_block(first, &mut block).unwrap();
-    assert_eq!(&block[..8], b"BFSREF5\0");
+    assert_eq!(&block[..8], b"BFSRLF6\0");
     let refs = u16::from_le_bytes(block[40..42].try_into().unwrap());
     block[40..42].copy_from_slice(&(refs + 1).to_le_bytes());
     block[24..28].fill(0);
@@ -190,8 +190,9 @@ fn invalid_reference_link_is_rejected_without_unsafe_reclamation() {
     assert!(pages >= 2);
     let mut block = [0; BLOCK_SIZE];
     device.read_block(first, &mut block).unwrap();
-    // Make first page loop back to itself, with valid block checksum.
-    block[16..24].copy_from_slice(&first.to_le_bytes());
+    // Make the root branch point to itself, with a valid block checksum.
+    assert_eq!(&block[..8], b"BFSRBR6\0");
+    block[40..48].copy_from_slice(&first.to_le_bytes());
     block[24..28].fill(0);
     let checksum = crc32c(&block);
     block[24..28].copy_from_slice(&checksum.to_le_bytes());
