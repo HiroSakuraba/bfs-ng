@@ -32,7 +32,8 @@ fn f0_v1_header_with_repaired_crc_cannot_mount_as_rotating_v2() {
     disk.read_block(0, &mut superblock).unwrap();
     assert_eq!(u32::from_le_bytes(superblock[8..12].try_into().unwrap()), 2);
     superblock[8..12].copy_from_slice(&1_u32.to_le_bytes());
-    superblock[120..124].copy_from_slice(&crc32c(&superblock[..120]).to_le_bytes());
+    let checksum = crc32c(&superblock[..120]);
+    superblock[120..124].copy_from_slice(&checksum.to_le_bytes());
     disk.write_block(0, &superblock).unwrap();
     disk.sync().unwrap();
     assert!(matches!(Volume::open(disk.power_loss()), Err(Error::NoValidRoot)));
@@ -93,7 +94,7 @@ fn root_ring_wrap_faults_preserve_entire_f2_generation_and_ownership() {
             tx.write_file("/entry", b"value-8").unwrap();
             let result = fs.commit(tx);
             assert!(
-                result.is_ok() || matches!(result, Err(Error::InjectedCrash)),
+                result.is_ok() || matches!(&result, Err(Error::InjectedCrash)),
                 "unexpected error for operation={operation}, torn={torn_bytes}: {result:?}"
             );
             let mut recovered = FileSystem::open(fs.into_device().power_loss()).unwrap();
