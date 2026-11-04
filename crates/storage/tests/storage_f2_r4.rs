@@ -126,8 +126,12 @@ fn forged_quarantine_of_fallback_owned_block_is_fail_closed() {
     // Forcing a pending run into the deferred class changes an eligibility
     // boundary without changing the referenced roots. Even with a valid CRC,
     // it cannot become certified by the independent two-root auditor.
-    assert_eq!(u64::from_le_bytes(page[44..52].try_into().unwrap()), 3);
-    page[44..52].copy_from_slice(&0_u64.to_le_bytes());
+    let count = u16::from_le_bytes(page[28..30].try_into().unwrap()) as usize;
+    let eligible_at = (0..count)
+        .map(|index| 32 + index * 20 + 12)
+        .find(|&at| u64::from_le_bytes(page[at..at + 8].try_into().unwrap()) == 3)
+        .expect("must find a pending fallback-owned range");
+    page[eligible_at..eligible_at + 8].copy_from_slice(&0_u64.to_le_bytes());
     repair_crc(&mut page);
     device.write_block(journal_page, &page).unwrap();
     device.sync().unwrap();
