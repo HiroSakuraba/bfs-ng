@@ -251,6 +251,71 @@ impl FsTransaction {
         Ok(())
     }
 
+    /// Atomically rename a regular file or move a directory subtree.
+    ///
+    /// File identities are stable: names change, but inode numbers, file-data
+    /// extents and inode-keyed F4 attributes are retained. This operates only
+    /// on the private transaction map; an interrupted commit cannot expose a
+    /// partially renamed subtree. Existing destination paths are rejected,
+    /// including the private attribute catalog and descendants of the source.
+    pub fn rename(&mut self, source: &str, destination: &str) -> Result<()> {
+        validate_user_path(source)?;
+        validate_user_path(destination)?;
+        let entry = self.records.get(source).ok_or(Error::NotFound)?;
+        if source == destination {
+            return Ok(());
+        }
+        if self.records.contains_key(destination) {
+            return Err(Error::AlreadyExists);
+        }
+        if entry.directory && destination.starts_with(&format!("{source}/")) {
+            return Err(Error::InvalidPath);
+        }
+        self.parent(destination)?;
+
+        let prefix = format!("{source}/");
+        let moved: Vec<(String, String)> = self
+            .records
+            .keys()
+            .filter(|path| path.as_str() == source || (entry.directory && path.starts_with(&prefix)))
+            .map(|path| {
+                let suffix = path.strip_prefix(source).ok_or(Error::CorruptTree)?;
+                let renamed = format!("{destination}{suffix}");
+                validate_user_path(&renamed)?;
+                Ok((path.clone(), renamed))
+            })
+            .collect::<Result<_>>()?;
+
+        // Validate the entire new namespace before changing any entry.
+        // Every target must be unique and must not alias an unaffected inode.
+        let old_names: BTreeSet<&str> = moved.iter().map(|(old, _)| old.as_str()).collect();
+        let mut new_names = BTreeSet::new();
+        for (_, new) in &moved {
+            if !new_names.insert(new.as_str())
+                || (self.records.contains_key(new) && !old_names.contains(new.as_str()))
+            {
+                return Err(Error::AlreadyExists);
+            }
+        }
+
+        let mut transferred = Vec::with_capacity(moved.len());
+        for (old, new) in moved {
+            let record = self.records.remove(&old).ok_or(Error::CorruptTree)?;
+            let pending = self.new_data.remove(&old);
+            transferred.push((new, record, pending));
+        }
+        for (new, record, pending) in transferred {
+            self.records.insert(new.clone(), record);
+            if let Some(data) = pending {
+                self.new_data.insert(new, data);
+            }
+        }
+        // Catalog postings are keyed by persistent inode, not pathname.
+        // There is no attribute-index rewrite for a pure rename.
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn rmdir(&mut self, path: &str) -> Result<()> {
         validate_user_path(path)?;
         match self.records.get(path) {
