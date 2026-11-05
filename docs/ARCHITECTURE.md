@@ -35,6 +35,7 @@ This is the **current cross-cutting design and status document**. Format-specifi
 | F5.0a **isolated format foundation** | Canonical v10 codecs and multilevel catalog; a **restricted virgin-only metadata writer** can publish snapshot pins and retained dropping states through F0 after independent checks of both candidate roots and zero pages | **Not a general v10 filesystem, data/attribute writer, free-space allocator or snapshot recycler**; v9 remains default. See [wire codec](F5_0A_WIRE_FORMAT.md) and [restricted writer](F5_0A_VIRGIN_WRITER.md) |
 | F5.0b **one-blob data/checksum experiment** | Headerless physical 4 KiB data blocks, checked checksum B+tree with exact live/pinned snapshot coverage, staged CoW checksum commits, and historical reads | **One blob of <=4 KiB only**; checksum tree rebuilds in full; no general inode/extents or reuse. [F5.0b](F5_0B_CHECKSUM_DATA.md) |
 | F5.1 **bounded sparse extent prototype** | Single-file 64-block sparse CoW extent map with byte-addressed partial writes, truncate, historical snapshots and incremental checksum path copying | No general inode layout, inline data, punch/preallocate or streaming; only virgin blocks, no reuse. [F5.1](F5_1_EXTENTS.md) |
+| Integration I1 (v9 compatibility) | Atomic directory/file renames preserve inode identities and F4 postings; byte-range read/write/truncate, 4 MiB maximum file | v9 partial writes are whole-file rewrites; **v10 inode/namespace/attributes are NOT integrated**. [Contract](INTEGRATION_I1_NAMESPACE_IO.md) |
 | Real-world cache workload suite | Deterministic AxiomZig, DVE asset/dependency and AxiomMegaDoc corpus/trace generators, recorded bounded reads and pinned smoke workflows | Model/record traces are **not** traces from a BFS-NG mount or proof of hardware performance |
 
 **Historical milestone docs are not current disk-format contracts.** F2.R1 introduced v5, F2.R2 v6, F2.R3 v7, F2.R4 v8, and F0.R1 advances the **current root manifest to v9**. The current free-run pages still use their checked `BFSFRJ8\0` encoding; current reference B+tree pages still use their v6 leaf/branch encodings. Do not infer page-format version from the manifest version.
@@ -199,6 +200,7 @@ A clean test suite establishes the behavior of this **model and test-image proto
 - [F5.0a — strict snapshot-only virgin writer and two-root audit](F5_0A_VIRGIN_WRITER.md)
 - [F5.0b — experimental headerless data and checksum-tree retention](F5_0B_CHECKSUM_DATA.md)
 - [F5.1 — bounded sparse extents and incremental checksum CoW](F5_1_EXTENTS.md)
+- [Integration I1 — stable inode rename and bounded v9 partial I/O](INTEGRATION_I1_NAMESPACE_IO.md)
 - [F5 — extent data layer, birth-time reclamation and inode namespace (proposed, v10)](F5_DATA_LAYER.md)
 - [F0.R1 — rotating root payload safety and v9 compatibility](F0_R1_ROTATING_ROOTS.md)
 - [F2.R2 — CoW reference B+tree and delayed-free fences](F2_R2_INCREMENTAL_REFERENCES.md)
