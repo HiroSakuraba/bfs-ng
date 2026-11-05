@@ -15,6 +15,14 @@ pub use checksum_delta::stage_checksum_delta;
 mod data_writer;
 mod extent_map;
 mod extent_writer;
+mod namespace;
+mod unified_writer;
+pub use namespace::{
+    MAX_NAMESPACE_PAGES, MAX_NAMESPACE_RECORDS, NamespaceRecord, NamespaceScan,
+    read_namespace_tree, stage_namespace_tree, validate_namespace,
+    validate_namespace_path,
+};
+pub use unified_writer::UnifiedV10;
 pub use extent_map::{BlockRef, Extent, FileExtents, MAX_FILE_BLOCKS, MAX_FILE_BYTES};
 pub use extent_writer::ExtentDataWriter;
 mod snapshot_tree;
