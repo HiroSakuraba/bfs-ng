@@ -88,13 +88,10 @@ impl TwoRootOwners {
             return Err(Error::Geometry);
         }
         let before = self.protected();
-        if !staged.is_disjoint(&before)
-            || staged.iter().any(|&address| address >= total_blocks)
-        {
+        if !staged.is_disjoint(&before) || staged.iter().any(|&address| address >= total_blocks) {
             return Err(Error::CorruptTree);
         }
-        let allocated: BTreeSet<u64> =
-            candidate.pages.difference(&before).copied().collect();
+        let allocated: BTreeSet<u64> = candidate.pages.difference(&before).copied().collect();
         if !allocated.is_subset(staged) {
             return Err(Error::CorruptTree);
         }
@@ -106,9 +103,7 @@ impl TwoRootOwners {
             }
         }
         for address in self.fallback_only.pages.intersection(&candidate.pages) {
-            if self.fallback_only.global.contains(address)
-                != candidate.global.contains(address)
-            {
+            if self.fallback_only.global.contains(address) != candidate.global.contains(address) {
                 return Err(Error::CorruptTree);
             }
         }
@@ -161,12 +156,15 @@ impl TwoRootOwners {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::space_index::SpaceDomain;
+    use super::*;
 
     fn graph(pages: &[u64], globals: &[u64]) -> OwnerGraph {
-        OwnerGraph::new(pages.iter().copied().collect(), globals.iter().copied().collect())
-            .unwrap()
+        OwnerGraph::new(
+            pages.iter().copied().collect(),
+            globals.iter().copied().collect(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -212,8 +210,8 @@ mod tests {
         )
         .unwrap();
         let candidate = graph(&[80, 100], &[]);
-        assert!(old
-            .transition(
+        assert!(
+            old.transition(
                 candidate.clone(),
                 &BTreeSet::new(),
                 &BTreeMap::new(),
@@ -222,9 +220,10 @@ mod tests {
                 128,
                 69,
             )
-            .is_err());
-        assert!(old
-            .transition(
+            .is_err()
+        );
+        assert!(
+            old.transition(
                 candidate,
                 &BTreeSet::from([100]),
                 &BTreeMap::new(),
@@ -233,19 +232,17 @@ mod tests {
                 128,
                 69,
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
     fn refuses_global_role_swap_and_free_claim_on_retained_f0_owner() {
-        let old = TwoRootOwners::from_audit(
-            graph(&[80], &[80]),
-            &BTreeSet::from([80]),
-            BTreeSet::new(),
-        )
-        .unwrap();
-        assert!(old
-            .transition(
+        let old =
+            TwoRootOwners::from_audit(graph(&[80], &[80]), &BTreeSet::from([80]), BTreeSet::new())
+                .unwrap();
+        assert!(
+            old.transition(
                 graph(&[80], &[]),
                 &BTreeSet::new(),
                 &BTreeMap::new(),
@@ -254,7 +251,8 @@ mod tests {
                 128,
                 69,
             )
-            .is_err());
+            .is_err()
+        );
         let free = BTreeMap::from([(
             80,
             FreeRun {
@@ -263,8 +261,8 @@ mod tests {
                 eligible_after: 4,
             },
         )]);
-        assert!(old
-            .transition(
+        assert!(
+            old.transition(
                 graph(&[80], &[80]),
                 &BTreeSet::new(),
                 &free,
@@ -273,7 +271,8 @@ mod tests {
                 128,
                 69,
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -281,22 +280,15 @@ mod tests {
         let mut previous = graph(&[80, 81, 90], &[]);
         let mut latest = graph(&[80, 81, 100], &[]);
         for i in 0..128_u64 {
-            let old_union: BTreeSet<u64> =
-                previous.pages.union(&latest.pages).copied().collect();
-            let ledger = TwoRootOwners::from_audit(
-                latest.clone(),
-                &old_union,
-                BTreeSet::new(),
-            )
-            .unwrap();
+            let old_union: BTreeSet<u64> = previous.pages.union(&latest.pages).copied().collect();
+            let ledger =
+                TwoRootOwners::from_audit(latest.clone(), &old_union, BTreeSet::new()).unwrap();
             let next_address = 200 + i;
             let mut next = latest.clone();
             next.pages.insert(next_address);
             next.pages.remove(&100);
-            let expected: BTreeSet<u64> =
-                latest.pages.union(&next.pages).copied().collect();
-            let lost: BTreeSet<u64> =
-                old_union.difference(&expected).copied().collect();
+            let expected: BTreeSet<u64> = latest.pages.union(&next.pages).copied().collect();
+            let lost: BTreeSet<u64> = old_union.difference(&expected).copied().collect();
             let dead: BTreeMap<(u64, u64), DeadRun> = lost
                 .iter()
                 .map(|&address| {
@@ -312,10 +304,17 @@ mod tests {
                     )
                 })
                 .collect();
-            let delta: BTreeSet<u64> =
-                next.pages.difference(&old_union).copied().collect();
+            let delta: BTreeSet<u64> = next.pages.difference(&old_union).copied().collect();
             let result = ledger
-                .transition(next.clone(), &delta, &BTreeMap::new(), &dead, i + 10, 512, 69)
+                .transition(
+                    next.clone(),
+                    &delta,
+                    &BTreeMap::new(),
+                    &dead,
+                    i + 10,
+                    512,
+                    69,
+                )
                 .unwrap();
             assert_eq!(result.next.protected(), expected);
             assert_eq!(result.retired, lost);
