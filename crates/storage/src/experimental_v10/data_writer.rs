@@ -114,14 +114,14 @@ fn verify<D: BlockDevice>(
             desc.fs_root.address, desc.fs_root.birth, desc.fs_root.crc32c, desc.fs_root.level,
         ));
     }
-    let mut data: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut data: BTreeMap<u64, (u64, u16)> = BTreeMap::new();
     for (address, birth, crc, level) in fs_roots {
         let ptr = BlockPointer { address, birth, crc32c: crc, level };
         let entry = fs_blob(device, ptr, root.volume_id, root.generation)?;
         if !owned.insert(address) { return Err(Error::CorruptTree); }
         if let Some(d) = entry {
-            if let Some(previous) = data.insert(d.physical, d.birth) {
-                if previous != d.birth { return Err(Error::CorruptTree); }
+            if let Some(previous) = data.insert(d.physical, (d.birth, d.length)) {
+                if previous != (d.birth, d.length) { return Err(Error::CorruptTree); }
             }
         }
     }
@@ -132,9 +132,12 @@ fn verify<D: BlockDevice>(
     {
         return Err(Error::CorruptTree);
     }
-    for physical in data.keys().copied() {
+    for (&physical, &(_, length)) in &data {
         if !owned.insert(physical) { return Err(Error::CorruptTree); }
-        read_verified_block(device, physical, &csum.checksums)?;
+        let bytes = read_verified_block(device, physical, &csum.checksums)?;
+        if bytes[usize::from(length)..].iter().any(|&byte| byte != 0) {
+            return Err(Error::CorruptTree);
+        }
     }
     if owned.iter().any(|&block| block < manifest.high_water) {
         return Err(Error::CorruptTree);
@@ -191,6 +194,7 @@ impl<D: BlockDevice> BlockDevice for Overlay<'_, D> {
     }
     fn sync(&mut self) -> Result<()> { Err(Error::Poisoned) }
 }
+#[derive(Clone, Copy)]
 enum Edit<'a> {
     Write(&'a [u8]),
     Pin,
