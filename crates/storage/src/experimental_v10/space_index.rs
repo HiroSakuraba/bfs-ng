@@ -55,6 +55,15 @@ fn range_ok(start: u64, blocks: u32, total: u64) -> bool {
             .checked_add(u64::from(blocks))
             .is_some_and(|end| end <= total)
 }
+/// A delayed retirement must preserve a *full* two-generation fence.
+/// Saturating arithmetic would incorrectly accept MAX-1 or MAX as a death
+/// generation, even though no representable eligible epoch can follow.
+fn valid_retirement_epoch(death: u64, eligible_after: u64) -> bool {
+    death != 0
+        && death
+            .checked_add(2)
+            .is_some_and(|first_safe| eligible_after >= first_safe)
+}
 pub fn free_item(run: FreeRun, total: u64) -> Result<(Vec<u8>, Vec<u8>)> {
     if !range_ok(run.start, run.blocks, total) || run.eligible_after == 0 {
         return Err(Error::Geometry);
@@ -66,8 +75,7 @@ pub fn free_item(run: FreeRun, total: u64) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 pub fn dead_item(run: DeadRun, total: u64) -> Result<(Vec<u8>, Vec<u8>)> {
     if !range_ok(run.start, run.blocks, total)
-        || run.dead_generation == 0
-        || run.eligible_after < run.dead_generation.saturating_add(2)
+        || !valid_retirement_epoch(run.dead_generation, run.eligible_after)
     {
         return Err(Error::Geometry);
     }
@@ -115,9 +123,8 @@ fn dead_decode(key: &[u8], value: &[u8], total: u64, generation: u64) -> Result<
         domain,
     };
     if !range_ok(run.start, run.blocks, total)
-        || run.dead_generation == 0
         || run.dead_generation > generation
-        || run.eligible_after < run.dead_generation.saturating_add(2)
+        || !valid_retirement_epoch(run.dead_generation, run.eligible_after)
     {
         return Err(Error::CorruptTree);
     }
@@ -661,10 +668,24 @@ pub fn retire_step_cursor(
         }
         scanned += 1;
         cursor = Some(key);
+        // Defend the bounded public planner against malformed in-memory
+        // records as well as the on-disk decoder. In particular, an
+        // overflowing epoch can never mature into a reusable run.
+        if key != (item.dead_generation, item.start)
+            || item.dead_generation > current_generation
+            || !valid_retirement_epoch(item.dead_generation, item.eligible_after)
+            || item.start <= ROOT_PAYLOAD_LAST
+            || item.blocks == 0
+        {
+            return Err(Error::CorruptTree);
+        }
+        let end = item
+            .start
+            .checked_add(u64::from(item.blocks))
+            .ok_or(Error::CorruptTree)?;
         if item.eligible_after > current_generation {
             continue;
         }
-        let end = item.start + u64::from(item.blocks);
         if protected.range(item.start..end).next().is_some() {
             continue;
         }
