@@ -25,6 +25,23 @@ fn u64_le(raw: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(raw[at..at + 8].try_into().unwrap())
 }
 
+// Independent bitwise CRC32C check for the F0 superblock and root payload.
+// The v10 tree/page decoder is shared with the production implementation.
+fn crc32c_reference(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0x82f6_3b78
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
 // Independently parse F0 superblock + payload framing; the v10 manifest
 // decoder is reused for canonical field interpretation.
 fn f0_candidates(disk: &mut CrashDevice) -> Vec<Manifest> {
@@ -43,10 +60,20 @@ fn f0_candidates(disk: &mut CrashDevice) -> Vec<Manifest> {
         let payload_address = u64_le(&superblock, 40);
         assert_eq!(payload_address, 2 + (generation - 1) % 3);
         assert_eq!(u64_le(&superblock, 56), disk.block_count());
+        assert_eq!(
+            u32_le(&superblock, 120),
+            crc32c_reference(&superblock[..120]),
+            "corrupt F0 superblock CRC in slot {slot}"
+        );
 
         let mut payload = [0_u8; BLOCK_SIZE];
         disk.read_block(payload_address, &mut payload).unwrap();
         assert_eq!(&payload[..8], b"BFSNGR0\0");
+        assert_eq!(
+            u32_le(&superblock, 48),
+            crc32c_reference(&payload),
+            "corrupt F0 payload CRC in slot {slot}"
+        );
         let length = u32_le(&payload, 8) as usize;
         assert_eq!(length, MANIFEST_BYTES);
         let root = RootInfo {
