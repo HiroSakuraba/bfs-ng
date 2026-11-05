@@ -102,6 +102,7 @@ pub struct CrashDevice {
     pending: Vec<[u8; BLOCK_SIZE]>,
     fault: Option<Fault>,
     operations: usize,
+    read_blocks: u64,
 }
 
 impl CrashDevice {
@@ -111,7 +112,14 @@ impl CrashDevice {
             pending: vec![[0; BLOCK_SIZE]; blocks],
             fault: None,
             operations: 0,
+            read_blocks: 0,
         }
+    }
+
+    /// Counts physical block reads in this deterministic durability model.
+    /// Diagnostic only; does not alter write/sync crash fault sequencing.
+    pub fn read_blocks(&self) -> u64 {
+        self.read_blocks
     }
 
     pub fn inject(&mut self, fault: Fault) -> Result<()> {
@@ -155,6 +163,7 @@ impl BlockDevice for CrashDevice {
             .get(block as usize)
             .ok_or(Error::OutOfBounds(block))?;
         out.copy_from_slice(src);
+        self.read_blocks += 1;
         Ok(())
     }
 
