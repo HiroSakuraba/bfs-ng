@@ -3,7 +3,7 @@ use bfs_ng_storage::experimental_v10::{
     SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
     plan_snapshot_edit, read_page, read_snapshot_tree,
 };
-use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Result, Volume};
+use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, Result, Volume};
 
 const VID: u128 = 0x5432_76aa_8943_1234;
 const BLOCKS: u64 = 2_048;
@@ -323,4 +323,60 @@ fn nested_two_level_branch_snapshot_tree_is_checked() {
     assert_eq!(scan.pages_read, 7);
     assert_eq!(scan.descriptors.iter().map(|d| d.generation).collect::<Vec<_>>(), [1, 2, 3, 4]);
     assert_eq!(m.generation, 1);
+}
+
+#[test]
+fn staged_snapshot_mark_survives_f0_crash_at_each_barrier() {
+    for operation in 1..=4 {
+        for torn_bytes in [0, 8, 124, BLOCK_SIZE] {
+            let (volume, first, fs) = initial();
+            let (volume, committed, _) = stage_commit(
+                volume, &first, CatalogEdit::Pin(descriptor(1, fs)), 5,
+            ).unwrap();
+            let mut disk = volume.into_device().power_loss();
+            let pages = [
+                committed.high_water - 1,
+                committed.high_water - 2,
+                committed.high_water - 3,
+            ];
+            let staged = plan_snapshot_edit(
+                &mut disk,
+                committed.roots.snapshots,
+                CatalogEdit::MarkDropping(1),
+                VID,
+                3,
+                committed.high_water,
+                &pages,
+            ).unwrap();
+            for (address, bytes) in staged.staged_pages {
+                disk.write_block(address, &bytes).unwrap();
+            }
+            disk.sync().unwrap();
+            let mut publishing = Volume::open(disk.power_loss()).unwrap();
+            let next = manifest(3, staged.high_water, fs, Some(staged.root));
+            let mut device = publishing.into_device();
+            device.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            }).unwrap();
+            publishing = Volume::open(device).unwrap();
+            assert!(matches!(
+                publishing.commit_root(&next.encode(BLOCKS).unwrap()),
+                Err(Error::InjectedCrash)
+            ));
+            let mut recovered = ReadOnlyV10::open(
+                publishing.into_device().power_loss(),
+            ).unwrap();
+            assert!(matches!(recovered.root_info().generation, 2 | 3));
+            let pins = recovered.snapshot_descriptors().unwrap();
+            assert_eq!(pins.len(), 1);
+            assert_eq!(pins[0].fs_root, fs);
+            let expected_state = if recovered.root_info().generation == 2 {
+                SnapshotState::Pinned
+            } else {
+                SnapshotState::Dropping
+            };
+            assert_eq!(pins[0].state, expected_state);
+        }
+    }
 }
