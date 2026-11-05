@@ -25,7 +25,10 @@ const MAX_SNAPSHOTS: usize = 16;
 const FANOUT: usize = 12;
 const MAX_PATH: usize = 240;
 const MAX_RECORDS: usize = 2048;
-const MAX_DATA: usize = 256 * 1024;
+// Transitional v9 bound: lifted from 256 KiB to 4 MiB.  The current
+// transaction still stages the whole changed file; v10 streaming extents
+// will remove this memory/whole-file rewrite cost later.
+const MAX_DATA: usize = 4 * 1024 * 1024;
 const CHUNK: usize = BLOCK_SIZE - 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1650,6 +1653,66 @@ impl<D: BlockDevice> FileSystem<D> {
             volume: &mut self.volume,
         };
         data_read(&mut reader, &entry, cursor, generation)?.ok_or(Error::CorruptTree)
+    }
+
+    /// Read a byte range from the current generation. This transitional
+    /// v9 API verifies the entire checksummed file before slicing it.
+    /// Offset beyond EOF returns an empty result.
+    pub fn read_at(&mut self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+        let bytes = self.read_file(path)?;
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+        let end = start.saturating_add(length).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
+    }
+
+    /// Byte-addressed partial write using the certified v9 transaction path.
+    ///
+    /// Until the v10 multi-inode extent layer is integrated, this still
+    /// reads and rewrites the *whole* affected file. Other files, names,
+    /// inodes, attributes and retained snapshots remain unchanged. Holes
+    /// between the prior EOF and offset are explicitly zero-filled.
+    pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u64> {
+        validate_user_path(path)?;
+        let end = offset.checked_add(data.len() as u64).ok_or(Error::TooLarge)?;
+        if end > MAX_DATA as u64 {
+            return Err(Error::TooLarge);
+        }
+        if data.is_empty() {
+            return Ok(self.generation());
+        }
+        let mut prior = match self.read_file(path) {
+            Ok(bytes) => bytes,
+            Err(Error::NotFound) => Vec::new(),
+            Err(err) => return Err(err),
+        };
+        let start = usize::try_from(offset).map_err(|_| Error::TooLarge)?;
+        let final_len = usize::try_from(end).map_err(|_| Error::TooLarge)?;
+        if prior.len() < final_len {
+            prior.resize(final_len, 0);
+        }
+        prior[start..final_len].copy_from_slice(data);
+        let mut tx = self.begin();
+        tx.write_file(path, &prior)?;
+        self.commit(tx)
+    }
+
+    /// Resize an existing regular file atomically. Extension is zero-filled;
+    /// shrinking loses bytes in the live tree but pinned generations keep
+    /// their original immutable extent. Like write_at, v9 rewrites full data.
+    pub fn truncate(&mut self, path: &str, new_size: u64) -> Result<u64> {
+        validate_user_path(path)?;
+        if new_size > MAX_DATA as u64 {
+            return Err(Error::TooLarge);
+        }
+        let mut bytes = self.read_file(path)?;
+        if bytes.len() as u64 == new_size {
+            return Ok(self.generation());
+        }
+        let size = usize::try_from(new_size).map_err(|_| Error::TooLarge)?;
+        bytes.resize(size, 0);
+        let mut tx = self.begin();
+        tx.write_file(path, &bytes)?;
+        self.commit(tx)
     }
 
     pub fn begin(&self) -> FsTransaction {
