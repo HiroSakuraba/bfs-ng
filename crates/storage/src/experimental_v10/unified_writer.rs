@@ -14,6 +14,9 @@ use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attr
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
+use super::space_index::{DeadRun, FreeRun, SpaceDomain, dead_item, free_item,
+    read_space_tree, reserve_free, retire_step_cursor, stage_space_delta,
+    validate_space_pair, MAX_RETIRE_STEP};
 use super::{
     BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
     Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, read_checksum_tree,
@@ -27,6 +30,10 @@ use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const STAGING_LIMIT: usize = 512;
+// F5.2 metadata pages are never part of their own persistent free tree.
+// This fixed first arena prevents recursive allocator self-ownership.
+const INDEX_ARENA_BLOCKS: u64 = 64;
+const INDEX_ARENA_END: u64 = ROOT_PAYLOAD_LAST + 1 + INDEX_ARENA_BLOCKS;
 
 struct Reachability {
     records: BTreeMap<String, NamespaceRecord>,
@@ -66,15 +73,8 @@ fn validate_attributes(
 }
 
 fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reachability> {
-    if m.roots.free.is_some()
-        || m.roots.dead_list.is_some()
-        || m.sweep_snapshot != 0
-        || m.sweep_key != 0
-        || m.metadata_reserve != 0
-        || m.used_blocks != 0
-        || m.free_blocks != 0
-        || m.pending_blocks != 0
-    {
+    if m.used_blocks != 0 {
+
         return Err(Error::CorruptTree);
     }
     let snapshots = read_snapshot_tree(device, m.roots.snapshots, id, m.generation)?;
@@ -216,6 +216,10 @@ struct Verified {
     reach: Reachability,
     checksums: BTreeMap<u64, u32>,
     owned: BTreeSet<u64>,
+    free: BTreeMap<u64, FreeRun>,
+    dead: BTreeMap<(u64, u64), DeadRun>,
+    global_pages: BTreeSet<u64>,
+    retired_global: BTreeSet<u64>,
 }
 fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result<Verified> {
     let reach = collect(device, root.volume_id, m)?;
@@ -228,6 +232,7 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         return Err(Error::CorruptTree);
     }
     let mut owned = reach.owned_metadata.clone();
+    let mut global_pages = checksums.metadata_pages.clone();
     owned.extend(checksums.metadata_pages);
     for physical in expected {
         if !owned.insert(physical) {
@@ -242,13 +247,59 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
             }
         }
     }
-    if owned.iter().any(|&address| address < m.high_water) {
+    let (free, dead) = if m.metadata_reserve == 0 {
+        if m.roots.free.is_some() || m.roots.dead_list.is_some()
+            || m.free_blocks != 0 || m.pending_blocks != 0
+            || m.sweep_snapshot != 0 || m.sweep_key != 0
+        {
+            return Err(Error::CorruptTree);
+        }
+        (BTreeMap::new(), BTreeMap::new())
+    } else {
+        if m.metadata_reserve != INDEX_ARENA_BLOCKS
+            || device.block_count() < 256
+            || (m.sweep_snapshot == 0 && m.sweep_key != 0)
+        {
+            return Err(Error::CorruptTree);
+        }
+        let f = read_space_tree(
+            device, TreeId::Free, m.roots.free, root.volume_id, root.generation,
+        )?;
+        let d = read_space_tree(
+            device, TreeId::DeadList, m.roots.dead_list,
+            root.volume_id, root.generation,
+        )?;
+        if !f.pages.is_disjoint(&d.pages)
+            || f.pages.iter().chain(d.pages.iter())
+                .any(|&a| a <= ROOT_PAYLOAD_LAST || a >= INDEX_ARENA_END)
+            || !f.pages.is_disjoint(&owned) || !d.pages.is_disjoint(&owned)
+            || f.free.values().any(|run| run.start < INDEX_ARENA_END)
+            || d.dead.values().any(|run| run.start < INDEX_ARENA_END)
+        {
+            return Err(Error::CorruptTree);
+        }
+        let free_count: u64 = f.free.values().map(|run| u64::from(run.blocks)).sum();
+        let dead_count: u64 = d.dead.values().map(|run| u64::from(run.blocks)).sum();
+        if free_count != m.free_blocks || dead_count != m.pending_blocks {
+            return Err(Error::CorruptTree);
+        }
+        owned.extend(f.pages.iter().copied());
+        owned.extend(d.pages.iter().copied());
+        global_pages.extend(f.pages);
+        global_pages.extend(d.pages);
+        validate_space_pair(
+            &f.free, &d.dead, &owned, root.generation, device.block_count(),
+        )?;
+        (f.free, d.dead)
+    };
+    if owned.iter().any(|&address| address < m.high_water
+        && (m.metadata_reserve == 0 || address >= INDEX_ARENA_END))
+    {
         return Err(Error::CorruptTree);
     }
     Ok(Verified {
-        reach,
-        checksums: checksums.checksums,
-        owned,
+        reach, checksums: checksums.checksums, owned,
+        free, dead, global_pages, retired_global: BTreeSet::new(),
     })
 }
 fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
@@ -256,6 +307,7 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
     let mut selected = None;
     let mut owned = BTreeSet::new();
     let mut previous: Option<(u64, u64)> = None;
+    let mut fallback_global = BTreeSet::new();
     for (root, payload) in volume.candidate_roots()? {
         if root.generation == 0 {
             if payload.is_some() {
@@ -275,9 +327,20 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         owned.extend(checked.owned.iter().copied());
         if root.generation == latest.generation {
             selected = Some((m, checked));
+        } else {
+            fallback_global = checked.global_pages.clone();
         }
     }
-    let (m, checked) = selected.ok_or(Error::CorruptRoot)?;
+    let (m, mut checked) = selected.ok_or(Error::CorruptRoot)?;
+    // These pages vanish when the oldest candidate F0 slot is replaced.
+    // Label global pages independently of snapshot-referenced metadata.
+    checked.retired_global = fallback_global.difference(&checked.owned)
+        .copied().collect();
+    if m.metadata_reserve != 0 {
+        validate_space_pair(
+            &checked.free, &checked.dead, &owned, m.generation, volume.block_count(),
+        )?;
+    }
     Ok((m, checked, owned))
 }
 struct Overlay<'a, D: BlockDevice> {
@@ -355,6 +418,107 @@ fn rename_records(
     }
     Ok(())
 }
+fn free_deltas(
+    before: &BTreeMap<u64, FreeRun>,
+    after: &BTreeMap<u64, FreeRun>,
+    total: u64,
+) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>> {
+    let mut changes = BTreeMap::new();
+    for (&start, &old) in before {
+        if after.get(&start) != Some(&old) {
+            let value = after.get(&start).map(|run| free_item(*run, total))
+                .transpose()?.map(|(_, value)| value);
+            changes.insert(start.to_be_bytes().to_vec(), value);
+        }
+    }
+    for (&start, &new) in after {
+        if !before.contains_key(&start) {
+            let (key, value) = free_item(new, total)?;
+            changes.insert(key, Some(value));
+        }
+    }
+    Ok(changes)
+}
+fn dead_deltas(
+    before: &BTreeMap<(u64, u64), DeadRun>,
+    after: &BTreeMap<(u64, u64), DeadRun>,
+    total: u64,
+) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>> {
+    let mut changes = BTreeMap::new();
+    for (&key, &old) in before {
+        if after.get(&key) != Some(&old) {
+            let (bytes, _) = dead_item(old, total)?;
+            let value = after.get(&key).map(|run| dead_item(*run, total))
+                .transpose()?.map(|(_, value)| value);
+            changes.insert(bytes, value);
+        }
+    }
+    for (&key, &run) in after {
+        if !before.contains_key(&key) {
+            let (bytes, value) = dead_item(run, total)?;
+            changes.insert(bytes, Some(value));
+        }
+    }
+    Ok(changes)
+}
+fn recorded_interval(
+    free: &BTreeMap<u64, FreeRun>,
+    dead: &BTreeMap<(u64, u64), DeadRun>,
+    address: u64,
+) -> bool {
+    if let Some((_, run)) = free.range(..=address).next_back() {
+        if address < run.start + u64::from(run.blocks) { return true; }
+    }
+    dead.values().any(|run| address >= run.start
+        && address < run.start + u64::from(run.blocks))
+}
+/// Record pages retired by rotation of the oldest F0 candidate, but never
+/// release them in the same generation. Global metadata and snapshot-owned
+/// pages have distinct domain labels; independent live/pinned reachability
+/// remains the release authority.
+fn queue_fallback_retirements(
+    free: &BTreeMap<u64, FreeRun>,
+    dead: &mut BTreeMap<(u64, u64), DeadRun>,
+    combined_owners: &BTreeSet<u64>,
+    selected: &Verified,
+    next_generation: u64,
+) -> Result<()> {
+    let eligible = next_generation.checked_add(2)
+        .ok_or(Error::GenerationOverflow)?;
+    let mut grouped: Vec<DeadRun> = Vec::new();
+    for &address in combined_owners.difference(&selected.owned) {
+        if address < INDEX_ARENA_END
+            || recorded_interval(free, dead, address)
+        {
+            continue;
+        }
+        let domain = if selected.retired_global.contains(&address) {
+            SpaceDomain::Global
+        } else {
+            SpaceDomain::Snapshot
+        };
+        if let Some(last) = grouped.last_mut() {
+            if last.domain == domain
+                && last.start + u64::from(last.blocks) == address
+                && last.blocks < u32::MAX
+            {
+                last.blocks += 1;
+                continue;
+            }
+        }
+        grouped.push(DeadRun {
+            dead_generation: next_generation,
+            start: address, blocks: 1, eligible_after: eligible, domain,
+        });
+    }
+    for run in grouped {
+        if dead.insert((run.dead_generation, run.start), run).is_some() {
+            return Err(Error::CorruptTree);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum Edit<'a> {
     Mkdir(&'a str),
@@ -379,6 +543,7 @@ enum Edit<'a> {
     },
     Pin,
     MarkDropping(u64),
+    Reclaim,
 }
 
 /// One coherent v10 namespace/data/checksum writer for multiple files.
@@ -393,6 +558,63 @@ impl<D: BlockDevice> UnifiedV10<D> {
     pub fn format(device: D, id: u128) -> Result<Self> {
         let base = VirginSnapshotWriter::format(device, id)?;
         Self::open(base.into_device())
+    }
+    /// Create an indexed image with a dedicated, bounded Free/DeadList CoW
+    /// metadata arena. This is intentionally opt-in and only formats an
+    /// otherwise blank device; upgrading existing images is not permitted.
+    pub fn format_indexed(device: D, id: u128) -> Result<Self> {
+        if device.block_count() < 256 || device.block_count() > u64::from(u32::MAX) {
+            return Err(Error::Geometry);
+        }
+        let mut writer = Self::format(device, id)?;
+        writer.bootstrap_index()?;
+        Ok(writer)
+    }
+    fn bootstrap_index(&mut self) -> Result<()> {
+        let (old, _, owners) = audit(&mut self.volume)?;
+        if old.metadata_reserve != 0 || old.generation != 1 {
+            return Err(Error::CorruptTree);
+        }
+        let total = self.volume.block_count();
+        let run = FreeRun {
+            start: INDEX_ARENA_END,
+            blocks: u32::try_from(total - 1 - INDEX_ARENA_END)
+                .map_err(|_| Error::Geometry)?,
+            eligible_after: old.generation + 1,
+        };
+        let (key, value) = free_item(run, total)?;
+        let changes = BTreeMap::from([(key, Some(value))]);
+        let arena: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..INDEX_ARENA_END)
+            .rev().filter(|addr| !owners.contains(addr)).collect();
+        let id = self.volume.info().volume_id;
+        let generation = old.generation + 1;
+        let plan = self.volume.inspect(|disk| stage_space_delta(
+            disk, TreeId::Free, None, &changes, &arena, id, generation,
+            ROOT_PAYLOAD_LAST + 1,
+        ))?;
+        let mut next = old;
+        next.generation = generation;
+        next.metadata_reserve = INDEX_ARENA_BLOCKS;
+        next.roots.free = plan.root;
+        next.free_blocks = u64::from(run.blocks);
+        let payload = next.encode(total)?;
+        self.volume.inspect(|disk| {
+            let mut overlay = Overlay {
+                disk, staged: plan.staged_pages.iter().copied().collect(),
+            };
+            let root = RootInfo {
+                volume_id: id, generation,
+                root_block: Some(2 + (generation - 1) % 3),
+            };
+            let checked = verify(&mut overlay, root, next)?;
+            if checked.free != BTreeMap::from([(run.start, run)]) {
+                return Err(Error::CorruptTree);
+            }
+            Ok(())
+        })?;
+        self.volume.commit_root_with_blocks(&plan.staged_pages, &payload)?;
+        self.manifest = next;
+        Ok(())
     }
     pub fn open(device: D) -> Result<Self> {
         let mut volume = Volume::open(device)?;
@@ -651,6 +873,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
     pub fn mark_dropping(&mut self, generation: u64) -> Result<u64> {
         self.commit(Edit::MarkDropping(generation))
     }
+    /// Process at most MAX_RETIRE_STEP eligible pending runs, with a cursor
+    /// that is published atomically with the Free/DeadList root updates.
+    /// This call does not finalize pinned or Dropping snapshots.
+    pub fn reclaim_step(&mut self) -> Result<u64> {
+        if self.manifest.metadata_reserve == 0 {
+            return Err(Error::CorruptTree);
+        }
+        self.commit(Edit::Reclaim)
+    }
     fn commit(&mut self, edit: Edit<'_>) -> Result<u64> {
         let (old, checked, owned) = audit(&mut self.volume)?;
         if old != self.manifest {
@@ -837,6 +1068,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 desc.state = SnapshotState::Dropping;
                 catalog_edit = Some(CatalogEdit::MarkDropping(snapshot));
             }
+            Edit::Reclaim => {}
+
         }
         next.inode_count = records.len() as u64;
         validate_namespace(&records, next.next_inode, generation, total)?;
@@ -849,11 +1082,36 @@ impl<D: BlockDevice> UnifiedV10<D> {
         // a free-list bit. Blocks absent from every recoverable root are
         // eligible even if they contain stale data or crash orphans.
         // Persistent free-tree/epoch accounting is deferred to F5.2/F5.3.
-        let candidates: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..total)
-            .rev()
-            .filter(|block| !owned.contains(block))
-            .take(STAGING_LIMIT)
-            .collect();
+        let indexed = old.metadata_reserve == INDEX_ARENA_BLOCKS;
+        let retirement = if indexed {
+            Some(retire_step_cursor(
+                &checked.free, &checked.dead, &owned, old.generation,
+                MAX_RETIRE_STEP,
+                if old.sweep_snapshot == 0 {
+                    None
+                } else {
+                    Some((old.sweep_snapshot, old.sweep_key))
+                },
+            )?)
+        } else {
+            None
+        };
+        // A persistent ordered run index supplies eligible candidates
+        // without scanning *all physical addresses*. Independent full graph
+        // certification remains active until the F5.3 accounted proof gate.
+        let candidates: Vec<u64> = if let Some(step) = &retirement {
+            let available = step.free.values()
+                .filter(|run| run.eligible_after <= old.generation)
+                .map(|run| u64::from(run.blocks))
+                .sum::<u64>().min(STAGING_LIMIT as u64) as usize;
+            reserve_free(&step.free, &owned, old.generation, available)?.selected
+        } else {
+            (ROOT_PAYLOAD_LAST + 1..total)
+                .rev()
+                .filter(|block| !owned.contains(block))
+                .take(STAGING_LIMIT)
+                .collect()
+        };
         let mut used = 0;
         let mut staged: Vec<(u64, [u8; BLOCK_SIZE])> = Vec::new();
         let mut added_crc = BTreeMap::new();
@@ -979,12 +1237,69 @@ impl<D: BlockDevice> UnifiedV10<D> {
             next.roots.checksum = cs.root;
             staged.extend(cs.staged_pages);
         }
-        if used == 0 {
-            return Err(Error::CorruptTree);
+        let mut intended_space = None;
+        let mut index_pages = 0;
+        if let Some(sweep) = retirement {
+            // Only actual staged data/normal metadata pages consume free
+            // addresses; the Free/Dead index lives in its own reserved arena.
+            let reserved = reserve_free(
+                &sweep.free, &owned, old.generation, used,
+            )?;
+            if reserved.selected != candidates[..used] {
+                return Err(Error::CorruptTree);
+            }
+            let free = reserved.remaining;
+            let mut dead = sweep.dead;
+            queue_fallback_retirements(
+                &free, &mut dead, &owned, &checked, generation,
+            )?;
+            validate_space_pair(&free, &dead, &owned, old.generation, total)?;
+            let free_changes = free_deltas(&checked.free, &free, total)?;
+            let dead_changes = dead_deltas(&checked.dead, &dead, total)?;
+            // No allocator recursion: no Free/Dead tree page is itself in
+            // a Free interval, ever. Reserve solely from the fixed arena
+            // after proving no address belongs to either F0 candidate.
+            let arena: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..INDEX_ARENA_END)
+                .rev().filter(|a| !owned.contains(a)).collect();
+            let fp = self.volume.inspect(|disk| stage_space_delta(
+                disk, TreeId::Free, old.roots.free,
+                &free_changes, &arena, id, generation,
+                ROOT_PAYLOAD_LAST + 1,
+            ))?;
+            let dp = self.volume.inspect(|disk| stage_space_delta(
+                disk, TreeId::DeadList, old.roots.dead_list,
+                &dead_changes, &arena[fp.consumed_reservations..],
+                id, generation, ROOT_PAYLOAD_LAST + 1,
+            ))?;
+            index_pages = fp.consumed_reservations + dp.consumed_reservations;
+            next.roots.free = fp.root;
+            next.roots.dead_list = dp.root;
+            next.free_blocks = free.values().map(|r| u64::from(r.blocks)).sum();
+            next.pending_blocks = dead.values().map(|r| u64::from(r.blocks)).sum();
+            if let Some((epoch, address)) = sweep.cursor {
+                next.sweep_snapshot = epoch;
+                next.sweep_key = address;
+            } else {
+                next.sweep_snapshot = 0;
+                next.sweep_key = 0;
+            }
+            staged.extend(fp.staged_pages);
+            staged.extend(dp.staged_pages);
+            intended_space = Some((free, dead));
         }
-        // A reclaimed page above the virgin frontier must never advance it.
-        // Newly used virgin pages below it still lower the frontier.
-        next.high_water = old.high_water.min(candidates[used - 1]);
+        if used == 0 && index_pages == 0
+            && (next.sweep_snapshot, next.sweep_key)
+                == (old.sweep_snapshot, old.sweep_key)
+        {
+            return if indexed { Ok(old.generation) } else { Err(Error::CorruptTree) };
+        }
+        // Recycling must not advance the virgin frontier. Index-arena
+        // metadata pages are excluded from this independent high-water.
+        next.high_water = if used > 0 {
+            old.high_water.min(candidates[used - 1])
+        } else {
+            old.high_water
+        };
         let payload = next.encode(total)?;
         self.volume.inspect(|device| {
             let mut overlay = Overlay {
@@ -999,6 +1314,11 @@ impl<D: BlockDevice> UnifiedV10<D> {
             let checked = verify(&mut overlay, root, next)?;
             if checked.reach.records != records || checked.reach.snapshots != pins {
                 return Err(Error::CorruptTree);
+            }
+            if let Some((free, dead)) = &intended_space {
+                if &checked.free != free || &checked.dead != dead {
+                    return Err(Error::CorruptTree);
+                }
             }
             let actual_attrs = checked
                 .reach
