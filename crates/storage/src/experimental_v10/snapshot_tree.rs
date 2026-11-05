@@ -273,6 +273,8 @@ impl<D: BlockDevice> Planner<'_, D> {
 /// list must contain distinct *descending* physical blocks strictly below
 /// the previous published high-water mark and above F0's 0-4 blocks.
 /// This is NOT an independently verified allocator; no writes occur here.
+// Wire geometry, generation and the internal reuse gate are explicit here.
+#[allow(clippy::too_many_arguments)]
 fn plan_snapshot_edit_with_mode<D: BlockDevice>(
     device: &mut D,
     old_root: Option<BlockPointer>,
