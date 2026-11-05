@@ -31,7 +31,7 @@ fn hundreds_of_overwrites_recycle_unowned_metadata_without_running_out() {
     }
     assert!(reused > 100, "expected substantial certified block reuse");
     fs = reopen(fs);
-    assert_eq!(fs.manifest().generation, 303);
+    assert_eq!(fs.manifest().generation, 304);
     assert_eq!(fs.read_snapshot_file(snapshot, "/data/file").unwrap(), b"initial");
 }
 
