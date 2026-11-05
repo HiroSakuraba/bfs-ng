@@ -14,6 +14,9 @@ use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attr
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
+use super::space_index::{DeadRun, FreeRun, SpaceDomain, dead_item, free_item,
+    read_space_tree, reserve_free, retire_step_cursor, stage_space_delta,
+    validate_space_pair, MAX_RETIRE_STEP};
 use super::{
     BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
     Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, read_checksum_tree,
@@ -27,6 +30,10 @@ use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const STAGING_LIMIT: usize = 512;
+// F5.2 metadata pages are never part of their own persistent free tree.
+// This fixed first arena prevents recursive allocator self-ownership.
+const INDEX_ARENA_BLOCKS: u64 = 64;
+const INDEX_ARENA_END: u64 = ROOT_PAYLOAD_LAST + 1 + INDEX_ARENA_BLOCKS;
 
 struct Reachability {
     records: BTreeMap<String, NamespaceRecord>,
@@ -66,15 +73,8 @@ fn validate_attributes(
 }
 
 fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reachability> {
-    if m.roots.free.is_some()
-        || m.roots.dead_list.is_some()
-        || m.sweep_snapshot != 0
-        || m.sweep_key != 0
-        || m.metadata_reserve != 0
-        || m.used_blocks != 0
-        || m.free_blocks != 0
-        || m.pending_blocks != 0
-    {
+    if m.used_blocks != 0 {
+
         return Err(Error::CorruptTree);
     }
     let snapshots = read_snapshot_tree(device, m.roots.snapshots, id, m.generation)?;
@@ -216,6 +216,10 @@ struct Verified {
     reach: Reachability,
     checksums: BTreeMap<u64, u32>,
     owned: BTreeSet<u64>,
+    free: BTreeMap<u64, FreeRun>,
+    dead: BTreeMap<(u64, u64), DeadRun>,
+    global_pages: BTreeSet<u64>,
+    retired_global: BTreeSet<u64>,
 }
 fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result<Verified> {
     let reach = collect(device, root.volume_id, m)?;
@@ -228,6 +232,7 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         return Err(Error::CorruptTree);
     }
     let mut owned = reach.owned_metadata.clone();
+    let mut global_pages = checksums.metadata_pages.clone();
     owned.extend(checksums.metadata_pages);
     for physical in expected {
         if !owned.insert(physical) {
@@ -242,13 +247,59 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
             }
         }
     }
-    if owned.iter().any(|&address| address < m.high_water) {
+    let (free, dead) = if m.metadata_reserve == 0 {
+        if m.roots.free.is_some() || m.roots.dead_list.is_some()
+            || m.free_blocks != 0 || m.pending_blocks != 0
+            || m.sweep_snapshot != 0 || m.sweep_key != 0
+        {
+            return Err(Error::CorruptTree);
+        }
+        (BTreeMap::new(), BTreeMap::new())
+    } else {
+        if m.metadata_reserve != INDEX_ARENA_BLOCKS
+            || device.block_count() < 256
+            || (m.sweep_snapshot == 0 && m.sweep_key != 0)
+        {
+            return Err(Error::CorruptTree);
+        }
+        let f = read_space_tree(
+            device, TreeId::Free, m.roots.free, root.volume_id, root.generation,
+        )?;
+        let d = read_space_tree(
+            device, TreeId::DeadList, m.roots.dead_list,
+            root.volume_id, root.generation,
+        )?;
+        if !f.pages.is_disjoint(&d.pages)
+            || f.pages.iter().chain(d.pages.iter())
+                .any(|&a| a <= ROOT_PAYLOAD_LAST || a >= INDEX_ARENA_END)
+            || !f.pages.is_disjoint(&owned) || !d.pages.is_disjoint(&owned)
+            || f.free.values().any(|run| run.start < INDEX_ARENA_END)
+            || d.dead.values().any(|run| run.start < INDEX_ARENA_END)
+        {
+            return Err(Error::CorruptTree);
+        }
+        let free_count: u64 = f.free.values().map(|run| u64::from(run.blocks)).sum();
+        let dead_count: u64 = d.dead.values().map(|run| u64::from(run.blocks)).sum();
+        if free_count != m.free_blocks || dead_count != m.pending_blocks {
+            return Err(Error::CorruptTree);
+        }
+        owned.extend(f.pages.iter().copied());
+        owned.extend(d.pages.iter().copied());
+        global_pages.extend(f.pages);
+        global_pages.extend(d.pages);
+        validate_space_pair(
+            &f.free, &d.dead, &owned, root.generation, device.block_count(),
+        )?;
+        (f.free, d.dead)
+    };
+    if owned.iter().any(|&address| address < m.high_water
+        && (m.metadata_reserve == 0 || address >= INDEX_ARENA_END))
+    {
         return Err(Error::CorruptTree);
     }
     Ok(Verified {
-        reach,
-        checksums: checksums.checksums,
-        owned,
+        reach, checksums: checksums.checksums, owned,
+        free, dead, global_pages, retired_global: BTreeSet::new(),
     })
 }
 fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
@@ -256,6 +307,7 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
     let mut selected = None;
     let mut owned = BTreeSet::new();
     let mut previous: Option<(u64, u64)> = None;
+    let mut fallback_global = BTreeSet::new();
     for (root, payload) in volume.candidate_roots()? {
         if root.generation == 0 {
             if payload.is_some() {
@@ -275,9 +327,20 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         owned.extend(checked.owned.iter().copied());
         if root.generation == latest.generation {
             selected = Some((m, checked));
+        } else {
+            fallback_global = checked.global_pages.clone();
         }
     }
-    let (m, checked) = selected.ok_or(Error::CorruptRoot)?;
+    let (m, mut checked) = selected.ok_or(Error::CorruptRoot)?;
+    // These pages vanish when the oldest candidate F0 slot is replaced.
+    // Label global pages independently of snapshot-referenced metadata.
+    checked.retired_global = fallback_global.difference(&checked.owned)
+        .copied().collect();
+    if m.metadata_reserve != 0 {
+        validate_space_pair(
+            &checked.free, &checked.dead, &owned, m.generation, volume.block_count(),
+        )?;
+    }
     Ok((m, checked, owned))
 }
 struct Overlay<'a, D: BlockDevice> {
