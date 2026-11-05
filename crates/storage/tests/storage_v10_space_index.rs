@@ -1,6 +1,6 @@
 use bfs_ng_storage::experimental_v10::{
     DeadRun, FreeRun, SpaceDomain, TreeId, dead_item, free_item,
-    read_space_tree, retire_step, stage_space_delta,
+    read_space_tree, reserve_free, retire_step, stage_space_delta, validate_space_pair,
 };
 use bfs_ng_storage::{BlockDevice, CrashDevice, Error};
 use std::collections::{BTreeMap, BTreeSet};
@@ -168,4 +168,61 @@ fn bounded_retirement_rejects_larger_steps_and_never_releases_owners() {
     let blocked = retire_step(&BTreeMap::new(), &pending, &owners, 50, 32).unwrap();
     assert_eq!(blocked.released, 0);
     assert_eq!(blocked.dead, pending);
+}
+
+#[test]
+fn fast_run_reservation_observes_absolute_eligibility_and_full_owner_oracle() {
+    let runs = BTreeMap::from([
+        (30, FreeRun { start: 30, blocks: 8, eligible_after: 6 }),
+        (45, FreeRun { start: 45, blocks: 4, eligible_after: 11 }),
+    ]);
+    let empty = BTreeSet::new();
+    let reserved = reserve_free(&runs, &empty, 7, 3).unwrap();
+    assert_eq!(reserved.selected, vec![37, 36, 35]);
+    assert_eq!(reserved.remaining.get(&30).unwrap().blocks, 5);
+    assert_eq!(reserved.remaining.get(&45).unwrap().eligible_after, 11);
+    assert!(matches!(
+        reserve_free(&runs, &empty, 5, 1),
+        Err(Error::NoSpace)
+    ));
+    let hidden_owner = BTreeSet::from([36]);
+    assert!(validate_space_pair(&runs, &BTreeMap::new(), &hidden_owner, 7, 100).is_err());
+    assert!(reserve_free(&runs, &hidden_owner, 7, 4).is_err());
+}
+
+#[test]
+fn free_and_dead_ranges_cannot_alias_even_at_different_epochs() {
+    let free = BTreeMap::from([
+        (30, FreeRun { start: 30, blocks: 6, eligible_after: 8 }),
+    ]);
+    let dead = BTreeMap::from([
+        ((5, 34), DeadRun {
+            dead_generation: 5, start: 34, blocks: 4, eligible_after: 11,
+            domain: SpaceDomain::Global,
+        }),
+    ]);
+    assert!(validate_space_pair(&free, &dead, &BTreeSet::new(), 7, 100).is_err());
+}
+
+#[test]
+fn retirement_coalesces_equal_epochs_but_not_different_eligibility() {
+    let pending = BTreeMap::from([
+        ((4, 30), DeadRun {
+            dead_generation: 4, start: 30, blocks: 2,
+            eligible_after: 6, domain: SpaceDomain::Global,
+        }),
+        ((4, 32), DeadRun {
+            dead_generation: 4, start: 32, blocks: 2,
+            eligible_after: 6, domain: SpaceDomain::Global,
+        }),
+        ((5, 34), DeadRun {
+            dead_generation: 5, start: 34, blocks: 2,
+            eligible_after: 7, domain: SpaceDomain::Global,
+        }),
+    ]);
+    let step = retire_step(&BTreeMap::new(), &pending, &BTreeSet::new(), 7, 32).unwrap();
+    assert_eq!(step.released, 6);
+    assert_eq!(step.free.get(&30).unwrap().blocks, 4);
+    assert_eq!(step.free.get(&34).unwrap().blocks, 2);
+    assert_eq!(step.free.len(), 2);
 }
