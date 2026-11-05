@@ -39,11 +39,13 @@ fn indexed_repeated_overwrites_preserve_inode_snapshot_and_search() {
     let mut reused = 0_usize;
     for generation in 0..100_u32 {
         let bytes = format!("update-{generation:05}");
-        fs.write_at("/assets/material", 0, bytes.as_bytes()).unwrap();
+        fs.write_at("/assets/material", 0, bytes.as_bytes())
+            .unwrap();
         assert_eq!(fs.stat("/assets/material").unwrap().0, inode);
         assert_eq!(fs.read_file("/assets/material").unwrap(), bytes.as_bytes());
         assert_eq!(
-            fs.read_snapshot_file(historical, "/assets/material").unwrap(),
+            fs.read_snapshot_file(historical, "/assets/material")
+                .unwrap(),
             b"original"
         );
         reused += fs.last_reused_blocks();
@@ -52,7 +54,11 @@ fn indexed_repeated_overwrites_preserve_inode_snapshot_and_search() {
         }
     }
     assert!(reused > 20, "expected repeated recycled physical pages");
-    assert_eq!(fs.read_snapshot_file(historical, "/assets/material").unwrap(), b"original");
+    assert_eq!(
+        fs.read_snapshot_file(historical, "/assets/material")
+            .unwrap(),
+        b"original"
+    );
     fs = reopen(fs);
     assert_eq!(fs.stat("/assets/material").unwrap().0, inode);
 }
@@ -64,7 +70,8 @@ fn indexed_retirement_cursor_roundtrips_after_reopen() {
     fs.write_at("/world/a", 0, b"abc").unwrap();
     let before = fs.manifest().generation;
     for n in 0..18 {
-        fs.write_at("/world/a", 0, format!("{n:03}").as_bytes()).unwrap();
+        fs.write_at("/world/a", 0, format!("{n:03}").as_bytes())
+            .unwrap();
     }
     let first = fs.manifest().pending_blocks;
     fs.reclaim_step().unwrap();
@@ -86,12 +93,18 @@ fn indexed_crash_cut_does_not_corrupt_old_or_new_f0_namespace() {
             fs.mkdir("/dve").unwrap();
             fs.write_at("/dve/asset", 0, b"old!").unwrap();
             for n in 0..8 {
-                fs.write_at("/dve/asset", 0, format!("{n:04}").as_bytes()).unwrap();
+                fs.write_at("/dve/asset", 0, format!("{n:04}").as_bytes())
+                    .unwrap();
             }
             let generation = fs.manifest().generation;
             let previous = fs.read_file("/dve/asset").unwrap();
             let mut device = fs.into_device().power_loss();
-            device.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes: Some(torn_bytes),
+                })
+                .unwrap();
             let mut attempted = UnifiedV10::open(device).unwrap();
             assert!(matches!(
                 attempted.write_at("/dve/asset", 0, b"new!"),
@@ -104,7 +117,11 @@ fn indexed_crash_cut_does_not_corrupt_old_or_new_f0_namespace() {
             if let Ok(mut checked) = UnifiedV10::open(reader.into_device()) {
                 assert_eq!(
                     checked.read_file("/dve/asset").unwrap(),
-                    if got_generation == generation { previous.as_slice() } else { b"new!" },
+                    if got_generation == generation {
+                        previous.as_slice()
+                    } else {
+                        b"new!"
+                    },
                 );
             }
         }
