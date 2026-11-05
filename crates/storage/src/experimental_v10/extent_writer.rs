@@ -8,7 +8,7 @@
 //! deliberately left to subsequent F5 tranches.
 use super::{
     BlockRef, CatalogEdit, FileExtents, Item, Manifest, Page, SnapshotDescriptor, SnapshotState,
-    TreeId, VirginSnapshotWriter, MAX_FILE_BYTES, MAX_FILE_BLOCKS, plan_snapshot_edit,
+    TreeId, VirginSnapshotWriter, MAX_FILE_BYTES, plan_snapshot_edit,
     read_checksum_tree, read_page, read_snapshot_tree, read_verified_block, stage_checksum_tree,
 };
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
