@@ -457,6 +457,63 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let base = VirginSnapshotWriter::format(device, id)?;
         Self::open(base.into_device())
     }
+    /// Create an indexed image with a dedicated, bounded Free/DeadList CoW
+    /// metadata arena. This is intentionally opt-in and only formats an
+    /// otherwise blank device; upgrading existing images is not permitted.
+    pub fn format_indexed(device: D, id: u128) -> Result<Self> {
+        if device.block_count() < 256 || device.block_count() > u64::from(u32::MAX) {
+            return Err(Error::Geometry);
+        }
+        let mut writer = Self::format(device, id)?;
+        writer.bootstrap_index()?;
+        Ok(writer)
+    }
+    fn bootstrap_index(&mut self) -> Result<()> {
+        let (old, _, owners) = audit(&mut self.volume)?;
+        if old.metadata_reserve != 0 || old.generation != 1 {
+            return Err(Error::CorruptTree);
+        }
+        let total = self.volume.block_count();
+        let run = FreeRun {
+            start: INDEX_ARENA_END,
+            blocks: u32::try_from(total - 1 - INDEX_ARENA_END)
+                .map_err(|_| Error::Geometry)?,
+            eligible_after: old.generation + 1,
+        };
+        let (key, value) = free_item(run, total)?;
+        let changes = BTreeMap::from([(key, Some(value))]);
+        let arena: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..INDEX_ARENA_END)
+            .rev().filter(|addr| !owners.contains(addr)).collect();
+        let id = self.volume.info().volume_id;
+        let generation = old.generation + 1;
+        let plan = self.volume.inspect(|disk| stage_space_delta(
+            disk, TreeId::Free, None, &changes, &arena, id, generation,
+            ROOT_PAYLOAD_LAST + 1,
+        ))?;
+        let mut next = old;
+        next.generation = generation;
+        next.metadata_reserve = INDEX_ARENA_BLOCKS;
+        next.roots.free = plan.root;
+        next.free_blocks = u64::from(run.blocks);
+        let payload = next.encode(total)?;
+        self.volume.inspect(|disk| {
+            let mut overlay = Overlay {
+                disk, staged: plan.staged_pages.iter().copied().collect(),
+            };
+            let root = RootInfo {
+                volume_id: id, generation,
+                root_block: Some(2 + (generation - 1) % 3),
+            };
+            let checked = verify(&mut overlay, root, next)?;
+            if checked.free != BTreeMap::from([(run.start, run)]) {
+                return Err(Error::CorruptTree);
+            }
+            Ok(())
+        })?;
+        self.volume.commit_root_with_blocks(&plan.staged_pages, &payload)?;
+        self.manifest = next;
+        Ok(())
+    }
     pub fn open(device: D) -> Result<Self> {
         let mut volume = Volume::open(device)?;
         let (manifest, _, _) = audit(&mut volume)?;
