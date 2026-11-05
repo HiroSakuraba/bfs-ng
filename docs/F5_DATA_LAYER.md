@@ -549,14 +549,7 @@ Updates path-copy only affected leaves. Snapshot queries read the snapshot's tre
 
 ## 12. F5.6 — shared extents (optional, off by default)
 
-Clone (`FICLONERANGE`-style) lets two inodes reference the same physical run. It breaks the assumption in §9.2 that the live tree references each block at most once, so it needs a small **share table**:
-
-```text
-key   = start: u64 BE
-value = blocks: u32, extra_refs: u32
-```
-
-Cloning sets `MAY_BE_SHARED` on both the source and destination extent items and increments `extra_refs`. The original simple keyed-by-start share table is **not approved for implementation**: partial clones, overlapping subranges and split extents can make independent physical intervals share one address range. Future sharing requires an **interval-aware, normalized reference model** that splits/coalesces on every change, counts *all* live and snapshot references, and delays physical release until both F0 candidates and every saved descriptor are clear. The `MAY_BE_SHARED` flag may optimize lookups, but must never by itself authorize freeing a region or skipping a required reference check.
+Clone (`FICLONERANGE`-style) lets several inodes and snapshots reference overlapping *subranges* of the same physical extent. **Do not implement** the earlier candidate `(start, blocks, extra_refs)` share table as-is: a fixed physical-start key cannot express every interior split or partial clone. The actual interval-partitioning/refcount codec belongs to a separate F5.6 design review. Cloning may mark both extents with `MAY_BE_SHARED`, but only as a conservative hint that must be propagated across all splits and copies. The original simple keyed-by-start share table is **not approved for implementation**: partial clones, overlapping subranges and split extents can make independent physical intervals share one address range. Future sharing requires an **interval-aware, normalized reference model** that splits/coalesces on every change, counts *all* live and snapshot references, and delays physical release until both F0 candidates and every saved descriptor are clear. The `MAY_BE_SHARED` flag may optimize lookups, but must never by itself authorize freeing a region or skipping a required reference check.
 
 **Why the flag bit:** OpenZFS block cloning has no such bit, so every free must check its Block Reference Table. A new format can add it cheaply.
 
@@ -581,71 +574,76 @@ The F0.R1 barrier order remains unchanged; **the source of allocation authority 
 
 **Not in F5, but unblocked by it:** group commit (several transactions per generation, with `fsync` meaning "wait for the next published generation"). This belongs in the mount milestone. It matters for throughput and for how fast generations are consumed.
 
-## 14. Decision log
+## 14. Decision log — revised safety decisions
 
-| Decision | Chosen | Rejected | Reasoning |
+| Decision | Current v10 proposal | Rejected / deferred option | Reason |
 | --- | --- | --- | --- |
-| Generation width | `u64` everywhere | `u32` birth in data blocks | Volume-lifetime ceiling reachable in weeks at high commit rates |
-| Data integrity location | Parent-held: checksum tree plus birth in extent | In-band 32-byte header | Header breaks alignment and sharing; parent checksums still catch lost and misdirected writes |
-| Metadata integrity | Parent BP checksum **and** self header with own address | Either alone | Parent catches stale pages; header lets orphan scans and repair recognize pages |
-| Checksum storage | Separate tree keyed by physical address | Inline in extent; keyed by file offset | Fixed-size extents; free sharing on clone; physical-order scrub |
-| Checksum granularity | Per 4 KiB | Per extent; whole file | Partial reads verifiable; ~0.1% overhead |
-| Page format | One generic slotted 4 KiB page | Per-tree formats; 16 KiB nodes | One codec to fuzz; small CoW units; larger nodes need measurement first |
-| Extent sub-addressing | Trim physical run directly | btrfs inner offset | Block-granular uncompressed data is cuttable; avoids bookend waste |
-| Max extent | 32 MiB | Unbounded | Bounds split and lookup work |
-| Small files | Inline at or below 2,048 bytes | Always a data block | Corpora are small-file heavy; zero extra I/O |
-| Allocation timing | Delayed to commit, with spill | Allocate on write | Better contiguity; bounded memory via spill |
-| Free-space index | One durable tree by start plus in-memory size index | Two durable trees; bitmaps; log space maps | Single source of truth; epochs per run; log maps kept as measured fallback |
-| Fragmented allocation | Split across several extents | Require one contiguous run | Fragmentation should cost speed, not correctness |
-| Never-written space | Keep high-water mark | Fold into free tree | Preserves fail-closed allocation when ownership is unverifiable |
-| ENOSPC handling | Metadata reserve | None | CoW needs space to free space |
-| Snapshot reclamation | Birth time plus per-snapshot dead lists | Per-commit full reference count | O(changes) commits; exact rule; proven ZFS approach |
-| Reuse authority | Accounting, with Full mode and oracle | Full scan on every reuse | Full scan is O(volume); keep it as referee and opt-in mode |
-| Bulk frees | Bounded deferred processing with persisted cursor | Free everything in one commit | Reuses the F2.R4 crash argument; bounded commit latency |
-| Namespace keys | Inode table plus `(parent, name)` | Full paths | O(1) rename, hard links, short keys |
-| Directory index | Sorted names | Hashed names (plus second index) | One index, no collisions, ordered readdir |
-| Mount verification | Lazy, through BPs | Full read at open | Mount time independent of data size |
-| Attribute catalog | Two CoW trees | One rewritten file | Removes 256 KiB cap and whole-index rewrites |
-| Sharing | Optional share table plus flag bit | Always-on; no flag | ZFS 2.2.0 history; flag avoids lookups on unshared frees |
-| Back-references | None | btrfs-style backrefs | Not needed for freeing; costly write amplification; offline walk can report affected files |
-| Format transition | Single v10 break | Several successive versions | Policy already rejects old images; avoid fixture churn |
+| Generation width | `u64` in all new references and metadata | Continue v9's `u32` data birth | Prevent practical lifetime commit ceiling |
+| Format staging | F5.0a pointer/descriptor foundation followed by F5.0b data/checksums | Expose partially implemented v10 disk images as stable | Isolate format and recovery changes while keeping a single public format break |
+| Snapshot identity | Versioned descriptor with fs, attr-row, attr-posting and schema roots | Fs-only BP in snapshot catalog | Otherwise historical attribute queries lose roots after manifest rotation |
+| Data checksums | Global physically keyed tree covering **all live and pinned snapshot data** | Remove checksums at first live overwrite | Ensure historical `REG` reads remain verifiable without per-snapshot checksum-tree pinning |
+| Data layout | Headerless, 4 KiB-addressable blocks with authenticated checksum-tree root | v9 in-band per-data-block header | Align partial reads; 4 KiB addressability does not guarantee hardware atomicity |
+| Metadata pages | Generic slotted CoW page with self address, volume, CRC and parent-held birth/CRC BP | Parent or child checksum alone | Detect stale/foreign metadata and support offline identification |
+| Free runs | Absolute `eligible_after_generation` with separate deferred state | Relative "current" vs "current + 1" restamping | Avoid rewriting unchanged free-tree pages each commit |
+| Free-space index | One durable extent tree plus derived in-memory size index | Two separately synchronized durable indexes | Maintain one authoritative on-disk ordering |
+| Virgin high-water | Conservatively checked against both recoverable manifests | Assume old cursor means never written after any crash | Avoid trusting addresses potentially written by failed generations |
+| Metadata reserve | Geometry-aware, derived from proved CoW delete budget | Fixed `max(256, 1%)` on every test image | Tiny images need proportional reservations; capacity alone does not prove deletion progress |
+| Free-tree self-allocation | Bounded private metadata arena and one final accounted delta | Estimate-only, recursively allocate in free tree | Termination and atomic accounting require a verified upper bound |
+| Mount/recovery | Lazy *read* verification; separate Full ownership certification before reuse | Lazy open silently upgrades allocator authority | Data-read latency and overwrite safety are different guarantees |
+| Snapshot reclamation | Birth/dead-list accounting **only for snapshot-scoped roots**, pending a model proof | Apply `birth <= newest_snapshot` to all global metadata | Snapshot pins do not own historical global free/checksum/dead-list trees |
+| Epoch retirement | Protect last F0 fallback owner in addition to logical snapshot lifetime | Free immediately when final snapshot drops | Earlier F0 manifest may still be recoverable |
+| Kill semantics | Typed ownership-domain-aware release candidate with full-graph oracle | Assume dropping one BP proves last physical owner | Shared pages and overlapping snapshot roots invalidate unconditional frees |
+| Reuse authority | **Full** two-root/snapshot check until F5.3 gate; Accounted opt-in after proof | Turn off full checks as part of lazy mount | Fail closed without sacrificing the eventual incremental fast path |
+| Dead-list and free-space accounting | Model referenced set, retirement evidence and allocatable set **separately** | False "exactly one of live/dead-list/ready/pending" partition | Dead-list witnesses and pending epochs may overlap referenced blocks |
+| Snapshot destruction | Durable `dropping` state with bounded idempotent cursor | Free the entire dead list in one commit | Crash-resumable progress and F0 epoch safety |
+| Namespace | Inode table and `(parent, name)` keys | Full pathname key for every file | Localized rename, hard links, higher fanout |
+| Indexed attributes | Separate CoW row/posting trees captured in snapshot descriptor | Rewritten private F4 catalog | Incremental updates and historical query correctness |
+| Shared extents | Disabled, until normalized physical interval ownership oracle | Bare `(start, blocks, extra_refs)` share table | Partial clones/splits cannot be safely counted by whole-run start alone |
+| Compatibility | Single v10 format break, v9 test images rejected | Silent migration or successive incompatible v10/v11 versions | Explicitly testable representation and recovery boundaries |
 
 ## 15. Validation plan and acceptance gates
 
-The testing approach follows the one AWS used for ShardStore: an executable reference model per component, property-based tests comparing model and implementation, crash tests checking that persisted writes survive, and stateless model checking for any concurrency added later.
+The reference model is **independent of the fast allocator**. Simulated crash outcomes must be either the complete pre-commit published state or complete post-commit published state, never a mixed namespace, checksum map, snapshot descriptor or free-space checkpoint.
 
-### Reference models
+### Independent reference models
 
-- **File model:** `BTreeMap<Ino, SparseBytes>` plus a directory map. Holes read as zeros.
-- **Space model:** the existing full two-root ownership scan (`count_roots`, `allocation_report`).
-- **Attribute model:** existing M0 oracle.
+- **File model:** `BTreeMap<Ino, SparseBytes>` with inode/directory maps; holes and uninitialized PREALLOC read as zero.
+- **Reference model:** complete traversal of both F0 manifests and every pinned snapshot descriptor; counts physical data and metadata pages by address, birth and ownership domain. Reconstruct historical attr/schema and checksum coverage independently of incremental kill events.
+- **Space model:** per-block `Reachable(current, fallback, snapshots)`, certified/released epoch and private staged reservations. Model distinguishes `Allocatable`, *pending fallback-owned*, *deferred*, *virgin* and *orphan*, without claiming the classes always partition referenced blocks.
+- **Attribute model:** M0 rows/postings oracle plus historical per-snapshot schema semantics.
 
-### Gates
+### Milestone gates
 
-| Milestone | Gate |
+| Milestone | Required reproducible gate |
 | --- | --- |
-| F5.0 | Commits continue past generation `2^32` (test-only format option to start near it). Flipping any single byte in any data block is detected on read. A `CrashDevice` mode that acknowledges a write but drops it (lost write) never returns stale data. Writing file A's block contents to file B's address is detected. Open reads O(tree height) pages, asserted by a page-read counter. |
-| F5.1 | Random `pwrite` / `truncate` / `punch_hole` / `fallocate` / append sequences match the file model after every commit and after every injected crash point (either the pre- or post-commit model state, never a mix). Extent invariants in §7.6 hold after every commit. Inline ↔ extent transitions covered at 2,047 / 2,048 / 2,049 bytes. |
-| F5.2 | Free tree plus pending plus dead lists plus live ownership equals the oracle after every commit. Fragmentation test: fill the image with small files, delete every other one, then write a file larger than any free run; it must succeed if total free space minus reserve suffices. Deletes still succeed on a volume filled to the reserve. |
-| F5.3 | Oracle agreement under random snapshot pin / drop (including middle snapshots), overwrite-after-snapshot and crash injection during bounded dead-list processing. No run is ever both owned and ready. Commit metadata reads grow no faster than O(log n) between 10³, 10⁴ and 10⁵ files (flag if the 10⁵ cost exceeds 3× the 10³ cost per changed file). |
-| F5.4 | Rename, hard link, unlink-with-links and rename-into-self rejection match the model. Renaming a directory with 10⁴ descendants writes O(height) pages. |
-| F5.5 | Existing F4 query tests pass; posting oracle agrees after every commit; a single attribute change rewrites O(height) pages, not the catalog. |
-| F5.6 | Clone, overwrite-of-clone, snapshot-of-clone and drop-of-clone-source under fault injection agree with the oracle. Remains off by default until a separate review. |
+| **F5.0a** | Complete `SnapshotDescriptorV10` codec and schema BPs; pin at g, change rows/postings at g+1, rotate 3+ F0 roots, query g's historical values. Inject torn writes and corrupt an attribute/schema root; reject inconsistent snapshot data. Test-only `u64` start near `2^32` without skipping F0 publication generations. |
+| **F5.0b** | Headerless data checksum tree covers exact union of live/pinned `REG` blocks; live overwrite never removes old snapshot checksum. Lost and misdirected data writes are detected **when read**; checksum CRC failures fail closed for reads and reuse. Lazy open has bounded root reads while first untrusted free-tree allocation still runs independent full certification. |
+| **F5.1** | Random `pwrite`, `truncate`, `punch_hole`, `fallocate`, append and crash/reopen match sparse-file reference states. Include unaligned data tails, 2,047/2,048/2,049-byte inline transitions, spill-before-sync and crash-only orphan handling. |
+| **F5.2** | Stable free-run epoch does not require leaf copy across 1,000 unaffected generations; fallback-owned run g20→g21 not allocatable until starting from published g21. Prove no space aliasing under fragmentation and random CoW splits; geometry-aware reserve works on small image; worst-case metadata arena never recursively allocates, aborts atomically if insufficient. |
+| **F5.3** | Formal small-state model plus property/fuzz tests for arbitrary snapshot creation, nonadjacent/middle drops, parent/child tree changes, large global free/checksum/dead-list churn, F0 rollback and crash. A snapshot retained during thousands of global-tree updates must **not** accumulate dead-list entries for those global pages. Oracle agreement **exactly** before every release; every slice of every run respects birth/epoch/ownership. Only then make Accounted a benchmark opt-in. |
+| **F5.4** | Namespace oracle covers hard links, unlink with remaining links, directory rename with many descendants, rename-into-descendant rejection and generation-stale enumeration cursors. Rename of large subtree updates changed paths, not all descendants. |
+| **F5.5** | Pin snapshot with old attribute schema/rows; mutate schema-compatible live rows; rotate F0 roots; verify historical query against descriptor's own row/posting/schema BPs. A single attribute edit writes O(height) CoW pages rather than serializing the full catalog. |
+| **F5.6** | Remains off until normalized overlapping physical refcounts are tested under arbitrary clone ranges, split-of-split, write-into-clone, truncate, snapshots, drop-middle-snapshot and every publication crash point. |
 
-### Benchmarks (on disposable images, reported per op class)
+**F5.3 required negative cases:** (a) an old global free-tree page born before a snapshot must not enter its dead list, (b) a dead-list witness overlapping a snapshot-owned block must not be offered as free, (c) a pending run still owned by the last fallback must not be allocated, (d) damaged latest-root ownership must not be inferred from a lazy-open success, and (e) two overlapping subranges with different eligibility epochs must never be coalesced into an early-ready run.
 
-Physical blocks written per logical byte (write amplification) and pages read for: small-file create, 4 KiB random overwrite in a 1 GiB file, sequential append, delete, snapshot then overwrite, snapshot drop. Compare with v9 where v9 can express the operation. Per ARCHITECTURE §1.6, these are image-file measurements, not device latency claims.
+### Benchmarks (disposable images only)
+
+Measure metadata pages read/written, page lifetime, ready-run and deferred-run counts, actual logical/data bytes, commit latency and recovery/certification time separately. Workloads include small-file create, 4 KiB overwrite of large files, append, large fragmented allocation, snapshot pin+overwrite+drop, F4 attribute edits, AxiomZig/DVE/MegaDoc-like access patterns. Compare v9 wherever operation semantics match, without treating modeled cache refill penalties as actual device latency.
+
+**Acceptance principle:** reducing full scans is an optimization only when the independently checked set of reusable physical addresses is identical to the conservative oracle. A throughput improvement that silently weakens that equivalence is a failed milestone.
 
 ## 16. Risks and open questions
 
-1. **Kill-site completeness** is the largest risk (§9.6). Every new code path that drops a pointer must emit a kill. Consider a type-level guard: make "drop a BP or extent" impossible without producing a kill record.
-2. **Reservation estimate in §8.6** must be an upper bound. If it is exceeded, the commit must fail cleanly (and retry with a larger reservation), never allocate outside it.
-3. **Checksum tree as a hot spot:** every data write updates it. Measure; batching per run should keep it to one leaf per contiguous write.
-4. **Lazy verification semantics** (§6.6) change what recovery promises. Document it in user-facing terms before any mount ships.
-5. **Directory scaling:** sorted names in one tree are fine for single-writer use; very large directories under concurrent writers may want hashed placement later.
-6. **mtime updates** dirty the inode leaf on every write. Usually the same leaf as the extents; measure before optimizing.
-7. **Open question:** should `PREALLOC` extents count against the metadata reserve rules or ordinary space? Proposed: ordinary space.
-8. **Open question:** default dead-list processing budget per commit. Proposed starting point: 256 runs, tuned by benchmark.
+1. **Most important: ownership-domain completeness.** Confirm every future metadata tree's owner and retirement rule; snapshot birth comparisons cannot blindly govern global allocator structures.
+2. **Snapshot schema and checksum retention.** All historical row/posting/schema roots must survive until descriptor retirement; a global checksum tree must cover every retained file data block through its last F0 owner.
+3. **Free-tree reservation proof.** A reserved arena must have a termination bound covering worst-case splits, tombstones and secondary accounting pages. The §8.5 reserve formula is a target pending a measured/proved minimum legal geometry.
+4. **Birth/dead-list proof.** Formalize and model the distinction between canonical lineage witnesses, physical references and allocatable blocks, including arbitrary middle snapshot drops. The original sketch alone is insufficient.
+5. **Lost writes and lazy recovery.** CRC32C is accidental-error detection, not authentication. A successful lazy open has no authority to release unchecked physical addresses.
+6. **Spilled orphans.** Staged addresses from failed writes can be unjournaled; never return them after a crash without independent ownership proof.
+7. **Clone interval accounting.** Physical range splitting and multiple logical references require normalized refcounts; keep F5.6 disabled until proved.
+8. **Workload cost.** Checksum-tree writes, mtime updates and full certification remain measurable hotspots. Avoid claiming end-to-end O(log n) until reference accounting and namespace overlays also avoid volume-wide work.
+9. **Open questions:** reserve formula after page-budget proof; PREALLOC charging policy (proposed: ordinary data space); deferred/dead-list sweep budget (start experimentally at 256 canonical entries); future schema migration and ACL semantics.
 
 ## 17. What F5 does not do
 
