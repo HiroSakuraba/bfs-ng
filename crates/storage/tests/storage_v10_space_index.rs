@@ -109,7 +109,7 @@ fn dead_tree_keeps_snapshot_and_global_domains_distinct() {
 
 #[test]
 fn run_epochs_remain_absolute_and_invalid_geometry_fails_closed() {
-    assert!(free_item(FreeRun { start: 5, blocks: 1, eligible_after: 1 }, 40).is_err());
+    assert!(free_item(FreeRun { start: 4, blocks: 1, eligible_after: 1 }, 40).is_err());
     assert!(dead_item(DeadRun {
         dead_generation: 8, start: 9, blocks: 1, eligible_after: 9,
         domain: SpaceDomain::Global,
