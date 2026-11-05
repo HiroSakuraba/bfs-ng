@@ -6,7 +6,8 @@ use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod attributes;
-use attributes::{Catalog, INTERNAL_PATH};
+pub(crate) use attributes::Catalog;
+use attributes::INTERNAL_PATH;
 
 mod reclaim_cache;
 mod reclaim_ledger;

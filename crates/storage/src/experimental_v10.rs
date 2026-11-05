@@ -9,6 +9,7 @@ use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
+mod attribute_sections;
 mod checksum_delta;
 mod checksum_tree;
 pub use checksum_delta::stage_checksum_delta;

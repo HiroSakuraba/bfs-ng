@@ -10,6 +10,7 @@
 //! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
+use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
@@ -19,8 +20,10 @@ use super::{
     read_namespace_tree, read_page, read_snapshot_tree, read_verified_block, validate_namespace,
     validate_namespace_path,
 };
+use crate::fs::Catalog;
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
+use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const STAGING_LIMIT: usize = 512;
@@ -31,13 +34,40 @@ struct Reachability {
     owned_metadata: BTreeSet<u64>,
     data_births: BTreeMap<u64, u64>,
     tail_restrictions: BTreeMap<u64, Vec<usize>>,
+    catalog: Option<Catalog>,
 }
+/// All-or-none historical F4 roots. A live and a pinned snapshot use their
+/// own row/posting/schema triplets; never inherit the current generation's.
+fn attribute_roots(
+    rows: Option<BlockPointer>,
+    postings: Option<BlockPointer>,
+    schema: Option<BlockPointer>,
+) -> Result<Option<AttributeRoots>> {
+    match (rows, postings, schema) {
+        (None, None, None) => Ok(None),
+        (Some(rows), Some(postings), Some(schema)) => Ok(Some(AttributeRoots {
+            rows,
+            postings,
+            schema,
+        })),
+        _ => Err(Error::CorruptTree),
+    }
+}
+fn validate_attributes(
+    catalog: &Catalog,
+    records: &BTreeMap<String, NamespaceRecord>,
+) -> Result<()> {
+    let regular_files: BTreeSet<u64> = records
+        .values()
+        .filter(|record| !record.directory)
+        .map(|record| record.inode)
+        .collect();
+    catalog.validate_inode_ids(&regular_files)
+}
+
 fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reachability> {
     if m.roots.free.is_some()
         || m.roots.dead_list.is_some()
-        || m.roots.attribute_rows.is_some()
-        || m.roots.attribute_postings.is_some()
-        || m.roots.schema.is_some()
         || m.sweep_snapshot != 0
         || m.sweep_key != 0
         || m.metadata_reserve != 0
@@ -54,15 +84,15 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     // stable inode. The first v10 profile has no reflinks or hard links.
     let mut all_files: BTreeMap<u64, (BlockPointer, u64)> = BTreeMap::new();
     let mut records = None;
+    let mut namespace_versions = BTreeMap::new();
     let current_root = m.roots.fs;
     all_ns_roots.insert(current_root.address, current_root);
     for desc in &snapshots.descriptors {
-        if desc.attribute_rows_root.is_some()
-            || desc.attribute_postings_root.is_some()
-            || desc.attribute_schema_root.is_some()
-        {
-            return Err(Error::CorruptTree);
-        }
+        attribute_roots(
+            desc.attribute_rows_root,
+            desc.attribute_postings_root,
+            desc.attribute_schema_root,
+        )?;
         match all_ns_roots.insert(desc.fs_root.address, desc.fs_root) {
             Some(previous) if previous != desc.fs_root => return Err(Error::CorruptTree),
             _ => {}
@@ -73,6 +103,7 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     for root in all_ns_roots.values() {
         let scan = read_namespace_tree(device, *root, id, m.generation, m.next_inode)?;
         all_ns_pages.extend(scan.metadata_pages);
+        namespace_versions.insert(root.address, scan.records.clone());
         if *root == current_root {
             records = Some(scan.records.clone());
         }
@@ -87,6 +118,51 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
             }
         }
     }
+    // Every historical descriptor owns its own attribute/index/schema
+    // generation. Identical physical pages can be shared by snapshots, but
+    // role aliases or overlaps with namespace/snapshot metadata are invalid.
+    let mut all_attribute_pages = BTreeSet::new();
+    let mut live_catalog = None;
+    let mut attribute_versions = Vec::new();
+    attribute_versions.push((
+        current_root.address,
+        attribute_roots(
+            m.roots.attribute_rows,
+            m.roots.attribute_postings,
+            m.roots.schema,
+        )?,
+        true,
+    ));
+    for desc in &snapshots.descriptors {
+        attribute_versions.push((
+            desc.fs_root.address,
+            attribute_roots(
+                desc.attribute_rows_root,
+                desc.attribute_postings_root,
+                desc.attribute_schema_root,
+            )?,
+            false,
+        ));
+    }
+    for (namespace_address, roots, is_live) in attribute_versions {
+        let checked = read_attribute_roots(device, roots, id, m.generation)?;
+        if let Some(attributes) = checked {
+            let names = namespace_versions
+                .get(&namespace_address)
+                .ok_or(Error::CorruptTree)?;
+            validate_attributes(&attributes.catalog, names)?;
+            all_attribute_pages.extend(attributes.pages);
+            if is_live {
+                live_catalog = Some(attributes.catalog);
+            }
+        }
+    }
+    if !all_ns_pages.is_disjoint(&all_attribute_pages)
+        || !snapshots.owned_pages.is_disjoint(&all_attribute_pages)
+    {
+        return Err(Error::CorruptTree);
+    }
+    all_ns_pages.extend(all_attribute_pages);
     let live_records = records.ok_or(Error::CorruptTree)?;
     if live_records.len() as u64 != m.inode_count {
         return Err(Error::CorruptTree);
@@ -133,6 +209,7 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         owned_metadata: all_ns_pages,
         data_births,
         tail_restrictions: tails,
+        catalog: live_catalog,
     })
 }
 struct Verified {
@@ -295,6 +372,11 @@ enum Edit<'a> {
         to: &'a str,
     },
     Unlink(&'a str),
+    InstallSchema(&'a Schema),
+    SetAttributes {
+        path: &'a str,
+        values: &'a [(String, Value)],
+    },
     Pin,
     MarkDropping(u64),
 }
@@ -456,6 +538,82 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let (_, checked, _) = audit(&mut self.volume)?;
         Ok(checked.reach.snapshots)
     }
+    /// The F4 schema is immutable once installed, as in v9.
+    pub fn install_schema(&mut self, schema: &Schema) -> Result<u64> {
+        self.commit(Edit::InstallSchema(schema))
+    }
+    /// Atomically replace one regular inode's typed F4 attributes.
+    pub fn set_attributes(&mut self, path: &str, values: &[(String, Value)]) -> Result<u64> {
+        self.commit(Edit::SetAttributes { path, values })
+    }
+    pub fn file_attributes(&mut self, path: &str) -> Result<BTreeMap<String, Value>> {
+        validate_namespace_path(path)?;
+        let (m, verified, _) = audit(&mut self.volume)?;
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let record = verified.reach.records.get(path).ok_or(Error::NotFound)?;
+        if record.directory {
+            return Err(Error::IsDirectory);
+        }
+        Ok(verified
+            .reach
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.get(record.inode))
+            .unwrap_or_default())
+    }
+    pub fn search_attributes(
+        &mut self,
+        predicates: &[Predicate],
+        limit: usize,
+    ) -> Result<QueryResult> {
+        let (m, checked, _) = audit(&mut self.volume)?;
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let catalog = checked
+            .reach
+            .catalog
+            .as_ref()
+            .ok_or(Error::Attribute("no schema installed".into()))?;
+        catalog.query(
+            self.volume.info().volume_id,
+            m.generation,
+            predicates,
+            limit,
+        )
+    }
+    pub fn search_snapshot_attributes(
+        &mut self,
+        generation: u64,
+        predicates: &[Predicate],
+        limit: usize,
+    ) -> Result<QueryResult> {
+        let (m, checked, _) = audit(&mut self.volume)?;
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let snapshot = checked
+            .reach
+            .snapshots
+            .iter()
+            .find(|descriptor| descriptor.generation == generation)
+            .ok_or(Error::InvalidSnapshot)?;
+        let roots = attribute_roots(
+            snapshot.attribute_rows_root,
+            snapshot.attribute_postings_root,
+            snapshot.attribute_schema_root,
+        )?;
+        let id = self.volume.info().volume_id;
+        let historical = self
+            .volume
+            .inspect(|device| read_attribute_roots(device, roots, id, m.generation))?;
+        let catalog = historical
+            .ok_or(Error::Attribute("snapshot has no schema".into()))?
+            .catalog;
+        catalog.query(id, generation, predicates, limit)
+    }
     pub fn mkdir(&mut self, path: &str) -> Result<u64> {
         self.commit(Edit::Mkdir(path))
     }
@@ -506,6 +664,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let total = self.volume.block_count();
         let mut records = checked.reach.records.clone();
         let mut pins = checked.reach.snapshots.clone();
+        let mut attributes = checked.reach.catalog.clone();
+        let mut attributes_dirty = false;
         let mut next = old;
         next.generation = generation;
         let mut catalog_edit = None;
@@ -620,13 +780,35 @@ impl<D: BlockDevice> UnifiedV10<D> {
             }
             Edit::Unlink(path) => {
                 validate_namespace_path(path)?;
-                match records.get(path) {
-                    Some(entry) if entry.directory => return Err(Error::IsDirectory),
-                    None => return Err(Error::NotFound),
-                    _ => {}
+                let entry = *records.get(path).ok_or(Error::NotFound)?;
+                if entry.directory {
+                    return Err(Error::IsDirectory);
+                }
+                if let Some(catalog) = &mut attributes {
+                    catalog.remove(entry.inode)?;
+                    attributes_dirty = true;
                 }
                 records.remove(path);
                 namespace_changed = true;
+            }
+            Edit::InstallSchema(schema) => {
+                if attributes.is_some() {
+                    return Err(Error::Attribute("schema already installed".into()));
+                }
+                attributes = Some(Catalog::empty(schema.clone())?);
+                attributes_dirty = true;
+            }
+            Edit::SetAttributes { path, values } => {
+                validate_namespace_path(path)?;
+                let entry = *records.get(path).ok_or(Error::NotFound)?;
+                if entry.directory {
+                    return Err(Error::IsDirectory);
+                }
+                let catalog = attributes
+                    .as_mut()
+                    .ok_or(Error::Attribute("no schema installed".into()))?;
+                catalog.upsert(entry.inode, values.iter().cloned())?;
+                attributes_dirty = true;
             }
             Edit::Pin => {
                 if pins.iter().any(|d| d.generation == old.generation) {
@@ -635,9 +817,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 let desc = SnapshotDescriptor {
                     generation: old.generation,
                     fs_root: old.roots.fs,
-                    attribute_rows_root: None,
-                    attribute_postings_root: None,
-                    attribute_schema_root: None,
+                    attribute_rows_root: old.roots.attribute_rows,
+                    attribute_postings_root: old.roots.attribute_postings,
+                    attribute_schema_root: old.roots.schema,
                     state: SnapshotState::Pinned,
                 };
                 pins.push(desc);
@@ -658,6 +840,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
         }
         next.inode_count = records.len() as u64;
         validate_namespace(&records, next.next_inode, generation, total)?;
+        if let Some(catalog) = &attributes {
+            validate_attributes(catalog, &records)?;
+        }
         // Strict reusable-address certificate for this one transaction:
         // the independently reconstructed *union* of both F0 candidate
         // graphs is the authority, NOT a high-water guess, a self CRC, or
@@ -736,6 +921,16 @@ impl<D: BlockDevice> UnifiedV10<D> {
             next.roots.snapshots = Some(cat.root);
             staged.extend(cat.staged_pages);
         }
+        if attributes_dirty {
+            let catalog = attributes.as_ref().ok_or(Error::CorruptTree)?;
+            let rebuilt =
+                stage_attribute_roots(catalog, &candidates[used..], id, generation, total)?;
+            used += rebuilt.used;
+            next.roots.attribute_rows = Some(rebuilt.roots.rows);
+            next.roots.attribute_postings = Some(rebuilt.roots.postings);
+            next.roots.schema = Some(rebuilt.roots.schema);
+            staged.extend(rebuilt.pages);
+        }
         // Collect complete live/pinned extent references from the candidate
         // staged graph before constructing its new global checksum index.
         let required = self.volume.inspect(|device| {
@@ -803,6 +998,19 @@ impl<D: BlockDevice> UnifiedV10<D> {
             };
             let checked = verify(&mut overlay, root, next)?;
             if checked.reach.records != records || checked.reach.snapshots != pins {
+                return Err(Error::CorruptTree);
+            }
+            let actual_attrs = checked
+                .reach
+                .catalog
+                .as_ref()
+                .map(Catalog::encode_sections)
+                .transpose()?;
+            let expected_attrs = attributes
+                .as_ref()
+                .map(Catalog::encode_sections)
+                .transpose()?;
+            if actual_attrs != expected_attrs {
                 return Err(Error::CorruptTree);
             }
             let staged_addrs: BTreeSet<u64> = staged.iter().map(|(addr, _)| *addr).collect();

@@ -24,7 +24,7 @@ struct Posting {
 }
 
 #[derive(Clone)]
-pub(super) struct Catalog {
+pub(crate) struct Catalog {
     pub schema: Schema,
     rows: BTreeMap<u64, BTreeMap<u32, Value>>,
     postings: BTreeSet<Posting>,
@@ -118,16 +118,22 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn validate_files(&self, files: &BTreeMap<String, Record>) -> Result<()> {
+    pub(super) fn validate_files(&self, files: &BTreeMap<String, Record>) -> Result<()> {
         let by_inode: BTreeSet<_> = files
             .iter()
             .filter(|(path, record)| path.as_str() != INTERNAL_PATH && !record.directory)
             .map(|(_, record)| record.inode)
             .collect();
-        if self.rows.keys().any(|inode| !by_inode.contains(inode)) {
-            return Err(Error::CorruptTree);
-        }
-        if self.computed_postings()? != self.postings {
+        self.validate_inode_ids(&by_inode)
+    }
+
+    /// Shared F4-on-v10 transition invariant: rows and secondary postings
+    /// must reference only live **regular-file** inodes in this generation.
+    /// Historical snapshot catalogs pass their own historical inode set.
+    pub fn validate_inode_ids(&self, file_inodes: &BTreeSet<u64>) -> Result<()> {
+        if self.rows.keys().any(|inode| !file_inodes.contains(inode))
+            || self.computed_postings()? != self.postings
+        {
             return Err(Error::CorruptTree);
         }
         Ok(())
@@ -170,6 +176,64 @@ impl Catalog {
             return Err(Error::TooLarge);
         }
         Ok(bytes)
+    }
+
+    /// Split the canonical F4 binary catalog into independent schema, row
+    /// and posting sections for v10's three root roles. Concatenating the
+    /// sections MUST reproduce the exact existing v9 serialization.
+    /// No change to the v9 image format or normalization rules is made.
+    pub fn encode_sections(&self) -> Result<[Vec<u8>; 3]> {
+        let mut schema = Vec::new();
+        schema.extend_from_slice(&MAGIC);
+        put16(&mut schema, VERSION);
+        put16(&mut schema, self.schema.definitions().count() as u16);
+        for def in self.schema.definitions() {
+            put32(&mut schema, def.id);
+            put_str(&mut schema, &def.name)?;
+            let (kind, case, maxbytes, maxitems) = encode_type(&def.ty)?;
+            schema.extend_from_slice(&[kind, case, u8::from(def.indexed), 0]);
+            put16(&mut schema, maxbytes);
+            put16(&mut schema, maxitems);
+        }
+        let mut rows = Vec::new();
+        put32(&mut rows, self.rows.len() as u32);
+        for (inode, attributes) in &self.rows {
+            put64(&mut rows, *inode);
+            put16(&mut rows, attributes.len() as u16);
+            for (id, value) in attributes {
+                let def = self.schema.by_id(*id).ok_or(Error::CorruptTree)?;
+                put32(&mut rows, *id);
+                let mut raw = Vec::new();
+                encode_value(&mut raw, value, &def.ty)?;
+                put32(&mut rows, raw.len() as u32);
+                rows.extend_from_slice(&raw);
+            }
+        }
+        let mut postings = Vec::new();
+        put32(&mut postings, self.postings.len() as u32);
+        for item in &self.postings {
+            put32(&mut postings, item.attribute);
+            put16(&mut postings, item.key.len() as u16);
+            postings.extend_from_slice(&item.key);
+            put64(&mut postings, item.inode);
+        }
+        let all_size = schema.len() + rows.len() + postings.len();
+        if all_size > MAX_BYTES {
+            return Err(Error::TooLarge);
+        }
+        Ok([schema, rows, postings])
+    }
+
+    pub fn decode_sections(parts: &[Vec<u8>; 3]) -> Result<Self> {
+        let capacity = parts.iter().map(Vec::len).sum::<usize>();
+        if capacity > MAX_BYTES {
+            return Err(Error::CorruptTree);
+        }
+        let mut all = Vec::with_capacity(capacity);
+        for part in parts {
+            all.extend_from_slice(part);
+        }
+        Self::decode(&all)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
