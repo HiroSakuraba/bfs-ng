@@ -290,9 +290,11 @@ fn plan_snapshot_edit_with_mode<D: BlockDevice>(
         || high_water <= ROOT_PAYLOAD_LAST
         || high_water > device.block_count()
         || reserved_virgin_pages.is_empty()
-        || reserved_virgin_pages
-            .iter()
-            .any(|&x| x <= ROOT_PAYLOAD_LAST || x >= device.block_count() || (!audited_reuse && x >= high_water))
+        || reserved_virgin_pages.iter().any(|&x| {
+            x <= ROOT_PAYLOAD_LAST
+                || x >= device.block_count()
+                || (!audited_reuse && x >= high_water)
+        })
         || reserved_virgin_pages
             .windows(2)
             .any(|pair| pair[0] <= pair[1])
@@ -365,8 +367,14 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
     reserved_virgin_pages: &[u64],
 ) -> Result<StagedCatalog> {
     plan_snapshot_edit_with_mode(
-        device, old_root, edit, volume_id, new_generation,
-        high_water, reserved_virgin_pages, false,
+        device,
+        old_root,
+        edit,
+        volume_id,
+        new_generation,
+        high_water,
+        reserved_virgin_pages,
+        false,
     )
 }
 
@@ -382,7 +390,13 @@ pub(super) fn plan_snapshot_edit_reusing<D: BlockDevice>(
     reservations: &[u64],
 ) -> Result<StagedCatalog> {
     plan_snapshot_edit_with_mode(
-        device, old_root, edit, volume_id, new_generation,
-        high_water, reservations, true,
+        device,
+        old_root,
+        edit,
+        volume_id,
+        new_generation,
+        high_water,
+        reservations,
+        true,
     )
 }
