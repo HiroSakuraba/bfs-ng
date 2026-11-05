@@ -668,7 +668,6 @@ impl<D: BlockDevice> ReadOnlyV10<D> {
     /// Direct-root open remains lazy; this call does NOT certify reuse.
     pub fn snapshot_descriptors(&mut self) -> Result<Vec<SnapshotDescriptor>> {
         let info = self.volume.info();
-        let total = self.volume.block_count();
         let root = self.manifest.roots.snapshots;
         let descriptors = self.volume.inspect(|device| {
             read_snapshot_tree(device, root, info.volume_id, info.generation)
