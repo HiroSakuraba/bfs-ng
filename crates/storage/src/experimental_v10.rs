@@ -11,6 +11,10 @@ use std::collections::BTreeSet;
 
 mod checksum_tree;
 mod data_writer;
+mod extent_map;
+mod extent_writer;
+pub use extent_map::{BlockRef, Extent, FileExtents, MAX_FILE_BLOCKS, MAX_FILE_BYTES};
+pub use extent_writer::ExtentDataWriter;
 mod snapshot_tree;
 mod virgin_writer;
 pub use checksum_tree::{
