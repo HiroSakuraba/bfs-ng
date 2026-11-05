@@ -152,7 +152,7 @@ impl Page {
             || self.address <= ROOT_PAYLOAD_LAST
             || self.birth == 0
             || self.level > MAX_LEVEL
-            || self.items.is_empty()
+            || (self.items.is_empty() && self.level > 0)
             || self.items.len() > (BLOCK_SIZE - PAGE_HEADER_BYTES) / 8
             || self.items.iter().any(|item| {
                 item.key.is_empty()
@@ -248,7 +248,7 @@ impl Page {
         let slots_end = PAGE_HEADER_BYTES
             .checked_add(count.checked_mul(8).ok_or_else(bad)?)
             .ok_or_else(bad)?;
-        if count == 0 || slots_end > BLOCK_SIZE {
+        if (count == 0 && pointer.level > 0) || slots_end > BLOCK_SIZE {
             return Err(bad());
         }
         let mut items = Vec::with_capacity(count);
