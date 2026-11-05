@@ -1237,12 +1237,69 @@ impl<D: BlockDevice> UnifiedV10<D> {
             next.roots.checksum = cs.root;
             staged.extend(cs.staged_pages);
         }
-        if used == 0 {
-            return Err(Error::CorruptTree);
+        let mut intended_space = None;
+        let mut index_pages = 0;
+        if let Some(sweep) = retirement {
+            // Only actual staged data/normal metadata pages consume free
+            // addresses; the Free/Dead index lives in its own reserved arena.
+            let reserved = reserve_free(
+                &sweep.free, &owned, old.generation, used,
+            )?;
+            if reserved.selected != candidates[..used] {
+                return Err(Error::CorruptTree);
+            }
+            let free = reserved.remaining;
+            let mut dead = sweep.dead;
+            queue_fallback_retirements(
+                &free, &mut dead, &owned, &checked, generation,
+            )?;
+            validate_space_pair(&free, &dead, &owned, old.generation, total)?;
+            let free_changes = free_deltas(&checked.free, &free, total)?;
+            let dead_changes = dead_deltas(&checked.dead, &dead, total)?;
+            // No allocator recursion: no Free/Dead tree page is itself in
+            // a Free interval, ever. Reserve solely from the fixed arena
+            // after proving no address belongs to either F0 candidate.
+            let arena: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..INDEX_ARENA_END)
+                .rev().filter(|a| !owned.contains(a)).collect();
+            let fp = self.volume.inspect(|disk| stage_space_delta(
+                disk, TreeId::Free, old.roots.free,
+                &free_changes, &arena, id, generation,
+                ROOT_PAYLOAD_LAST + 1,
+            ))?;
+            let dp = self.volume.inspect(|disk| stage_space_delta(
+                disk, TreeId::DeadList, old.roots.dead_list,
+                &dead_changes, &arena[fp.consumed_reservations..],
+                id, generation, ROOT_PAYLOAD_LAST + 1,
+            ))?;
+            index_pages = fp.consumed_reservations + dp.consumed_reservations;
+            next.roots.free = fp.root;
+            next.roots.dead_list = dp.root;
+            next.free_blocks = free.values().map(|r| u64::from(r.blocks)).sum();
+            next.pending_blocks = dead.values().map(|r| u64::from(r.blocks)).sum();
+            if let Some((epoch, address)) = sweep.cursor {
+                next.sweep_snapshot = epoch;
+                next.sweep_key = address;
+            } else {
+                next.sweep_snapshot = 0;
+                next.sweep_key = 0;
+            }
+            staged.extend(fp.staged_pages);
+            staged.extend(dp.staged_pages);
+            intended_space = Some((free, dead));
         }
-        // A reclaimed page above the virgin frontier must never advance it.
-        // Newly used virgin pages below it still lower the frontier.
-        next.high_water = old.high_water.min(candidates[used - 1]);
+        if used == 0 && index_pages == 0
+            && (next.sweep_snapshot, next.sweep_key)
+                == (old.sweep_snapshot, old.sweep_key)
+        {
+            return if indexed { Ok(old.generation) } else { Err(Error::CorruptTree) };
+        }
+        // Recycling must not advance the virgin frontier. Index-arena
+        // metadata pages are excluded from this independent high-water.
+        next.high_water = if used > 0 {
+            old.high_water.min(candidates[used - 1])
+        } else {
+            old.high_water
+        };
         let payload = next.encode(total)?;
         self.volume.inspect(|device| {
             let mut overlay = Overlay {
@@ -1257,6 +1314,11 @@ impl<D: BlockDevice> UnifiedV10<D> {
             let checked = verify(&mut overlay, root, next)?;
             if checked.reach.records != records || checked.reach.snapshots != pins {
                 return Err(Error::CorruptTree);
+            }
+            if let Some((free, dead)) = &intended_space {
+                if &checked.free != free || &checked.dead != dead {
+                    return Err(Error::CorruptTree);
+                }
             }
             let actual_attrs = checked
                 .reach
