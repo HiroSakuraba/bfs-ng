@@ -35,7 +35,7 @@ The main finding: **v10 currently reads about three times as many blocks per com
 
 ## 4. Measurements
 
-**Method.** A 64 MiB `CrashDevice` image (16,384 blocks) is filled with 1,000-byte files in one directory. At each fill level the image is reopened, then the harness makes 5 one-byte overwrites of a single existing file and counts physical block reads and writes per commit. v9 has no byte-range write, so its row rewrites the whole 1,000-byte file each time. Open reads are counted separately.
+**Method.** A 64 MiB `CrashDevice` image (16,384 blocks) is filled with 1,000-byte files in one directory. At each fill level the image is reopened once, then the harness makes 5 one-byte overwrites of a single existing file and counts physical block reads and writes per commit. Counters are shared with the harness, so the open and the commits are measured separately and exactly. v9 has no byte-range write, so its row rewrites the whole 1,000-byte file each time. Open reads are counted separately.
 
 Block counts are the meaningful metric. Wall-clock time is dominated by the `CrashDevice` durability model and is **not** a storage latency claim (ARCHITECTURE §1.6).
 
@@ -43,14 +43,14 @@ Measured on `9a2648b`:
 
 | Files | v10 reads/commit | v10 indexed reads/commit | v9 reads/commit | v10 writes/commit | v10 indexed writes/commit | v9 writes/commit | v10 open reads | v9 open reads |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 91 | 98 | 32 | 6 | 7 | 6 | 49 | 27 |
-| 100 | 800 | 807 | 315 | 8 | 9 | 8 | 413 | 243 |
-| 300 | 2,936 | 2,943 | 938 | 13 | 15 | 8 | 1,549 | 723 |
+| 10 | 81 | 87 | 27 | 6 | 7 | 6 | 49 | 27 |
+| 100 | 717 | 723 | 266 | 8 | 9 | 8 | 413 | 243 |
+| 300 | 2,626 | 2,633 | 794 | 13 | 15 | 8 | 1,549 | 723 |
 
 **Reading the table**
 
 - **Writes are good.** Copy-on-write stays local: a handful of blocks per commit, growing slowly with tree height. This is the payoff of the F5.0 / F5.1 page and extent design.
-- **Reads are the bottleneck.** A one-byte v10 write reads about 8–10 blocks per file already in the volume, roughly three times v9 (2,936 vs 938 at 300 files). The cause is the `audit()` call at the top of `UnifiedV10::commit`, which walks both F0 root graphs on every commit.
+- **Reads are the bottleneck.** A one-byte v10 write reads about 7–9 blocks per file already in the volume, roughly three times v9 (2,626 vs 794 at 300 files). The cause is the `audit()` call at the top of `UnifiedV10::commit`, which walks both F0 root graphs on every commit.
 - **Indexed mode does not reduce reads yet.** As its docs state, the full two-root audit remains mandatory when the persistent free tree is enabled, so the free tree currently adds bookkeeping without removing the scan.
 - **Open is linear too.** Lazy open (F5 §6.6) is not implemented.
 - **Filling is quadratic.** Each create also pays the audit, so filling a v10 image to 1,000 files did not finish within 8 minutes in this harness, while v9 reached it in seconds on the same simulated device.

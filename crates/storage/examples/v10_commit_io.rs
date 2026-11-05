@@ -13,31 +13,39 @@
 //! ```
 use bfs_ng_storage::experimental_v10::UnifiedV10;
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, FileSystem, Result};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Instant;
 
 const IMAGE_BLOCKS: usize = 16_384;
 const REPS: u64 = 5;
 const PAYLOAD: [u8; 1000] = [0xab; 1000];
 
+/// Shared read/write counters, readable while a filesystem owns the device.
+#[derive(Clone, Default)]
+struct Counters {
+    reads: Rc<Cell<u64>>,
+    writes: Rc<Cell<u64>>,
+}
+
+impl Counters {
+    fn snapshot(&self) -> (u64, u64) {
+        (self.reads.get(), self.writes.get())
+    }
+}
+
 /// Wraps a device and counts block reads and writes.
 struct Counting {
     inner: CrashDevice,
-    reads: u64,
-    writes: u64,
+    counters: Counters,
 }
 
 impl Counting {
-    fn new() -> Self {
+    fn new(counters: &Counters) -> Self {
         Self {
             inner: CrashDevice::new(IMAGE_BLOCKS),
-            reads: 0,
-            writes: 0,
+            counters: counters.clone(),
         }
-    }
-
-    fn reset(&mut self) {
-        self.reads = 0;
-        self.writes = 0;
     }
 }
 
@@ -47,12 +55,12 @@ impl BlockDevice for Counting {
     }
 
     fn read_block(&mut self, block: u64, out: &mut [u8; BLOCK_SIZE]) -> Result<()> {
-        self.reads += 1;
+        self.counters.reads.set(self.counters.reads.get() + 1);
         self.inner.read_block(block, out)
     }
 
     fn write_block(&mut self, block: u64, data: &[u8; BLOCK_SIZE]) -> Result<()> {
-        self.writes += 1;
+        self.counters.writes.set(self.counters.writes.get() + 1);
         self.inner.write_block(block, data)
     }
 
@@ -89,7 +97,8 @@ fn path(index: usize) -> String {
 }
 
 fn run_v10(indexed: bool, sizes: &[usize]) -> Result<()> {
-    let device = Counting::new();
+    let counters = Counters::default();
+    let device = Counting::new(&counters);
     let mut fs = if indexed {
         UnifiedV10::format_indexed(device, 7)?
     } else {
@@ -107,33 +116,29 @@ fn run_v10(indexed: bool, sizes: &[usize]) -> Result<()> {
             fs.write_at(&path(files), 0, &PAYLOAD)?;
             files += 1;
         }
-        let mut device = fs.into_device();
-        device.reset();
-        fs = UnifiedV10::open(device)?;
-        let device = fs.into_device();
-        let open_reads = device.reads;
-        fs = UnifiedV10::open(device)?;
-        // The counters now include exactly one more open; subtract it below.
+        let (before_open, _) = counters.snapshot();
+        fs = UnifiedV10::open(fs.into_device())?;
+        let (after_open, after_open_writes) = counters.snapshot();
         let started = Instant::now();
         for i in 0..REPS {
             fs.write_at(&path(1), (i % 4) * 10, b"x")?;
         }
         let elapsed = started.elapsed();
-        let device = fs.into_device();
+        let (reads, writes) = counters.snapshot();
         print(&Row {
             files,
-            open_reads,
-            reads_per_op: (device.reads - open_reads) / REPS,
-            writes_per_op: device.writes / REPS,
+            open_reads: after_open - before_open,
+            reads_per_op: (reads - after_open) / REPS,
+            writes_per_op: (writes - after_open_writes) / REPS,
             micros_per_op: elapsed.as_micros() as u64 / REPS,
         });
-        fs = UnifiedV10::open(device)?;
     }
     Ok(())
 }
 
 fn run_v9(sizes: &[usize]) -> Result<()> {
-    let mut fs = FileSystem::format(Counting::new(), 9)?;
+    let counters = Counters::default();
+    let mut fs = FileSystem::format(Counting::new(&counters), 9)?;
     let mut tx = fs.begin();
     tx.mkdir("/d")?;
     fs.commit(tx)?;
@@ -146,12 +151,9 @@ fn run_v9(sizes: &[usize]) -> Result<()> {
             fs.commit(tx)?;
             files += 1;
         }
-        let mut device = fs.into_device();
-        device.reset();
-        fs = FileSystem::open(device)?;
-        let device = fs.into_device();
-        let open_reads = device.reads;
-        fs = FileSystem::open(device)?;
+        let (before_open, _) = counters.snapshot();
+        fs = FileSystem::open(fs.into_device())?;
+        let (after_open, after_open_writes) = counters.snapshot();
         let started = Instant::now();
         for i in 0..REPS {
             let mut tx = fs.begin();
@@ -159,15 +161,14 @@ fn run_v9(sizes: &[usize]) -> Result<()> {
             fs.commit(tx)?;
         }
         let elapsed = started.elapsed();
-        let device = fs.into_device();
+        let (reads, writes) = counters.snapshot();
         print(&Row {
             files,
-            open_reads,
-            reads_per_op: (device.reads - open_reads) / REPS,
-            writes_per_op: device.writes / REPS,
+            open_reads: after_open - before_open,
+            reads_per_op: (reads - after_open) / REPS,
+            writes_per_op: (writes - after_open_writes) / REPS,
             micros_per_op: elapsed.as_micros() as u64 / REPS,
         });
-        fs = FileSystem::open(device)?;
     }
     Ok(())
 }
