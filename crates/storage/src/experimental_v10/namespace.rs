@@ -310,9 +310,11 @@ fn stage_namespace_tree_with_mode(
     if volume_id == 0
         || old_high_water > total_blocks
         || old_high_water <= ROOT_PAYLOAD_LAST
-        || reservations
-            .iter()
-            .any(|&block| block <= ROOT_PAYLOAD_LAST || block >= total_blocks || (!audited_reuse && block >= old_high_water))
+        || reservations.iter().any(|&block| {
+            block <= ROOT_PAYLOAD_LAST
+                || block >= total_blocks
+                || (!audited_reuse && block >= old_high_water)
+        })
         || reservations.windows(2).any(|pair| pair[0] <= pair[1])
     {
         return Err(Error::Geometry);
@@ -364,8 +366,14 @@ pub fn stage_namespace_tree(
     total_blocks: u64,
 ) -> Result<StagedNamespace> {
     stage_namespace_tree_with_mode(
-        records, reservations, volume_id, generation, next_inode,
-        old_high_water, total_blocks, false,
+        records,
+        reservations,
+        volume_id,
+        generation,
+        next_inode,
+        old_high_water,
+        total_blocks,
+        false,
     )
 }
 
@@ -382,7 +390,13 @@ pub(super) fn stage_namespace_tree_reusing(
     total_blocks: u64,
 ) -> Result<StagedNamespace> {
     stage_namespace_tree_with_mode(
-        records, reservations, volume_id, generation, next_inode,
-        old_high_water, total_blocks, true,
+        records,
+        reservations,
+        volume_id,
+        generation,
+        next_inode,
+        old_high_water,
+        total_blocks,
+        true,
     )
 }
