@@ -121,7 +121,7 @@ The new `experimental_v10::read_snapshot_tree` reads the whole catalog, not only
 
 ## 4. Deliberately deferred work / next tranche
 
-This is the **F5.0a codec, multilevel snapshot and strict virgin-only metadata writer tranche**. Completing general-purpose v10 requires an independently certified general allocation system, generic CoW B+tree support beyond snapshots and fully specified startup/format gating, all retaining v9's conservative allocator until the later v10 safety proofs. F5.0b adds headerless data and a global checksum tree covering every live and pinned historical data block. F5.2/F5.3 add safe free-run accounting only after a separate adversarial ownership proof.
+This is the **F5.0a codec, multilevel snapshot and strict virgin-only metadata writer tranche**. Completing general-purpose v10 requires an independently certified general allocation system, generic CoW B+tree support beyond snapshots and fully specified startup/format gating, all retaining v9's conservative allocator until the later v10 safety proofs. F5.0b begins with a [restricted single-blob headerless data and global checksum-tree proof harness](F5_0B_CHECKSUM_DATA.md); general multi-block extents, efficient indexing and final snapshot reclamation still require subsequent milestones. F5.2/F5.3 add safe free-run accounting only after a separate adversarial ownership proof.
 
 References: [F5 design and safety corrections](F5_DATA_LAYER.md), [F0 root ring](F0_R1_ROTATING_ROOTS.md), [F2.R4 certified allocation](F2_R4_CERTIFIED_RECLAMATION.md), [architecture](ARCHITECTURE.md).
 
