@@ -3,7 +3,7 @@ use bfs_ng_storage::experimental_v10::{
     SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
     plan_snapshot_edit, read_page, read_snapshot_tree,
 };
-use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Volume};
+use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Result, Volume};
 
 const VID: u128 = 0x5432_76aa_8943_1234;
 const BLOCKS: u64 = 2_048;
