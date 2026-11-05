@@ -338,3 +338,80 @@ fn indexed_ownership_matches_two_root_oracle_through_snapshot_and_namespace_chur
     }
     assert_eq!(history.len(), 3);
 }
+
+#[test]
+fn every_dropped_f0_owned_page_is_retired_before_it_can_be_reused() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(512), VID).unwrap();
+    fs.mkdir("/objects").unwrap();
+    fs.write_at("/objects/material", 0, b"origin").unwrap();
+    let pinned = fs.manifest().generation;
+    fs.pin_current().unwrap();
+
+    let mut name = "/objects/material";
+    let mut disk = fs.into_device().power_loss();
+    let mut old_owned = BTreeSet::new();
+    for manifest in f0_candidates(&mut disk) {
+        old_owned.extend(graph_for_manifest(&mut disk, manifest));
+    }
+    let mut fs = UnifiedV10::open(disk).unwrap();
+    let mut witnessed = 0_usize;
+
+    // Each comparison spans precisely one candidate F0 publication.
+    // Pages that disappear from the old two-root union cannot immediately
+    // enter Free: they must have a delayed DeadList witness. Index-arena
+    // metadata pages are deliberately managed outside DeadList.
+    for i in 0..44_u64 {
+        if i % 10 == 7 {
+            let next = if name == "/objects/material" {
+                "/objects/renamed"
+            } else {
+                "/objects/material"
+            };
+            fs.rename(name, next).unwrap();
+            name = next;
+        } else if i % 10 == 9 {
+            fs.reclaim_step().unwrap();
+        } else {
+            fs.write_at(name, 0, &i.to_le_bytes()).unwrap();
+        }
+
+        let mut disk = fs.into_device().power_loss();
+        let manifests = f0_candidates(&mut disk);
+        let mut next_owned = BTreeSet::new();
+        for manifest in &manifests {
+            next_owned.extend(graph_for_manifest(&mut disk, *manifest));
+        }
+        let selected = *manifests.last().unwrap();
+        let pending = read_space_tree(
+            &mut disk,
+            TreeId::DeadList,
+            selected.roots.dead_list,
+            VID,
+            selected.generation,
+        )
+        .unwrap();
+
+        for &lost in old_owned.difference(&next_owned) {
+            if lost < 69 {
+                continue; // the 64-page nonrecursive index metadata reserve
+            }
+            assert!(
+                pending.dead.values().any(|run| {
+                    run.start <= lost && lost < run.start + u64::from(run.blocks)
+                }),
+                "block {lost} disappeared from both F0 graphs at generation {} without a delayed retirement witness",
+                selected.generation,
+            );
+            witnessed += 1;
+        }
+
+        check_two_f0_roots(&mut disk);
+        old_owned = next_owned;
+        fs = UnifiedV10::open(disk).unwrap();
+        assert_eq!(
+            fs.read_snapshot_file(pinned, "/objects/material").unwrap(),
+            b"origin"
+        );
+    }
+    assert!(witnessed > 20, "insufficient F0 rotation/retirement coverage");
+}
