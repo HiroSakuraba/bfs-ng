@@ -14,9 +14,10 @@ use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attr
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
-use super::space_index::{DeadRun, FreeRun, SpaceDomain, dead_item, free_item,
-    read_space_tree, reserve_free, retire_step_cursor, stage_space_delta,
-    validate_space_pair, MAX_RETIRE_STEP};
+use super::space_index::{
+    DeadRun, FreeRun, MAX_RETIRE_STEP, SpaceDomain, dead_item, free_item, read_space_tree,
+    reserve_free, retire_step_cursor, stage_space_delta, validate_space_pair,
+};
 use super::{
     BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
     Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, read_checksum_tree,
@@ -74,7 +75,6 @@ fn validate_attributes(
 
 fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reachability> {
     if m.used_blocks != 0 {
-
         return Err(Error::CorruptTree);
     }
     let snapshots = read_snapshot_tree(device, m.roots.snapshots, id, m.generation)?;
@@ -248,9 +248,12 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         }
     }
     let (free, dead) = if m.metadata_reserve == 0 {
-        if m.roots.free.is_some() || m.roots.dead_list.is_some()
-            || m.free_blocks != 0 || m.pending_blocks != 0
-            || m.sweep_snapshot != 0 || m.sweep_key != 0
+        if m.roots.free.is_some()
+            || m.roots.dead_list.is_some()
+            || m.free_blocks != 0
+            || m.pending_blocks != 0
+            || m.sweep_snapshot != 0
+            || m.sweep_key != 0
         {
             return Err(Error::CorruptTree);
         }
@@ -263,16 +266,26 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
             return Err(Error::CorruptTree);
         }
         let f = read_space_tree(
-            device, TreeId::Free, m.roots.free, root.volume_id, root.generation,
+            device,
+            TreeId::Free,
+            m.roots.free,
+            root.volume_id,
+            root.generation,
         )?;
         let d = read_space_tree(
-            device, TreeId::DeadList, m.roots.dead_list,
-            root.volume_id, root.generation,
+            device,
+            TreeId::DeadList,
+            m.roots.dead_list,
+            root.volume_id,
+            root.generation,
         )?;
         if !f.pages.is_disjoint(&d.pages)
-            || f.pages.iter().chain(d.pages.iter())
+            || f.pages
+                .iter()
+                .chain(d.pages.iter())
                 .any(|&a| a <= ROOT_PAYLOAD_LAST || a >= INDEX_ARENA_END)
-            || !f.pages.is_disjoint(&owned) || !d.pages.is_disjoint(&owned)
+            || !f.pages.is_disjoint(&owned)
+            || !d.pages.is_disjoint(&owned)
             || f.free.values().any(|run| run.start < INDEX_ARENA_END)
             || d.dead.values().any(|run| run.start < INDEX_ARENA_END)
         {
@@ -288,18 +301,27 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         global_pages.extend(f.pages);
         global_pages.extend(d.pages);
         validate_space_pair(
-            &f.free, &d.dead, &owned, root.generation, device.block_count(),
+            &f.free,
+            &d.dead,
+            &owned,
+            root.generation,
+            device.block_count(),
         )?;
         (f.free, d.dead)
     };
-    if owned.iter().any(|&address| address < m.high_water
-        && (m.metadata_reserve == 0 || address >= INDEX_ARENA_END))
-    {
+    if owned.iter().any(|&address| {
+        address < m.high_water && (m.metadata_reserve == 0 || address >= INDEX_ARENA_END)
+    }) {
         return Err(Error::CorruptTree);
     }
     Ok(Verified {
-        reach, checksums: checksums.checksums, owned,
-        free, dead, global_pages, retired_global: BTreeSet::new(),
+        reach,
+        checksums: checksums.checksums,
+        owned,
+        free,
+        dead,
+        global_pages,
+        retired_global: BTreeSet::new(),
     })
 }
 fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
@@ -334,11 +356,17 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
     let (m, mut checked) = selected.ok_or(Error::CorruptRoot)?;
     // These pages vanish when the oldest candidate F0 slot is replaced.
     // Label global pages independently of snapshot-referenced metadata.
-    checked.retired_global = fallback_global.difference(&checked.owned)
-        .copied().collect();
+    checked.retired_global = fallback_global
+        .difference(&checked.owned)
+        .copied()
+        .collect();
     if m.metadata_reserve != 0 {
         validate_space_pair(
-            &checked.free, &checked.dead, &owned, m.generation, volume.block_count(),
+            &checked.free,
+            &checked.dead,
+            &owned,
+            m.generation,
+            volume.block_count(),
         )?;
     }
     Ok((m, checked, owned))
@@ -426,8 +454,11 @@ fn free_deltas(
     let mut changes = BTreeMap::new();
     for (&start, &old) in before {
         if after.get(&start) != Some(&old) {
-            let value = after.get(&start).map(|run| free_item(*run, total))
-                .transpose()?.map(|(_, value)| value);
+            let value = after
+                .get(&start)
+                .map(|run| free_item(*run, total))
+                .transpose()?
+                .map(|(_, value)| value);
             changes.insert(start.to_be_bytes().to_vec(), value);
         }
     }
@@ -448,8 +479,11 @@ fn dead_deltas(
     for (&key, &old) in before {
         if after.get(&key) != Some(&old) {
             let (bytes, _) = dead_item(old, total)?;
-            let value = after.get(&key).map(|run| dead_item(*run, total))
-                .transpose()?.map(|(_, value)| value);
+            let value = after
+                .get(&key)
+                .map(|run| dead_item(*run, total))
+                .transpose()?
+                .map(|(_, value)| value);
             changes.insert(bytes, value);
         }
     }
@@ -467,10 +501,12 @@ fn recorded_interval(
     address: u64,
 ) -> bool {
     if let Some((_, run)) = free.range(..=address).next_back() {
-        if address < run.start + u64::from(run.blocks) { return true; }
+        if address < run.start + u64::from(run.blocks) {
+            return true;
+        }
     }
-    dead.values().any(|run| address >= run.start
-        && address < run.start + u64::from(run.blocks))
+    dead.values()
+        .any(|run| address >= run.start && address < run.start + u64::from(run.blocks))
 }
 /// Record pages retired by rotation of the oldest F0 candidate, but never
 /// release them in the same generation. Global metadata and snapshot-owned
@@ -483,13 +519,12 @@ fn queue_fallback_retirements(
     selected: &Verified,
     next_generation: u64,
 ) -> Result<()> {
-    let eligible = next_generation.checked_add(2)
+    let eligible = next_generation
+        .checked_add(2)
         .ok_or(Error::GenerationOverflow)?;
     let mut grouped: Vec<DeadRun> = Vec::new();
     for &address in combined_owners.difference(&selected.owned) {
-        if address < INDEX_ARENA_END
-            || recorded_interval(free, dead, address)
-        {
+        if address < INDEX_ARENA_END || recorded_interval(free, dead, address) {
             continue;
         }
         let domain = if selected.retired_global.contains(&address) {
@@ -508,7 +543,10 @@ fn queue_fallback_retirements(
         }
         grouped.push(DeadRun {
             dead_generation: next_generation,
-            start: address, blocks: 1, eligible_after: eligible, domain,
+            start: address,
+            blocks: 1,
+            eligible_after: eligible,
+            domain,
         });
     }
     for run in grouped {
@@ -578,20 +616,29 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let total = self.volume.block_count();
         let run = FreeRun {
             start: INDEX_ARENA_END,
-            blocks: u32::try_from(total - 1 - INDEX_ARENA_END)
-                .map_err(|_| Error::Geometry)?,
+            blocks: u32::try_from(total - 1 - INDEX_ARENA_END).map_err(|_| Error::Geometry)?,
             eligible_after: old.generation + 1,
         };
         let (key, value) = free_item(run, total)?;
         let changes = BTreeMap::from([(key, Some(value))]);
         let arena: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..INDEX_ARENA_END)
-            .rev().filter(|addr| !owners.contains(addr)).collect();
+            .rev()
+            .filter(|addr| !owners.contains(addr))
+            .collect();
         let id = self.volume.info().volume_id;
         let generation = old.generation + 1;
-        let plan = self.volume.inspect(|disk| stage_space_delta(
-            disk, TreeId::Free, None, &changes, &arena, id, generation,
-            ROOT_PAYLOAD_LAST + 1,
-        ))?;
+        let plan = self.volume.inspect(|disk| {
+            stage_space_delta(
+                disk,
+                TreeId::Free,
+                None,
+                &changes,
+                &arena,
+                id,
+                generation,
+                ROOT_PAYLOAD_LAST + 1,
+            )
+        })?;
         let mut next = old;
         next.generation = generation;
         next.metadata_reserve = INDEX_ARENA_BLOCKS;
@@ -600,10 +647,12 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let payload = next.encode(total)?;
         self.volume.inspect(|disk| {
             let mut overlay = Overlay {
-                disk, staged: plan.staged_pages.iter().copied().collect(),
+                disk,
+                staged: plan.staged_pages.iter().copied().collect(),
             };
             let root = RootInfo {
-                volume_id: id, generation,
+                volume_id: id,
+                generation,
                 root_block: Some(2 + (generation - 1) % 3),
             };
             let checked = verify(&mut overlay, root, next)?;
@@ -612,7 +661,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
             }
             Ok(())
         })?;
-        self.volume.commit_root_with_blocks(&plan.staged_pages, &payload)?;
+        self.volume
+            .commit_root_with_blocks(&plan.staged_pages, &payload)?;
         self.manifest = next;
         Ok(())
     }
@@ -1069,7 +1119,6 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 catalog_edit = Some(CatalogEdit::MarkDropping(snapshot));
             }
             Edit::Reclaim => {}
-
         }
         next.inode_count = records.len() as u64;
         validate_namespace(&records, next.next_inode, generation, total)?;
@@ -1085,7 +1134,10 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let indexed = old.metadata_reserve == INDEX_ARENA_BLOCKS;
         let retirement = if indexed {
             Some(retire_step_cursor(
-                &checked.free, &checked.dead, &owned, old.generation,
+                &checked.free,
+                &checked.dead,
+                &owned,
+                old.generation,
                 MAX_RETIRE_STEP,
                 if old.sweep_snapshot == 0 {
                     None
@@ -1100,10 +1152,13 @@ impl<D: BlockDevice> UnifiedV10<D> {
         // without scanning *all physical addresses*. Independent full graph
         // certification remains active until the F5.3 accounted proof gate.
         let candidates: Vec<u64> = if let Some(step) = &retirement {
-            let available = step.free.values()
+            let available = step
+                .free
+                .values()
                 .filter(|run| run.eligible_after <= old.generation)
                 .map(|run| u64::from(run.blocks))
-                .sum::<u64>().min(STAGING_LIMIT as u64) as usize;
+                .sum::<u64>()
+                .min(STAGING_LIMIT as u64) as usize;
             reserve_free(&step.free, &owned, old.generation, available)?.selected
         } else {
             (ROOT_PAYLOAD_LAST + 1..total)
@@ -1242,17 +1297,13 @@ impl<D: BlockDevice> UnifiedV10<D> {
         if let Some(sweep) = retirement {
             // Only actual staged data/normal metadata pages consume free
             // addresses; the Free/Dead index lives in its own reserved arena.
-            let reserved = reserve_free(
-                &sweep.free, &owned, old.generation, used,
-            )?;
+            let reserved = reserve_free(&sweep.free, &owned, old.generation, used)?;
             if reserved.selected != candidates[..used] {
                 return Err(Error::CorruptTree);
             }
             let free = reserved.remaining;
             let mut dead = sweep.dead;
-            queue_fallback_retirements(
-                &free, &mut dead, &owned, &checked, generation,
-            )?;
+            queue_fallback_retirements(&free, &mut dead, &owned, &checked, generation)?;
             validate_space_pair(&free, &dead, &owned, old.generation, total)?;
             let free_changes = free_deltas(&checked.free, &free, total)?;
             let dead_changes = dead_deltas(&checked.dead, &dead, total)?;
@@ -1260,17 +1311,33 @@ impl<D: BlockDevice> UnifiedV10<D> {
             // a Free interval, ever. Reserve solely from the fixed arena
             // after proving no address belongs to either F0 candidate.
             let arena: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..INDEX_ARENA_END)
-                .rev().filter(|a| !owned.contains(a)).collect();
-            let fp = self.volume.inspect(|disk| stage_space_delta(
-                disk, TreeId::Free, old.roots.free,
-                &free_changes, &arena, id, generation,
-                ROOT_PAYLOAD_LAST + 1,
-            ))?;
-            let dp = self.volume.inspect(|disk| stage_space_delta(
-                disk, TreeId::DeadList, old.roots.dead_list,
-                &dead_changes, &arena[fp.consumed_reservations..],
-                id, generation, ROOT_PAYLOAD_LAST + 1,
-            ))?;
+                .rev()
+                .filter(|a| !owned.contains(a))
+                .collect();
+            let fp = self.volume.inspect(|disk| {
+                stage_space_delta(
+                    disk,
+                    TreeId::Free,
+                    old.roots.free,
+                    &free_changes,
+                    &arena,
+                    id,
+                    generation,
+                    ROOT_PAYLOAD_LAST + 1,
+                )
+            })?;
+            let dp = self.volume.inspect(|disk| {
+                stage_space_delta(
+                    disk,
+                    TreeId::DeadList,
+                    old.roots.dead_list,
+                    &dead_changes,
+                    &arena[fp.consumed_reservations..],
+                    id,
+                    generation,
+                    ROOT_PAYLOAD_LAST + 1,
+                )
+            })?;
             index_pages = fp.consumed_reservations + dp.consumed_reservations;
             next.roots.free = fp.root;
             next.roots.dead_list = dp.root;
@@ -1287,11 +1354,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
             staged.extend(dp.staged_pages);
             intended_space = Some((free, dead));
         }
-        if used == 0 && index_pages == 0
-            && (next.sweep_snapshot, next.sweep_key)
-                == (old.sweep_snapshot, old.sweep_key)
+        if used == 0
+            && index_pages == 0
+            && (next.sweep_snapshot, next.sweep_key) == (old.sweep_snapshot, old.sweep_key)
         {
-            return if indexed { Ok(old.generation) } else { Err(Error::CorruptTree) };
+            return if indexed {
+                Ok(old.generation)
+            } else {
+                Err(Error::CorruptTree)
+            };
         }
         // Recycling must not advance the virgin frontier. Index-arena
         // metadata pages are excluded from this independent high-water.
