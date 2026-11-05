@@ -317,7 +317,7 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                     let logical = position / BLOCK_SIZE as u64;
                     let intra = (position % BLOCK_SIZE as u64) as usize;
                     let count = (BLOCK_SIZE - intra).min(bytes.len() - copied);
-                    if !dirty.contains_key(&logical) {
+                    if let std::collections::btree_map::Entry::Vacant(slot) = dirty.entry(logical) {
                         let data = if let Some(reference) = new_file.blocks.get(&logical) {
                             self.volume.inspect(|device| {
                                 read_verified_block(device, reference.physical, &checked.checksums)
@@ -325,7 +325,7 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                         } else {
                             [0_u8; BLOCK_SIZE]
                         };
-                        dirty.insert(logical, data);
+                        slot.insert(data);
                     }
                     let block = dirty.get_mut(&logical).ok_or(Error::CorruptTree)?;
                     block[intra..intra + count].copy_from_slice(&bytes[copied..copied + count]);
