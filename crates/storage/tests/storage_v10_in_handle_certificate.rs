@@ -87,33 +87,34 @@ fn exclusive_in_handle_allocator_matches_strict_mode_and_reduces_disk_walks() {
         }
         assert_eq!(slow.manifest(), fast.manifest(), "step {i}");
     }
-    let old_reads = slow.into_device().read_blocks();
-    let fast_reads = fast.into_device().read_blocks();
+    let old_device = slow.into_device();
+    let fast_device = fast.into_device();
+    let old_reads = old_device.read_blocks();
+    let fast_reads = fast_device.read_blocks();
     assert!(
         fast_reads < old_reads,
         "old-root cache must reduce physical reads: cached={fast_reads}, full={old_reads}"
     );
-    // Reopen both via their mandatory independent full audit. The two paths
-    // must have exactly the same latest and historical contents.
-    let mut slow = UnifiedV10::format_indexed(CrashDevice::new(768), VID).unwrap();
-    let mut fast = UnifiedV10::format_indexed(CrashDevice::new(768), VID).unwrap();
-    // This simple independent replay validates final bytes after the already
-    // compared persisted manifestations; the read counter assertion above is
-    // intentionally recorded before any read-only auditing.
-    slow.mkdir("/asset").unwrap();
-    fast.mkdir("/asset").unwrap();
-    slow.write_at("/asset/data", 0, b"initial").unwrap();
-    fast.write_at("/asset/data", 0, b"initial").unwrap();
-    fast.enable_in_handle_allocation_certificate().unwrap();
-    let mut path1 = "/asset/data";
-    let mut path2 = "/asset/data";
-    for i in 0..16_u64 {
-        mutate(&mut slow, i, &mut path1);
-        mutate(&mut fast, i, &mut path2);
+    // Power-loss reopening always independently audits both F0 manifests.
+    // Compare real persisted contents and all historical snapshots, including
+    // the Dropping descriptor, rather than trusting identical counters alone.
+    let mut slow = UnifiedV10::open(old_device.power_loss()).unwrap();
+    let mut fast = UnifiedV10::open(fast_device.power_loss()).unwrap();
+    assert_eq!(slow.manifest(), fast.manifest());
+    assert_eq!(slow.read_file(slow_name).unwrap(), fast.read_file(fast_name).unwrap());
+    assert_eq!(slow.stat(slow_name).unwrap().0, fast.stat(fast_name).unwrap().0);
+    assert_eq!(slow.stat(slow_name).unwrap().0, inode);
+    assert_eq!(
+        slow.file_attributes(slow_name).unwrap(),
+        fast.file_attributes(fast_name).unwrap()
+    );
+    for (generation, name) in &history {
+        assert_eq!(
+            slow.read_snapshot_file(*generation, name).unwrap(),
+            fast.read_snapshot_file(*generation, name).unwrap(),
+            "historical snapshot {generation}"
+        );
     }
-    assert_eq!(slow.read_file(path1).unwrap(), fast.read_file(path2).unwrap());
-    assert_eq!(slow.stat(path1).unwrap().0, fast.stat(path2).unwrap().0);
-    assert_eq!(inode, 3);
 }
 
 #[test]
