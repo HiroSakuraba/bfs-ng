@@ -1,6 +1,6 @@
 # F5 — extent data layer, birth-time reclamation and inode namespace (proposed)
 
-**Status:** design proposal, **safety-corrected 2026-11-04**. **F5.0a's codecs, multilevel snapshot reader, CoW staging planner and [restricted virgin-only snapshot writer](F5_0A_VIRGIN_WRITER.md) are implemented experimentally. The writer can durably publish snapshot catalog pins/drop-marks after a full two-root audit, but does not edit ordinary files or recycle any metadata. The experimental [F5.0b one-blob checksum/data tranche](F5_0B_CHECKSUM_DATA.md) now adds headerless 4 KiB data blocks and full live/pinned snapshot checksum verification. **General multi-block files, incremental per-key checksum updates, a reusable allocator, durable snapshot retirement and F5.1 onward remain unimplemented.**** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
+**Status:** design proposal, **safety-corrected 2026-11-04**. F5.0a's checked v10 codecs, historical snapshot-root reader, staged CoW catalog and restricted virgin-only metadata publisher are implemented experimentally. F5.0b added the [one-blob checksum/data proof](F5_0B_CHECKSUM_DATA.md). The [bounded F5.1 extent experiment](F5_1_EXTENTS.md) now adds one sparse logical file (max 64 × 4 KiB blocks), byte-addressed CoW writes, truncation and localized checksum-leaf/ancestor updates. **A production v10 filesystem, general multi-inode extent trees, inline small files, `punch_hole`, `fallocate`, streaming spill, reusable allocation, and safe final snapshot retirement remain unimplemented.** Target format: F0 superblock **v2** (unchanged) and experimental root manifest **v10**. Disposable single-writer test images only; no v9 migration. Code and tests are authoritative.
 
 **Baseline:** `main` after F0.R1 (manifest v9), as described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -219,6 +219,8 @@ When ownership certification is unavailable, only a conservatively demonstrated 
 **Why:** fast mount and safe allocation are independent questions. v9's full candidate verification is intentionally retained as a reuse oracle while F5 adds lazy data reads. This changes the user-visible recovery promise without relaxing overwrite safety.
 
 ## 7. F5.1 — extent map, inline files and streaming writes
+
+**Partial implementation:** [F5.1 bounded prototype](F5_1_EXTENTS.md) provides one single-leaf sparse file with 64 logical blocks, checked physical extent records, partial writes, truncation, historical snapshot references, and CoW checksum path-copy. This is **not** a completed inode-table or general B+tree implementation; the full design below remains the target.
 
 ### 7.1 fs tree key space
 
