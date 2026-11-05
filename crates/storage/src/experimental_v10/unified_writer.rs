@@ -21,9 +21,9 @@ use super::{
     validate_namespace_path,
 };
 use crate::fs::Catalog;
-use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
+use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const STAGING_LIMIT: usize = 512;
@@ -46,7 +46,9 @@ fn attribute_roots(
     match (rows, postings, schema) {
         (None, None, None) => Ok(None),
         (Some(rows), Some(postings), Some(schema)) => Ok(Some(AttributeRoots {
-            rows, postings, schema,
+            rows,
+            postings,
+            schema,
         })),
         _ => Err(Error::CorruptTree),
     }
@@ -55,7 +57,8 @@ fn validate_attributes(
     catalog: &Catalog,
     records: &BTreeMap<String, NamespaceRecord>,
 ) -> Result<()> {
-    let regular_files: BTreeSet<u64> = records.values()
+    let regular_files: BTreeSet<u64> = records
+        .values()
         .filter(|record| !record.directory)
         .map(|record| record.inode)
         .collect();
@@ -86,7 +89,8 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     all_ns_roots.insert(current_root.address, current_root);
     for desc in &snapshots.descriptors {
         attribute_roots(
-            desc.attribute_rows_root, desc.attribute_postings_root,
+            desc.attribute_rows_root,
+            desc.attribute_postings_root,
             desc.attribute_schema_root,
         )?;
         match all_ns_roots.insert(desc.fs_root.address, desc.fs_root) {
@@ -123,7 +127,9 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     attribute_versions.push((
         current_root.address,
         attribute_roots(
-            m.roots.attribute_rows, m.roots.attribute_postings, m.roots.schema,
+            m.roots.attribute_rows,
+            m.roots.attribute_postings,
+            m.roots.schema,
         )?,
         true,
     ));
@@ -141,7 +147,9 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     for (namespace_address, roots, is_live) in attribute_versions {
         let checked = read_attribute_roots(device, roots, id, m.generation)?;
         if let Some(attributes) = checked {
-            let names = namespace_versions.get(&namespace_address).ok_or(Error::CorruptTree)?;
+            let names = namespace_versions
+                .get(&namespace_address)
+                .ok_or(Error::CorruptTree)?;
             validate_attributes(&attributes.catalog, names)?;
             all_attribute_pages.extend(attributes.pages);
             if is_live {
@@ -535,47 +543,75 @@ impl<D: BlockDevice> UnifiedV10<D> {
         self.commit(Edit::InstallSchema(schema))
     }
     /// Atomically replace one regular inode's typed F4 attributes.
-    pub fn set_attributes(
-        &mut self, path: &str, values: &[(String, Value)],
-    ) -> Result<u64> {
+    pub fn set_attributes(&mut self, path: &str, values: &[(String, Value)]) -> Result<u64> {
         self.commit(Edit::SetAttributes { path, values })
     }
     pub fn file_attributes(&mut self, path: &str) -> Result<BTreeMap<String, Value>> {
         validate_namespace_path(path)?;
         let (m, verified, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         let record = verified.reach.records.get(path).ok_or(Error::NotFound)?;
-        if record.directory { return Err(Error::IsDirectory); }
-        Ok(verified.reach.catalog.as_ref()
-            .map(|catalog| catalog.get(record.inode)).unwrap_or_default())
+        if record.directory {
+            return Err(Error::IsDirectory);
+        }
+        Ok(verified
+            .reach
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.get(record.inode))
+            .unwrap_or_default())
     }
     pub fn search_attributes(
-        &mut self, predicates: &[Predicate], limit: usize,
+        &mut self,
+        predicates: &[Predicate],
+        limit: usize,
     ) -> Result<QueryResult> {
         let (m, checked, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
-        let catalog = checked.reach.catalog.as_ref()
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let catalog = checked
+            .reach
+            .catalog
+            .as_ref()
             .ok_or(Error::Attribute("no schema installed".into()))?;
-        catalog.query(self.volume.info().volume_id, m.generation, predicates, limit)
+        catalog.query(
+            self.volume.info().volume_id,
+            m.generation,
+            predicates,
+            limit,
+        )
     }
     pub fn search_snapshot_attributes(
-        &mut self, generation: u64, predicates: &[Predicate], limit: usize,
+        &mut self,
+        generation: u64,
+        predicates: &[Predicate],
+        limit: usize,
     ) -> Result<QueryResult> {
         let (m, checked, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
-        let snapshot = checked.reach.snapshots.iter()
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let snapshot = checked
+            .reach
+            .snapshots
+            .iter()
             .find(|descriptor| descriptor.generation == generation)
             .ok_or(Error::InvalidSnapshot)?;
         let roots = attribute_roots(
-            snapshot.attribute_rows_root, snapshot.attribute_postings_root,
+            snapshot.attribute_rows_root,
+            snapshot.attribute_postings_root,
             snapshot.attribute_schema_root,
         )?;
         let id = self.volume.info().volume_id;
-        let historical = self.volume.inspect(|device| {
-            read_attribute_roots(device, roots, id, m.generation)
-        })?;
+        let historical = self
+            .volume
+            .inspect(|device| read_attribute_roots(device, roots, id, m.generation))?;
         let catalog = historical
-            .ok_or(Error::Attribute("snapshot has no schema".into()))?.catalog;
+            .ok_or(Error::Attribute("snapshot has no schema".into()))?
+            .catalog;
         catalog.query(id, generation, predicates, limit)
     }
     pub fn mkdir(&mut self, path: &str) -> Result<u64> {
@@ -745,7 +781,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
             Edit::Unlink(path) => {
                 validate_namespace_path(path)?;
                 let entry = *records.get(path).ok_or(Error::NotFound)?;
-                if entry.directory { return Err(Error::IsDirectory); }
+                if entry.directory {
+                    return Err(Error::IsDirectory);
+                }
                 if let Some(catalog) = &mut attributes {
                     catalog.remove(entry.inode)?;
                     attributes_dirty = true;
@@ -763,8 +801,11 @@ impl<D: BlockDevice> UnifiedV10<D> {
             Edit::SetAttributes { path, values } => {
                 validate_namespace_path(path)?;
                 let entry = *records.get(path).ok_or(Error::NotFound)?;
-                if entry.directory { return Err(Error::IsDirectory); }
-                let catalog = attributes.as_mut()
+                if entry.directory {
+                    return Err(Error::IsDirectory);
+                }
+                let catalog = attributes
+                    .as_mut()
                     .ok_or(Error::Attribute("no schema installed".into()))?;
                 catalog.upsert(entry.inode, values.iter().cloned())?;
                 attributes_dirty = true;
@@ -882,9 +923,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
         }
         if attributes_dirty {
             let catalog = attributes.as_ref().ok_or(Error::CorruptTree)?;
-            let rebuilt = stage_attribute_roots(
-                catalog, &candidates[used..], id, generation, total,
-            )?;
+            let rebuilt =
+                stage_attribute_roots(catalog, &candidates[used..], id, generation, total)?;
             used += rebuilt.used;
             next.roots.attribute_rows = Some(rebuilt.roots.rows);
             next.roots.attribute_postings = Some(rebuilt.roots.postings);
@@ -960,10 +1000,16 @@ impl<D: BlockDevice> UnifiedV10<D> {
             if checked.reach.records != records || checked.reach.snapshots != pins {
                 return Err(Error::CorruptTree);
             }
-            let actual_attrs = checked.reach.catalog.as_ref()
-                .map(Catalog::encode_sections).transpose()?;
-            let expected_attrs = attributes.as_ref()
-                .map(Catalog::encode_sections).transpose()?;
+            let actual_attrs = checked
+                .reach
+                .catalog
+                .as_ref()
+                .map(Catalog::encode_sections)
+                .transpose()?;
+            let expected_attrs = attributes
+                .as_ref()
+                .map(Catalog::encode_sections)
+                .transpose()?;
             if actual_attrs != expected_attrs {
                 return Err(Error::CorruptTree);
             }
