@@ -1,6 +1,6 @@
 use bfs_ng_storage::experimental_v10::{
-    NamespaceRecord, ReadOnlyV10, SnapshotState, UnifiedV10,
-    read_namespace_tree, stage_namespace_tree,
+    NamespaceRecord, ReadOnlyV10, SnapshotState, UnifiedV10, read_namespace_tree,
+    stage_namespace_tree,
 };
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, FileSystem};
 use std::collections::BTreeMap;
@@ -23,34 +23,61 @@ fn one_v10_manifest_commits_directories_files_extents_checksums_and_snapshots() 
     fs.mkdir("/assets/materials").unwrap();
     let shader = b"void main() { color = vec4(1); }";
     fs.write_at("/assets/shaders/pbr.hlsl", 0, shader).unwrap();
-    fs.write_at("/assets/materials/wood.json", 7, b"wood").unwrap();
+    fs.write_at("/assets/materials/wood.json", 7, b"wood")
+        .unwrap();
     let shader_id = fs.stat("/assets/shaders/pbr.hlsl").unwrap().0;
     let material_id = fs.stat("/assets/materials/wood.json").unwrap().0;
     assert_ne!(shader_id, material_id);
     assert_eq!(fs.read_file("/assets/shaders/pbr.hlsl").unwrap(), shader);
-    assert_eq!(fs.read_file("/assets/materials/wood.json").unwrap(), b"\0\0\0\0\0\0\0wood");
+    assert_eq!(
+        fs.read_file("/assets/materials/wood.json").unwrap(),
+        b"\0\0\0\0\0\0\0wood"
+    );
     let pinned = fs.manifest().generation;
     fs.pin_current().unwrap();
 
     fs.rename("/assets", "/project").unwrap();
     assert!(matches!(fs.stat("/assets"), Err(Error::NotFound)));
     assert_eq!(fs.stat("/project/shaders/pbr.hlsl").unwrap().0, shader_id);
-    assert_eq!(fs.stat("/project/materials/wood.json").unwrap().0, material_id);
-    fs.write_at("/project/shaders/pbr.hlsl", 5, b"stage").unwrap();
-    assert_eq!(fs.read_snapshot_file(pinned, "/assets/shaders/pbr.hlsl").unwrap(), shader);
+    assert_eq!(
+        fs.stat("/project/materials/wood.json").unwrap().0,
+        material_id
+    );
+    fs.write_at("/project/shaders/pbr.hlsl", 5, b"stage")
+        .unwrap();
+    assert_eq!(
+        fs.read_snapshot_file(pinned, "/assets/shaders/pbr.hlsl")
+            .unwrap(),
+        shader
+    );
     assert!(matches!(
         fs.read_snapshot_file(pinned, "/project/shaders/pbr.hlsl"),
         Err(Error::NotFound)
     ));
     fs = reopen(fs);
-    assert_eq!(fs.stat("/project/materials/wood.json").unwrap().0, material_id);
-    assert_eq!(fs.read_snapshot_file(pinned, "/assets/shaders/pbr.hlsl").unwrap(), shader);
-    assert_eq!(fs.list_dir("/project").unwrap(), vec![
-        "/project/materials".to_owned(), "/project/shaders".to_owned(),
-    ]);
+    assert_eq!(
+        fs.stat("/project/materials/wood.json").unwrap().0,
+        material_id
+    );
+    assert_eq!(
+        fs.read_snapshot_file(pinned, "/assets/shaders/pbr.hlsl")
+            .unwrap(),
+        shader
+    );
+    assert_eq!(
+        fs.list_dir("/project").unwrap(),
+        vec![
+            "/project/materials".to_owned(),
+            "/project/shaders".to_owned(),
+        ]
+    );
     fs.mark_dropping(pinned).unwrap();
     assert_eq!(fs.snapshots().unwrap()[0].state, SnapshotState::Dropping);
-    assert_eq!(fs.read_snapshot_file(pinned, "/assets/shaders/pbr.hlsl").unwrap(), shader);
+    assert_eq!(
+        fs.read_snapshot_file(pinned, "/assets/shaders/pbr.hlsl")
+            .unwrap(),
+        shader
+    );
 }
 
 #[test]
@@ -65,7 +92,8 @@ fn multiple_file_updates_do_not_collapse_independent_extent_roots() {
     let b_id = fs.stat("/data/b").unwrap().0;
     let snap = fs.manifest().generation;
     fs.pin_current().unwrap();
-    fs.write_at("/data/a", BLOCK_SIZE as u64 + 103, &[0x55; 83]).unwrap();
+    fs.write_at("/data/a", BLOCK_SIZE as u64 + 103, &[0x55; 83])
+        .unwrap();
     fs.truncate("/data/b", 2 * BLOCK_SIZE as u64 + 17).unwrap();
     assert_eq!(fs.read_snapshot_file(snap, "/data/a").unwrap(), first);
     assert_eq!(fs.read_snapshot_file(snap, "/data/b").unwrap(), second);
@@ -101,10 +129,13 @@ fn sparse_and_randomized_byte_operations_match_reference_files() {
             let pos = (seed >> 17) as usize % (8 * BLOCK_SIZE);
             let len = ((seed >> 7) as usize % 350) + 1;
             let bytes: Vec<u8> = (0..len)
-                .map(|n| (n as u8).wrapping_add(step as u8)).collect();
+                .map(|n| (n as u8).wrapping_add(step as u8))
+                .collect();
             fs.write_at(&path, pos as u64, &bytes).unwrap();
             let model = source.get_mut(&path).unwrap();
-            if model.len() < pos + len { model.resize(pos + len, 0); }
+            if model.len() < pos + len {
+                model.resize(pos + len, 0);
+            }
             model[pos..pos + len].copy_from_slice(&bytes);
         }
         if step % 13 == 0 {
@@ -131,9 +162,7 @@ fn namespace_builder_creates_and_validates_multilevel_tree() {
         );
     }
     let reservations: Vec<u64> = (0..40).map(|n| 3999 - n).collect();
-    let staged = stage_namespace_tree(
-        &entries, &reservations, VID, 2, 204, 4000, 4000,
-    ).unwrap();
+    let staged = stage_namespace_tree(&entries, &reservations, VID, 2, 204, 4000, 4000).unwrap();
     assert!(staged.root.level > 0);
     let root = staged.root;
     for (address, bytes) in staged.pages {
@@ -157,10 +186,19 @@ fn invalid_moves_do_not_publish_or_change_live_paths() {
     fs.mkdir("/a/child").unwrap();
     fs.write_at("/a/child/file", 0, b"data").unwrap();
     let generation = fs.manifest().generation;
-    assert!(matches!(fs.rename("/a", "/a/child/nested"), Err(Error::InvalidPath)));
+    assert!(matches!(
+        fs.rename("/a", "/a/child/nested"),
+        Err(Error::InvalidPath)
+    ));
     assert!(matches!(fs.rename("/a", "/b"), Err(Error::AlreadyExists)));
-    assert!(matches!(fs.rename("/a", "/missing/place"), Err(Error::NotFound)));
-    assert!(matches!(fs.write_at("/a/child", 0, b"x"), Err(Error::IsDirectory)));
+    assert!(matches!(
+        fs.rename("/a", "/missing/place"),
+        Err(Error::NotFound)
+    ));
+    assert!(matches!(
+        fs.write_at("/a/child", 0, b"x"),
+        Err(Error::IsDirectory)
+    ));
     assert!(matches!(fs.remove_file("/a"), Err(Error::IsDirectory)));
     assert_eq!(fs.manifest().generation, generation);
     assert_eq!(fs.read_file("/a/child/file").unwrap(), b"data");
@@ -175,7 +213,11 @@ fn interrupted_publication_cannot_mix_directory_and_data_versions() {
             fs.write_at("/test/file", 0, b"old").unwrap();
             let before = fs.manifest().generation;
             let mut disk = fs.into_device().power_loss();
-            disk.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
+            disk.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            })
+            .unwrap();
             fs = UnifiedV10::open(disk).unwrap();
             assert!(matches!(
                 fs.write_at("/test/file", 0, b"new"),
@@ -240,6 +282,8 @@ fn v9_and_v10_agree_on_ordinary_namespace_and_inode_semantics() {
         assert_eq!(old.read_file(path).unwrap(), new.read_file(path).unwrap());
         assert_eq!(old.stat(path).unwrap().inode, new.stat(path).unwrap().0);
     }
-    assert_eq!(old.read_snapshot_file(old_snap, "/assets/a").unwrap(),
-               new.read_snapshot_file(new_snap, "/assets/a").unwrap());
+    assert_eq!(
+        old.read_snapshot_file(old_snap, "/assets/a").unwrap(),
+        new.read_snapshot_file(new_snap, "/assets/a").unwrap()
+    );
 }
