@@ -27,7 +27,7 @@ use super::{
 };
 use crate::fs::Catalog;
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
-use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
+use crate::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Result, Volume};
 use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -591,6 +591,15 @@ enum Edit<'a> {
     Reclaim,
 }
 
+// Memory-only certificate: the audited current graph and fallback-only
+// projection are stable inside an exclusive CrashDevice handle. Never copy
+// this lease across reopen, a power cut or an independently writable device.
+struct InHandleCertificate {
+    manifest: Manifest,
+    verified: Verified,
+    ownership: TwoRootOwners,
+}
+
 /// One coherent v10 namespace/data/checksum writer for multiple files.
 /// It is single-writer, bounded (4KiB metadata pages; 256KiB per file),
 /// and virgin-only. No mount, hard links or incremental retirement yet.
@@ -598,6 +607,7 @@ pub struct UnifiedV10<D: BlockDevice> {
     volume: Volume<D>,
     manifest: Manifest,
     last_reused_blocks: usize,
+    in_handle_certificate: Option<InHandleCertificate>,
 }
 impl<D: BlockDevice> UnifiedV10<D> {
     pub fn format(device: D, id: u128) -> Result<Self> {
@@ -680,6 +690,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             volume,
             manifest,
             last_reused_blocks: 0,
+            in_handle_certificate: None,
         })
     }
     pub fn manifest(&self) -> &Manifest {
@@ -940,7 +951,25 @@ impl<D: BlockDevice> UnifiedV10<D> {
         self.commit(Edit::Reclaim)
     }
     fn commit(&mut self, edit: Edit<'_>) -> Result<u64> {
-        let (old, checked, owned) = audit(&mut self.volume)?;
+        // Default storage mode re-audits both F0 roots. The test-only
+        // exclusive CrashDevice lease retains an already-audited graph and
+        // is advanced only after full validation of the staged candidate.
+        let full_audit = if self.in_handle_certificate.is_some() {
+            None
+        } else {
+            Some(audit(&mut self.volume)?)
+        };
+        let cached_owners: BTreeSet<u64>;
+        let (old, checked, owned) = if let Some((manifest, verified, owners)) = &full_audit {
+            (*manifest, verified, owners)
+        } else {
+            let cached = self
+                .in_handle_certificate
+                .as_ref()
+                .ok_or(Error::CorruptTree)?;
+            cached_owners = cached.ownership.protected();
+            (cached.manifest, &cached.verified, &cached_owners)
+        };
         if old != self.manifest {
             return Err(Error::CorruptTree);
         }
@@ -1417,6 +1446,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             }
             Ok(checked)
         })?;
+        let mut next_certificate = None;
         if indexed {
             // A proof model of the eventual Accounted allocation authority.
             // Old head + old fallback were already independently audited;
@@ -1424,8 +1454,14 @@ impl<D: BlockDevice> UnifiedV10<D> {
             // Rotate their certified ownership sets and compare against the
             // full-graph oracle BEFORE F0 can publish a new Free root.
             let owner_graph = OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
-            let shadow =
-                TwoRootOwners::from_audit(owner_graph, &owned, checked.retired_global.clone())?;
+            let temporary_shadow;
+            let shadow = if let Some(cached) = &self.in_handle_certificate {
+                &cached.ownership
+            } else {
+                temporary_shadow =
+                    TwoRootOwners::from_audit(owner_graph, owned, checked.retired_global.clone())?;
+                &temporary_shadow
+            };
             let candidate_graph = OwnerGraph::new(
                 candidate_checked.owned.clone(),
                 candidate_checked.global_pages.clone(),
@@ -1454,6 +1490,22 @@ impl<D: BlockDevice> UnifiedV10<D> {
             {
                 return Err(Error::CorruptTree);
             }
+            if self.in_handle_certificate.is_some() {
+                // The previous head becomes the new F0 fallback; pages in
+                // the old fallback-only set have just retired. Preserve the
+                // new checked head, never the unverified pre-commit overlay.
+                let mut verified = candidate_checked;
+                verified.retired_global = checked
+                    .global_pages
+                    .difference(&verified.owned)
+                    .copied()
+                    .collect();
+                next_certificate = Some(InHandleCertificate {
+                    manifest: next,
+                    verified,
+                    ownership: transition.next,
+                });
+            }
         }
         // Record actual overwrites of nonzero, independently unowned pages.
         // Do this only after the entire candidate graph has passed verification.
@@ -1469,6 +1521,34 @@ impl<D: BlockDevice> UnifiedV10<D> {
         self.volume.commit_root_with_blocks(&staged, &payload)?;
         self.last_reused_blocks = reused;
         self.manifest = next;
+        self.in_handle_certificate = next_certificate;
         Ok(generation)
+    }
+}
+
+impl UnifiedV10<CrashDevice> {
+    /// Experimental fast allocation certification on an exclusive, private
+    /// deterministic memory-backed device only. CrashDevice cannot be
+    /// mutated externally while held by this writer. Every successful staged
+    /// candidate is still verified in full; this bypasses just the repeated
+    /// traversal of the two *old* F0 graphs. FileDevice and ordinary opens
+    /// remain on the strict full-audit path.
+    pub fn enable_in_handle_allocation_certificate(&mut self) -> Result<()> {
+        if self.manifest.metadata_reserve != INDEX_ARENA_BLOCKS {
+            return Err(Error::CorruptTree);
+        }
+        let (manifest, verified, owners) = audit(&mut self.volume)?;
+        if manifest != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let graph = OwnerGraph::new(verified.owned.clone(), verified.global_pages.clone())?;
+        let ownership =
+            TwoRootOwners::from_audit(graph, &owners, verified.retired_global.clone())?;
+        self.in_handle_certificate = Some(InHandleCertificate {
+            manifest,
+            verified,
+            ownership,
+        });
+        Ok(())
     }
 }
