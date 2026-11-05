@@ -300,7 +300,7 @@ impl<D: BlockDevice> HeaderlessDataWriter<D> {
         let mut next = old;
         next.generation = next_gen;
         if let Edit::Write(data) = edit {
-            if candidates.len() < 1 { return Err(Error::NoSpace); }
+            if candidates.is_empty() { return Err(Error::NoSpace); }
             let mut items = Vec::new();
             let mut new_data = None;
             if !data.is_empty() {
