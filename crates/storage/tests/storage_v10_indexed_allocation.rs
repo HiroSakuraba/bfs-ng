@@ -52,17 +52,29 @@ fn indexed_repeated_writes_preserve_snapshots_and_reopen_cursor() {
         assert_eq!(fs.read_file("/dve/material").unwrap(), prior);
         if i % 12 == 0 {
             fs = reopen(fs);
-            assert_eq!(fs.read_snapshot_file(snap, "/dve/material").unwrap(), b"original");
+            assert_eq!(
+                fs.read_snapshot_file(snap, "/dve/material").unwrap(),
+                b"original"
+            );
         }
         recycled += fs.last_reused_blocks();
     }
-    assert!(recycled > 0, "expected indexed reuse of old data or namespace pages");
-    assert_eq!(fs.read_snapshot_file(snap, "/dve/material").unwrap(), b"original");
+    assert!(
+        recycled > 0,
+        "expected indexed reuse of old data or namespace pages"
+    );
+    assert_eq!(
+        fs.read_snapshot_file(snap, "/dve/material").unwrap(),
+        b"original"
+    );
     fs.mark_dropping(snap).unwrap();
     assert_eq!(fs.snapshots().unwrap()[0].state, SnapshotState::Dropping);
     fs.reclaim_step().unwrap();
     fs = reopen(fs);
-    assert_eq!(fs.read_snapshot_file(snap, "/dve/material").unwrap(), b"original");
+    assert_eq!(
+        fs.read_snapshot_file(snap, "/dve/material").unwrap(),
+        b"original"
+    );
 }
 
 #[test]
@@ -91,7 +103,10 @@ fn indexed_reclaim_persists_pending_counts_across_f0_rotation() {
         assert_eq!(fs.read_file("/test/f").unwrap(), data);
     }
     assert!(observed_pending, "expected delayed retirement entries");
-    assert!(observed_free_growth, "expected retirement return to free space");
+    assert!(
+        observed_free_growth,
+        "expected retirement return to free space"
+    );
 }
 
 #[test]
@@ -115,12 +130,18 @@ fn failure_before_f0_publication_never_exposes_mixed_free_and_data_roots() {
             fs.mkdir("/assets").unwrap();
             fs.write_at("/assets/file", 0, b"old").unwrap();
             for i in 0..9 {
-                fs.write_at("/assets/file", 0, format!("v-{i:02}").as_bytes()).unwrap();
+                fs.write_at("/assets/file", 0, format!("v-{i:02}").as_bytes())
+                    .unwrap();
             }
             let previous = fs.read_file("/assets/file").unwrap();
             let selected = fs.manifest().generation;
             let mut device = fs.into_device().power_loss();
-            device.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes: Some(torn_bytes),
+                })
+                .unwrap();
             let mut interrupted = UnifiedV10::open(device).unwrap();
             assert!(matches!(
                 interrupted.write_at("/assets/file", 0, b"next"),
