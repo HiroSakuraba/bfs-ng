@@ -10,15 +10,15 @@
 //! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
-use super::{
-    BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
-    Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter,
-    read_checksum_tree, read_namespace_tree, read_page, read_snapshot_tree, read_verified_block,
-    validate_namespace, validate_namespace_path,
-};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
+use super::{
+    BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
+    Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, read_checksum_tree,
+    read_namespace_tree, read_page, read_snapshot_tree, read_verified_block, validate_namespace,
+    validate_namespace_path,
+};
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::{BTreeMap, BTreeSet};
@@ -315,7 +315,11 @@ impl<D: BlockDevice> UnifiedV10<D> {
     pub fn open(device: D) -> Result<Self> {
         let mut volume = Volume::open(device)?;
         let (manifest, _, _) = audit(&mut volume)?;
-        Ok(Self { volume, manifest, last_reused_blocks: 0 })
+        Ok(Self {
+            volume,
+            manifest,
+            last_reused_blocks: 0,
+        })
     }
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
