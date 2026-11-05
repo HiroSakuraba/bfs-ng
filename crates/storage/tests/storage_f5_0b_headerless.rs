@@ -1,6 +1,5 @@
 use bfs_ng_storage::experimental_v10::{
-    HeaderlessDataWriter, ReadOnlyV10, SnapshotState,
-    read_checksum_tree, stage_checksum_tree,
+    HeaderlessDataWriter, ReadOnlyV10, SnapshotState, read_checksum_tree, stage_checksum_tree,
 };
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault};
 use std::collections::BTreeMap;
@@ -42,12 +41,24 @@ fn unpinned_overwrite_drops_obsolete_checksum_only_from_current_manifest() {
     writer.write_current(b"old").unwrap();
     let previous = writer.manifest().roots.checksum.unwrap();
     writer.write_current(b"new").unwrap();
-    assert_ne!(writer.manifest().roots.checksum.unwrap().address, previous.address);
+    assert_ne!(
+        writer.manifest().roots.checksum.unwrap().address,
+        previous.address
+    );
     // The *fallback* F0 manifest still has its own historical csum root,
     // even though the selected newest manifest no longer lists old data.
     assert_eq!(writer.read_current().unwrap(), b"new");
-    assert!(matches!(writer.read_snapshot(2), Err(Error::InvalidSnapshot)));
-    assert_eq!(HeaderlessDataWriter::open(writer.into_device().power_loss()).unwrap().read_current().unwrap(), b"new");
+    assert!(matches!(
+        writer.read_snapshot(2),
+        Err(Error::InvalidSnapshot)
+    ));
+    assert_eq!(
+        HeaderlessDataWriter::open(writer.into_device().power_loss())
+            .unwrap()
+            .read_current()
+            .unwrap(),
+        b"new"
+    );
 }
 
 #[test]
@@ -57,7 +68,10 @@ fn headerless_data_covers_exactly_four_kib_and_rejects_too_large_writes() {
     writer.write_current(&full).unwrap();
     assert_eq!(writer.read_current().unwrap(), full);
     let old_g = writer.manifest().generation;
-    assert!(matches!(writer.write_current(&[1; BLOCK_SIZE + 1]), Err(Error::TooLarge)));
+    assert!(matches!(
+        writer.write_current(&[1; BLOCK_SIZE + 1]),
+        Err(Error::TooLarge)
+    ));
     assert_eq!(writer.manifest().generation, old_g);
     writer.write_current(b"tiny").unwrap();
     assert_eq!(writer.read_current().unwrap(), b"tiny");
@@ -113,7 +127,13 @@ fn nonzero_orphan_is_skipped_never_used_for_file_data_or_metadata() {
     let mut check = [0; BLOCK_SIZE];
     device.read_block(water - 1, &mut check).unwrap();
     assert_eq!(check, orphan);
-    assert_eq!(HeaderlessDataWriter::open(device.power_loss()).unwrap().read_current().unwrap(), b"live data");
+    assert_eq!(
+        HeaderlessDataWriter::open(device.power_loss())
+            .unwrap()
+            .read_current()
+            .unwrap(),
+        b"live data"
+    );
 }
 
 #[test]
@@ -123,7 +143,11 @@ fn crashes_never_publish_mixed_fs_data_checksum_versions() {
             let mut writer = HeaderlessDataWriter::format(CrashDevice::new(128), VID).unwrap();
             writer.write_current(b"old value").unwrap();
             let mut disk = writer.into_device().power_loss();
-            disk.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
+            disk.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            })
+            .unwrap();
             let mut writer = HeaderlessDataWriter::open(disk).unwrap();
             assert!(matches!(
                 writer.write_current(b"new value"),
@@ -141,7 +165,11 @@ fn crashes_never_publish_mixed_fs_data_checksum_versions() {
                 let contents = recovered.read_current().unwrap();
                 assert_eq!(
                     contents,
-                    if generation == 2 { b"old value" } else { b"new value" }
+                    if generation == 2 {
+                        b"old value"
+                    } else {
+                        b"new value"
+                    }
                 );
             }
         }
