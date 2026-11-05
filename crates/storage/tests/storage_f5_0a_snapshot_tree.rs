@@ -40,11 +40,12 @@ fn manifest(generation: u64, high_water: u64, fs: BlockPointer, snaps: Option<Bl
     }
 }
 fn initial() -> (Volume<CrashDevice>, Manifest, BlockPointer) {
-    let mut disk = CrashDevice::new(BLOCKS as usize);
+    let formatted = Volume::format(CrashDevice::new(BLOCKS as usize), VID).unwrap();
+    let mut disk = formatted.into_device();
     let fs = fs_page(BLOCKS - 1);
     disk.write_block(fs.address, &fs.encode().unwrap()).unwrap();
     disk.sync().unwrap();
-    let mut volume = Volume::format(disk, VID).unwrap();
+    let mut volume = Volume::open(disk.power_loss()).unwrap();
     let m = manifest(1, BLOCKS - 1, fs.pointer().unwrap(), None);
     volume.commit_root(&m.encode(BLOCKS).unwrap()).unwrap();
     (volume, m, fs.pointer().unwrap())
