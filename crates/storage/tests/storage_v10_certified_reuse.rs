@@ -122,6 +122,10 @@ fn crash_cuts_during_recycled_writes_cannot_damage_f0_fallback_roots() {
             }
             let old_gen = fs.manifest().generation;
             let original = fs.read_file("/assets/material").unwrap();
+            // write_at replaces bytes but does not truncate an existing
+            // longer file. "step-24" + prefix "latest" becomes "latest4".
+            let mut overwritten = original.clone();
+            overwritten[..b"latest".len()].copy_from_slice(b"latest");
             let mut disk = fs.into_device().power_loss();
             disk.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
             let mut attempting = UnifiedV10::open(disk).unwrap();
@@ -136,7 +140,7 @@ fn crash_cuts_during_recycled_writes_cannot_damage_f0_fallback_roots() {
             if let Ok(mut checked) = UnifiedV10::open(reader.into_device()) {
                 assert_eq!(
                     checked.read_file("/assets/material").unwrap(),
-                    if observed == old_gen { original.as_slice() } else { b"latest" },
+                    if observed == old_gen { original.as_slice() } else { overwritten.as_slice() },
                 );
             }
         }
