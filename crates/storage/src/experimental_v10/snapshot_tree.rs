@@ -2,8 +2,8 @@
 //! Neither the scan nor the plan certifies allocation ownership or writes disk.
 //! Caller must separately prove reserved pages virgin and publish through F0.
 use super::{
-    BlockPointer, Item, MAX_LEVEL, PAGE_HEADER_BYTES, Page, SnapshotDescriptor,
-    SnapshotState, TreeId, decode_snapshot_leaf, read_page,
+    BlockPointer, Item, MAX_LEVEL, PAGE_HEADER_BYTES, Page, SnapshotDescriptor, SnapshotState,
+    TreeId, decode_snapshot_leaf, read_page,
 };
 use crate::volume::ROOT_PAYLOAD_LAST;
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result};
@@ -31,7 +31,11 @@ impl<D: BlockDevice> Walker<'_, D> {
             return Err(Error::CorruptTree);
         }
         let page = read_page(
-            self.device, pointer, TreeId::Snapshots, self.volume_id, self.generation,
+            self.device,
+            pointer,
+            TreeId::Snapshots,
+            self.volume_id,
+            self.generation,
         )?;
         if page.items.is_empty() {
             return if root && page.level == 0 {
@@ -88,10 +92,17 @@ pub fn read_snapshot_tree<D: BlockDevice>(
         return Err(Error::CorruptTree);
     }
     let Some(root) = root else {
-        return Ok(CatalogScan { descriptors: Vec::new(), pages_read: 0 });
+        return Ok(CatalogScan {
+            descriptors: Vec::new(),
+            pages_read: 0,
+        });
     };
     let mut walker = Walker {
-        device, volume_id, generation, seen: BTreeSet::new(), descriptors: Vec::new(),
+        device,
+        volume_id,
+        generation,
+        seen: BTreeSet::new(),
+        descriptors: Vec::new(),
     };
     walker.visit(root, true)?;
     Ok(CatalogScan {
@@ -163,13 +174,17 @@ impl<D: BlockDevice> Planner<'_, D> {
         }
         let used_bytes = |items: &[Item]| -> usize {
             PAGE_HEADER_BYTES
-                + items.iter().map(|x| 8 + x.key.len() + x.value.len()).sum::<usize>()
+                + items
+                    .iter()
+                    .map(|x| 8 + x.key.len() + x.value.len())
+                    .sum::<usize>()
         };
         if used_bytes(&items) <= BLOCK_SIZE {
             return Ok(vec![self.write_page(level, items)?]);
         }
         let pivot = items.len() / 2;
-        if pivot == 0 || pivot == items.len()
+        if pivot == 0
+            || pivot == items.len()
             || used_bytes(&items[..pivot]) > BLOCK_SIZE
             || used_bytes(&items[pivot..]) > BLOCK_SIZE
         {
@@ -185,7 +200,11 @@ impl<D: BlockDevice> Planner<'_, D> {
             return Err(Error::CorruptTree);
         }
         let page = read_page(
-            self.device, pointer, TreeId::Snapshots, self.volume_id, self.generation - 1,
+            self.device,
+            pointer,
+            TreeId::Snapshots,
+            self.volume_id,
+            self.generation - 1,
         )?;
         let key = edit.generation().to_be_bytes().to_vec();
         let mut items = page.items;
@@ -197,22 +216,30 @@ impl<D: BlockDevice> Planner<'_, D> {
                         return Err(Error::AlreadyExists);
                     }
                     let at = slot.err().ok_or(Error::CorruptTree)?;
-                    items.insert(at, Item {
-                        key,
-                        value: desc.encode(self.generation, self.device.block_count())?.to_vec(),
-                    });
+                    items.insert(
+                        at,
+                        Item {
+                            key,
+                            value: desc
+                                .encode(self.generation, self.device.block_count())?
+                                .to_vec(),
+                        },
+                    );
                 }
                 CatalogEdit::MarkDropping(_) => {
                     let at = slot.map_err(|_| Error::InvalidSnapshot)?;
                     let mut desc = SnapshotDescriptor::decode(
-                        &items[at].value, self.generation, self.device.block_count(),
+                        &items[at].value,
+                        self.generation,
+                        self.device.block_count(),
                     )?;
                     if desc.state != SnapshotState::Pinned {
                         return Err(Error::InvalidSnapshot);
                     }
                     desc.state = SnapshotState::Dropping;
-                    items[at].value =
-                        desc.encode(self.generation, self.device.block_count())?.to_vec();
+                    items[at].value = desc
+                        .encode(self.generation, self.device.block_count())?
+                        .to_vec();
                 }
             }
             return self.stage_items(0, items);
@@ -226,9 +253,13 @@ impl<D: BlockDevice> Planner<'_, D> {
         };
         let child = BlockPointer::decode_required(&items[at].value)?;
         let new_children = self.edit_page(child, edit)?;
-        items.splice(at..=at, new_children.into_iter().map(|child| Item {
-            key: child.max_key, value: child.pointer.encode().to_vec(),
-        }));
+        items.splice(
+            at..=at,
+            new_children.into_iter().map(|child| Item {
+                key: child.max_key,
+                value: child.pointer.encode().to_vec(),
+            }),
+        );
         self.stage_items(page.level, items)
     }
 }
@@ -246,11 +277,17 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
     high_water: u64,
     reserved_virgin_pages: &[u64],
 ) -> Result<StagedCatalog> {
-    if volume_id == 0 || new_generation <= 1
-        || high_water <= ROOT_PAYLOAD_LAST || high_water > device.block_count()
+    if volume_id == 0
+        || new_generation <= 1
+        || high_water <= ROOT_PAYLOAD_LAST
+        || high_water > device.block_count()
         || reserved_virgin_pages.is_empty()
-        || reserved_virgin_pages.iter().any(|&x| x <= ROOT_PAYLOAD_LAST || x >= high_water)
-        || reserved_virgin_pages.windows(2).any(|pair| pair[0] <= pair[1])
+        || reserved_virgin_pages
+            .iter()
+            .any(|&x| x <= ROOT_PAYLOAD_LAST || x >= high_water)
+        || reserved_virgin_pages
+            .windows(2)
+            .any(|pair| pair[0] <= pair[1])
     {
         return Err(Error::Geometry);
     }
@@ -261,8 +298,12 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
         desc.validate(new_generation - 1, device.block_count())?;
     }
     let mut planner = Planner {
-        device, volume_id, generation: new_generation,
-        reservations: reserved_virgin_pages, used: 0, staged: Vec::new(),
+        device,
+        volume_id,
+        generation: new_generation,
+        reservations: reserved_virgin_pages,
+        used: 0,
+        staged: Vec::new(),
     };
     let mut children = if let Some(root) = old_root {
         root.validate(planner.device.block_count(), new_generation - 1, high_water)?;
@@ -273,20 +314,26 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
         };
         let blocks = planner.device.block_count();
         let value = desc.encode(new_generation, blocks)?.to_vec();
-        planner.stage_items(0, vec![Item {
-            key: desc.generation.to_be_bytes().to_vec(),
-            value,
-        }])?
+        planner.stage_items(
+            0,
+            vec![Item {
+                key: desc.generation.to_be_bytes().to_vec(),
+                value,
+            }],
+        )?
     };
     let mut level = children[0].pointer.level;
     while children.len() > 1 {
         if level >= MAX_LEVEL {
             return Err(Error::TooLarge);
         }
-        let items = children.into_iter().map(|child| Item {
-            key: child.max_key,
-            value: child.pointer.encode().to_vec(),
-        }).collect();
+        let items = children
+            .into_iter()
+            .map(|child| Item {
+                key: child.max_key,
+                value: child.pointer.encode().to_vec(),
+            })
+            .collect();
         children = planner.stage_items(level + 1, items)?;
         level += 1;
     }
