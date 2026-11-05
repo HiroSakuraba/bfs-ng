@@ -40,7 +40,9 @@ impl Extent {
         out
     }
     fn decode(key: &[u8], bytes: &[u8], page_birth: u64, total: u64) -> Result<Self> {
-        if key.len() != 8 || key == LENGTH_KEY || bytes.len() != EXTENT_BYTES
+        if key.len() != 8
+            || key == LENGTH_KEY
+            || bytes.len() != EXTENT_BYTES
             || bytes[12..16] != [0; 4]
         {
             return Err(Error::CorruptTree);
@@ -51,12 +53,18 @@ impl Extent {
             blocks: u32::from_le_bytes(bytes[8..12].try_into().map_err(|_| Error::CorruptTree)?),
             birth: u64::from_le_bytes(bytes[16..24].try_into().map_err(|_| Error::CorruptTree)?),
         };
-        if e.logical >= MAX_FILE_BLOCKS || e.blocks == 0
+        if e.logical >= MAX_FILE_BLOCKS
+            || e.blocks == 0
             || e.blocks as u64 > MAX_FILE_BLOCKS
-            || e.logical.checked_add(u64::from(e.blocks)).is_none_or(|end| end > MAX_FILE_BLOCKS)
+            || e.logical
+                .checked_add(u64::from(e.blocks))
+                .is_none_or(|end| end > MAX_FILE_BLOCKS)
             || e.physical <= ROOT_PAYLOAD_LAST
-            || e.physical.checked_add(u64::from(e.blocks)).is_none_or(|end| end > total)
-            || e.birth == 0 || e.birth > page_birth
+            || e.physical
+                .checked_add(u64::from(e.blocks))
+                .is_none_or(|end| end > total)
+            || e.birth == 0
+            || e.birth > page_birth
         {
             return Err(Error::CorruptTree);
         }
@@ -89,9 +97,8 @@ impl FileExtents {
                     return Err(Error::CorruptTree);
                 }
                 found_size = true;
-                file.size = u64::from_le_bytes(
-                    item.value[..8].try_into().map_err(|_| Error::CorruptTree)?,
-                );
+                file.size =
+                    u64::from_le_bytes(item.value[..8].try_into().map_err(|_| Error::CorruptTree)?);
                 continue;
             }
             let e = Extent::decode(&item.key, &item.value, page.birth, total)?;
@@ -108,7 +115,16 @@ impl FileExtents {
             for i in 0..u64::from(e.blocks) {
                 let logical = e.logical + i;
                 let physical = e.physical + i;
-                if file.blocks.insert(logical, BlockRef { physical, birth: e.birth }).is_some()
+                if file
+                    .blocks
+                    .insert(
+                        logical,
+                        BlockRef {
+                            physical,
+                            birth: e.birth,
+                        },
+                    )
+                    .is_some()
                     || !physical_seen.insert(physical)
                 {
                     return Err(Error::CorruptTree);
@@ -130,7 +146,8 @@ impl FileExtents {
             if logical >= logical_limit
                 || reference.physical <= ROOT_PAYLOAD_LAST
                 || reference.physical >= total
-                || reference.birth == 0 || reference.birth > generation
+                || reference.birth == 0
+                || reference.birth > generation
                 || !physical_seen.insert(reference.physical)
             {
                 return Err(Error::CorruptTree);
@@ -147,7 +164,10 @@ impl FileExtents {
                 extents.push(*e);
             }
             previous = Some(Extent {
-                logical, physical: reference.physical, blocks: 1, birth: reference.birth,
+                logical,
+                physical: reference.physical,
+                blocks: 1,
+                birth: reference.birth,
             });
         }
         if let Some(e) = previous {
