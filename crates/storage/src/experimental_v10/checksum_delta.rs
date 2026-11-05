@@ -170,7 +170,7 @@ impl<D: BlockDevice> Planner<'_, D> {
 ///
 /// Reservations are only geometry-validated; the caller must independently
 /// prove virgin ownership, verify resulting tree, and publish through F0.
-pub fn stage_checksum_delta<D: BlockDevice>(
+fn stage_checksum_delta_with_mode<D: BlockDevice>(
     device: &mut D,
     old_root: Option<BlockPointer>,
     changes: &BTreeMap<u64, Option<u32>>,
@@ -178,6 +178,7 @@ pub fn stage_checksum_delta<D: BlockDevice>(
     volume_id: u128,
     new_generation: u64,
     high_water: u64,
+    audited_reuse: bool,
 ) -> Result<StagedChecksums> {
     if volume_id == 0
         || new_generation <= 1
@@ -185,7 +186,7 @@ pub fn stage_checksum_delta<D: BlockDevice>(
         || high_water > device.block_count()
         || reservations
             .iter()
-            .any(|&n| n <= ROOT_PAYLOAD_LAST || n >= high_water)
+            .any(|&n| n <= ROOT_PAYLOAD_LAST || n >= device.block_count() || (!audited_reuse && n >= high_water))
         || reservations.windows(2).any(|w| w[0] <= w[1])
         || changes
             .keys()
@@ -253,4 +254,37 @@ pub fn stage_checksum_delta<D: BlockDevice>(
         staged_pages: planner.staged,
         consumed_reservations: planner.used,
     })
+}
+
+/// Original virgin-only pure planner, unchanged for existing writers.
+pub fn stage_checksum_delta<D: BlockDevice>(
+    device: &mut D,
+    old_root: Option<BlockPointer>,
+    changes: &BTreeMap<u64, Option<u32>>,
+    reservations: &[u64],
+    volume_id: u128,
+    new_generation: u64,
+    high_water: u64,
+) -> Result<StagedChecksums> {
+    stage_checksum_delta_with_mode(
+        device, old_root, changes, reservations, volume_id,
+        new_generation, high_water, false,
+    )
+}
+
+/// For the integrated writer **only** after strict full two-root ownership
+/// reconstruction; no pure planner can certify free blocks by itself.
+pub(super) fn stage_checksum_delta_reusing<D: BlockDevice>(
+    device: &mut D,
+    old_root: Option<BlockPointer>,
+    changes: &BTreeMap<u64, Option<u32>>,
+    reservations: &[u64],
+    volume_id: u128,
+    new_generation: u64,
+    high_water: u64,
+) -> Result<StagedChecksums> {
+    stage_checksum_delta_with_mode(
+        device, old_root, changes, reservations, volume_id,
+        new_generation, high_water, true,
+    )
 }
