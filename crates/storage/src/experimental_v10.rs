@@ -261,8 +261,12 @@ impl Page {
             if key_len == 0
                 || key_at < slots_end
                 || val_at < slots_end
-                || key_at.checked_add(key_len).is_none_or(|end| end > BLOCK_SIZE)
-                || val_at.checked_add(val_len).is_none_or(|end| end > BLOCK_SIZE)
+                || key_at
+                    .checked_add(key_len)
+                    .is_none_or(|end| end > BLOCK_SIZE)
+                || val_at
+                    .checked_add(val_len)
+                    .is_none_or(|end| end > BLOCK_SIZE)
             {
                 return Err(bad());
             }
@@ -308,7 +312,14 @@ pub fn read_page<D: BlockDevice>(
     pointer.validate(device.block_count(), generation, ROOT_PAYLOAD_LAST + 1)?;
     let mut raw = [0; BLOCK_SIZE];
     device.read_block(pointer.address, &mut raw)?;
-    Page::decode_verified(&raw, pointer, tree, volume_id, device.block_count(), generation)
+    Page::decode_verified(
+        &raw,
+        pointer,
+        tree,
+        volume_id,
+        device.block_count(),
+        generation,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,11 +451,7 @@ impl Manifest {
         b[MANIFEST_CRC_AT..MANIFEST_CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
         Ok(b)
     }
-    pub fn decode(
-        bytes: &[u8],
-        root: RootInfo,
-        total_blocks: u64,
-    ) -> Result<Self> {
+    pub fn decode(bytes: &[u8], root: RootInfo, total_blocks: u64) -> Result<Self> {
         if bytes.len() != MANIFEST_BYTES
             || bytes[..8] != MANIFEST_MAGIC
             || get_u32(bytes, 8) != MANIFEST_VERSION
@@ -639,15 +646,17 @@ impl<D: BlockDevice> ReadOnlyV10<D> {
         self.volume.info()
     }
     pub fn read_root_page(&mut self, tree: TreeId) -> Result<Page> {
-        let pointer = self.manifest.roots.slots()
+        let pointer = self
+            .manifest
+            .roots
+            .slots()
             .iter()
             .find_map(|&(id, p)| (id == tree).then_some(p))
             .flatten()
             .ok_or(Error::NotFound)?;
         let info = self.volume.info();
-        self.volume.inspect(|device| read_page(
-            device, pointer, tree, info.volume_id, info.generation
-        ))
+        self.volume
+            .inspect(|device| read_page(device, pointer, tree, info.volume_id, info.generation))
     }
     /// Returns descriptors only when the catalog fits a checked leaf. This
     /// intentionally refuses a branch root rather than silently hiding pins.
