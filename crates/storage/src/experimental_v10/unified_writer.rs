@@ -40,6 +40,9 @@ struct Reachability {
     records: BTreeMap<String, NamespaceRecord>,
     snapshots: Vec<SnapshotDescriptor>,
     owned_metadata: BTreeSet<u64>,
+    // The snapshot catalog is global metadata; only the namespace,
+    // data and attribute roots it points at belong to snapshots.
+    catalog_pages: BTreeSet<u64>,
     data_births: BTreeMap<u64, u64>,
     tail_restrictions: BTreeMap<u64, Vec<usize>>,
     catalog: Option<Catalog>,
@@ -202,11 +205,13 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     if !all_ns_pages.is_disjoint(&snapshots.owned_pages) {
         return Err(Error::CorruptTree);
     }
+    let catalog_pages = snapshots.owned_pages.clone();
     all_ns_pages.extend(snapshots.owned_pages);
     Ok(Reachability {
         records: live_records,
         snapshots: snapshots.descriptors,
         owned_metadata: all_ns_pages,
+        catalog_pages,
         data_births,
         tail_restrictions: tails,
         catalog: live_catalog,
@@ -233,6 +238,7 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
     }
     let mut owned = reach.owned_metadata.clone();
     let mut global_pages = checksums.metadata_pages.clone();
+    global_pages.extend(reach.catalog_pages.iter().copied());
     owned.extend(checksums.metadata_pages);
     for physical in expected {
         if !owned.insert(physical) {
