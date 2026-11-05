@@ -1,9 +1,5 @@
-use bfs_ng_storage::experimental_v10::{
-    ReadOnlyV10, SnapshotState, VirginSnapshotWriter,
-};
-use bfs_ng_storage::{
-    BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, Volume,
-};
+use bfs_ng_storage::experimental_v10::{ReadOnlyV10, SnapshotState, VirginSnapshotWriter};
+use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, Volume};
 
 const VID: u128 = 0x541b_785a_63d1_04af;
 const BLOCKS: usize = 8192;
@@ -20,9 +16,7 @@ fn virgin_writer_pins_100_generations_across_multilevel_splits_and_f0_rotations(
         assert!(writer.manifest().high_water < old_watermark);
         old_watermark = writer.manifest().high_water;
         if expected_generation % 16 == 0 {
-            writer = VirginSnapshotWriter::open(
-                writer.into_device().power_loss(),
-            ).unwrap();
+            writer = VirginSnapshotWriter::open(writer.into_device().power_loss()).unwrap();
             let snapshots = writer.snapshots().unwrap();
             assert_eq!(snapshots.len(), expected_generation as usize - 1);
             assert!(snapshots.iter().all(|desc| desc.fs_root == immutable_fs));
@@ -46,7 +40,10 @@ fn dropping_state_is_durable_but_never_physically_reclaims_a_snapshot() {
     assert_eq!(pinned.len(), 1);
     assert_eq!(pinned[0].generation, 1);
     assert_eq!(pinned[0].state, SnapshotState::Dropping);
-    assert!(matches!(writer.mark_dropping(1), Err(Error::InvalidSnapshot)));
+    assert!(matches!(
+        writer.mark_dropping(1),
+        Err(Error::InvalidSnapshot)
+    ));
     assert_eq!(writer.manifest().generation, 3);
 }
 
@@ -109,9 +106,7 @@ fn genuine_out_of_space_does_not_publish_partial_snapshot_catalog() {
     assert_eq!(writer.manifest().generation, 4);
     assert!(matches!(writer.pin_current(), Err(Error::NoSpace)));
     assert_eq!(writer.manifest().generation, 4);
-    let mut reopened = VirginSnapshotWriter::open(
-        writer.into_device().power_loss(),
-    ).unwrap();
+    let mut reopened = VirginSnapshotWriter::open(writer.into_device().power_loss()).unwrap();
     assert_eq!(reopened.snapshots().unwrap().len(), 3);
     assert_eq!(reopened.manifest().generation, 4);
 }
@@ -128,7 +123,8 @@ fn error_during_staged_page_write_or_root_publish_is_not_a_partial_commit() {
             disk.inject(Fault {
                 operation,
                 torn_bytes: Some(torn_bytes),
-            }).unwrap();
+            })
+            .unwrap();
             let mut writer = VirginSnapshotWriter::open(disk).unwrap();
             let failed = writer.mark_dropping(1);
             assert!(matches!(failed, Err(Error::InjectedCrash)));
