@@ -574,7 +574,7 @@ The F0.R1 barrier order remains unchanged; **the source of allocation authority 
 
 **Not in F5, but unblocked by it:** group commit (several transactions per generation, with `fsync` meaning "wait for the next published generation"). This belongs in the mount milestone. It matters for throughput and for how fast generations are consumed.
 
-## 14. Decision log — revised safety decisions
+## 14. Decision log
 
 | Decision | Current v10 proposal | Rejected / deferred option | Reason |
 | --- | --- | --- | --- |
