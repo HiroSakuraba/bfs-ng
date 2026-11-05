@@ -25,7 +25,7 @@ fn unaligned_cross_block_overwrite_retains_unmodified_blocks_and_snapshot() {
     assert_eq!(writer.read_snapshot_at(snap_gen, 0, original.len()).unwrap(), original);
     // Snapshot drop mark retains both its historical FS root and checksums.
     writer.mark_dropping(snap_gen).unwrap();
-    assert_eq!(writer.snapshots()[0].state, SnapshotState::Dropping);
+    assert_eq!(writer.snapshots().unwrap()[0].state, SnapshotState::Dropping);
     assert_eq!(writer.read_snapshot_at(snap_gen, 0, original.len()).unwrap(), original);
 }
 
@@ -178,7 +178,7 @@ fn partial_write_torn_commits_have_only_old_or_new_full_file() {
 
 #[test]
 fn near_full_failure_does_not_publish_mutated_file() {
-    let mut writer = ExtentDataWriter::format(CrashDevice::new(12), VID).unwrap();
+    let mut writer = ExtentDataWriter::format(CrashDevice::new(9), VID).unwrap();
     writer.write_at(0, b"first").unwrap();
     let generation = writer.manifest().generation;
     assert!(matches!(writer.write_at(0, b"second"), Err(Error::NoSpace)));
