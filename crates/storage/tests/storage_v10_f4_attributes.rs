@@ -1,5 +1,5 @@
 use bfs_ng_storage::{
-    AttributeDef, AttributeType, CrashDevice, Error, Predicate, Schema, TextCase, Value,
+    AttributeDef, AttributeType, CrashDevice, Predicate, Schema, TextCase, Value,
 };
 use bfs_ng_storage::experimental_v10::{ReadOnlyV10, UnifiedV10};
 use std::collections::BTreeSet;
