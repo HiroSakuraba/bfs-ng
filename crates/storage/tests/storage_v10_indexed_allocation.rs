@@ -232,7 +232,6 @@ fn indexed_mode_keeps_inode_keyed_attributes_and_historical_postings() {
     );
 }
 
-
 #[test]
 fn indexed_retirement_cursor_and_counters_survive_power_loss_reopen() {
     let mut fs = fresh(320);
