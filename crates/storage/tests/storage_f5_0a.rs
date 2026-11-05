@@ -435,14 +435,14 @@ fn torn_f0_root_publication_of_v10_manifest_never_returns_mixed_generation() {
     }
 }
 
-fn make_superblock(gen: u64, payload_crc: u32) -> [u8; BLOCK_SIZE] {
+fn make_superblock(generation: u64, payload_crc: u32) -> [u8; BLOCK_SIZE] {
     let mut b = [0_u8; BLOCK_SIZE];
     b[..8].copy_from_slice(b"BFSNGF0\0");
     b[8..12].copy_from_slice(&2_u32.to_le_bytes());
     b[12..16].copy_from_slice(&(BLOCK_SIZE as u32).to_le_bytes());
     b[16..32].copy_from_slice(&VID.to_le_bytes());
-    b[32..40].copy_from_slice(&gen.to_le_bytes());
-    b[40..48].copy_from_slice(&(2 + (gen - 1) % 3).to_le_bytes());
+    b[32..40].copy_from_slice(&generation.to_le_bytes());
+    b[40..48].copy_from_slice(&(2 + (generation - 1) % 3).to_le_bytes());
     b[48..52].copy_from_slice(&payload_crc.to_le_bytes());
     b[56..64].copy_from_slice(&TOTAL.to_le_bytes());
     let crc = crc32c(&b[..120]);
@@ -468,11 +468,11 @@ fn v10_and_f0_continue_past_the_u32_generation_limit_with_test_only_seed() {
     let p_prev = fs_root(75, last_u32 - 1);
     let p_last = fs_root(74, last_u32);
     install_pages(&mut disk, &[p_prev.clone(), p_last.clone()]);
-    for (gen, p) in [(last_u32 - 1, p_prev), (last_u32, p_last)] {
-        let m = manifest(gen, p.address, roots(&p));
+    for (generation, p) in [(last_u32 - 1, p_prev), (last_u32, p_last)] {
+        let m = manifest(generation, p.address, roots(&p));
         let wrapped = make_payload(&m.encode(TOTAL).unwrap());
-        disk.write_block(2 + (gen - 1) % 3, &wrapped).unwrap();
-        disk.write_block(gen % 2, &make_superblock(gen, crc32c(&wrapped)))
+        disk.write_block(2 + (generation - 1) % 3, &wrapped).unwrap();
+        disk.write_block(generation % 2, &make_superblock(generation, crc32c(&wrapped)))
             .unwrap();
     }
     disk.sync().unwrap();
