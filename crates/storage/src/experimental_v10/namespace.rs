@@ -294,7 +294,7 @@ impl Builder<'_> {
 
 /// Pure, non-publishing bulk CoW builder. Safe allocation, fallback roots,
 /// and data/checksum ownership are responsibilities of the caller.
-pub fn stage_namespace_tree(
+fn stage_namespace_tree_with_mode(
     records: &BTreeMap<String, NamespaceRecord>,
     reservations: &[u64],
     volume_id: u128,
@@ -302,6 +302,7 @@ pub fn stage_namespace_tree(
     next_inode: u64,
     old_high_water: u64,
     total_blocks: u64,
+    audited_reuse: bool,
 ) -> Result<StagedNamespace> {
     validate_namespace(records, next_inode, generation, total_blocks)?;
     if volume_id == 0
@@ -309,7 +310,7 @@ pub fn stage_namespace_tree(
         || old_high_water <= ROOT_PAYLOAD_LAST
         || reservations
             .iter()
-            .any(|&block| block <= ROOT_PAYLOAD_LAST || block >= old_high_water)
+            .any(|&block| block <= ROOT_PAYLOAD_LAST || block >= total_blocks || (!audited_reuse && block >= old_high_water))
         || reservations.windows(2).any(|pair| pair[0] <= pair[1])
     {
         return Err(Error::Geometry);
@@ -348,4 +349,38 @@ pub fn stage_namespace_tree(
         used: builder.pages.len(),
         pages: builder.pages,
     })
+}
+
+/// Virgin-only public planner. Does not itself authorize physical reuse.
+pub fn stage_namespace_tree(
+    records: &BTreeMap<String, NamespaceRecord>,
+    reservations: &[u64],
+    volume_id: u128,
+    generation: u64,
+    next_inode: u64,
+    old_high_water: u64,
+    total_blocks: u64,
+) -> Result<StagedNamespace> {
+    stage_namespace_tree_with_mode(
+        records, reservations, volume_id, generation, next_inode,
+        old_high_water, total_blocks, false,
+    )
+}
+
+/// Internal audited-reuse staging. Only the full two-F0-graph verifier
+/// may supply these addresses, and the caller must independently prove
+/// each is absent from *all* recoverable current/fallback owners.
+pub(super) fn stage_namespace_tree_reusing(
+    records: &BTreeMap<String, NamespaceRecord>,
+    reservations: &[u64],
+    volume_id: u128,
+    generation: u64,
+    next_inode: u64,
+    old_high_water: u64,
+    total_blocks: u64,
+) -> Result<StagedNamespace> {
+    stage_namespace_tree_with_mode(
+        records, reservations, volume_id, generation, next_inode,
+        old_high_water, total_blocks, true,
+    )
 }
