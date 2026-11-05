@@ -147,6 +147,8 @@ Any future kernel integration must separately measure logical requests, physical
 
 These are **proposals**, not completed milestones or a claim of existing branches.
 
+**Path to a usable filesystem:** [ROADMAP_TO_MOUNTABLE.md](ROADMAP_TO_MOUNTABLE.md) orders the remaining work into phases R0–R7, each with a measurable exit gate. It runs from fast verified reads (R0) and fast commits (R1), through lifting size limits (R2), adding OS semantics and freezing the format (R3), Linux and Windows mounts (R4–R5), and durability qualification (R6), to `fsck`, repair and dogfooding (R7). The table below remains the F5 format backlog that R0–R3 draw on.
+
 The proposed [F5 data layer](F5_DATA_LAYER.md) (manifest v10, **not yet a working filesystem**) groups the remaining P0/P1 work into one public format break. PR #18 established the high-level direction; the subsequent **safety correction** explicitly makes snapshot descriptors include historical attribute/schema roots, separates snapshot-owned and global accounting pages, and requires immutable free-space epochs and independent ownership certification. **The F5.3 birth-time/dead-list sketch is not yet a proved allocator and must not silently replace F2.R4's full oracle.**
 
 | Priority | Next milestone | F5 | Proof and acceptance gate |
@@ -162,7 +164,7 @@ The proposed [F5 data layer](F5_DATA_LAYER.md) (manifest v10, **not yet a workin
 | P1 | **Incremental typed posting index** | F5.5 | Independent CoW rows/postings indexed under the same F0 generation; **snapshot descriptors retain the matching historical row/posting/schema roots** |
 | P1 | **Integrate C5 cache with storage** | — | Prove allocation-generation identity across reuse and snapshots; account for real resident bytes and benchmark against no-cache |
 | P2 | **Optional shared extents** | F5.6 | **Off by default**. Physical interval-splitting refcount oracle must prove all partial clones, overlapping extents, overwrites and snapshot drops; a flat start/length share table is inadequate |
-| P2 | **Mount and production hardening** | — | Specify OS mount semantics, writer exclusion, fsync/durability, migration, physical power-cut testing, authorization and repair policies |
+| P2 | **Mount and production hardening** | — | Specify OS mount semantics, writer exclusion, fsync/durability, migration, physical power-cut testing, authorization and repair policies. Planned in detail as roadmap phases R3–R7 ([roadmap](ROADMAP_TO_MOUNTABLE.md)) |
 
 **Non-goals at current maturity:** raw-disk use, production fault tolerance, repair of hostile checksummed data, cryptographic integrity, live multi-writer coordination, transparent in-place upgrades, or asserting hardware persistence from `CrashDevice` alone.
 
@@ -199,6 +201,7 @@ A clean test suite establishes the behavior of this **model and test-image proto
 
 ## 10. Primary project design references
 
+- [Roadmap to a mountable filesystem — phases R0–R7 with exit gates](ROADMAP_TO_MOUNTABLE.md)
 - [F5 progress review, 2026-11-05 — status, commit-I/O measurements and next gates](REVIEW_F5_PROGRESS_2026-11-05.md)
 - [F5.0a — experimental v10 wire codecs and authenticated reader](F5_0A_WIRE_FORMAT.md)
 - [F5.0a — strict snapshot-only virgin writer and two-root audit](F5_0A_VIRGIN_WRITER.md)
