@@ -217,3 +217,31 @@ fn indexed_mode_keeps_inode_keyed_attributes_and_historical_postings() {
     assert_eq!(fs.file_attributes("/resources/shader").unwrap()
         .get("kind"), Some(&Value::Text("material".into())));
 }
+
+
+#[test]
+fn indexed_retirement_cursor_and_counters_survive_power_loss_reopen() {
+    let mut fs = fresh(320);
+    fs.mkdir("/corpus").unwrap();
+    fs.write_at("/corpus/one", 0, b"initial").unwrap();
+    for i in 0..16_u64 {
+        fs.write_at("/corpus/one", 0, &i.to_le_bytes()).unwrap();
+    }
+    let before = *fs.manifest();
+    assert!(before.pending_blocks > 0);
+    assert!(before.sweep_snapshot > 0);
+    fs = reopen(fs);
+    assert_eq!(fs.manifest().sweep_snapshot, before.sweep_snapshot);
+    assert_eq!(fs.manifest().sweep_key, before.sweep_key);
+    assert_eq!(fs.manifest().free_blocks, before.free_blocks);
+    assert_eq!(fs.manifest().pending_blocks, before.pending_blocks);
+    let generation = fs.reclaim_step().unwrap();
+    let after = *fs.manifest();
+    assert_eq!(after.generation, generation);
+    fs = reopen(fs);
+    assert_eq!(fs.manifest().sweep_snapshot, after.sweep_snapshot);
+    assert_eq!(fs.manifest().sweep_key, after.sweep_key);
+    assert_eq!(fs.manifest().free_blocks, after.free_blocks);
+    assert_eq!(fs.manifest().pending_blocks, after.pending_blocks);
+    assert_eq!(fs.read_file("/corpus/one").unwrap(), 15_u64.to_le_bytes());
+}
