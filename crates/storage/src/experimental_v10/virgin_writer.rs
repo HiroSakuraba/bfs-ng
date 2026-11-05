@@ -6,9 +6,8 @@
 //! free-tree allocator, a general v10 filesystem, or support for arbitrary
 //! inode/file-data/checksum/attribute trees. Production allocation is absent.
 use super::{
-    CatalogEdit, Manifest, Page, SnapshotDescriptor, SnapshotState,
-    TreeId, TreeRoots, read_page, read_snapshot_tree, plan_snapshot_edit,
-    MAX_LEVEL,
+    CatalogEdit, MAX_LEVEL, Manifest, Page, SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
+    plan_snapshot_edit, read_page, read_snapshot_tree,
 };
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
@@ -44,15 +43,21 @@ fn check_profile<D: BlockDevice>(
         return Err(Error::CorruptTree);
     }
     let fs = read_page(
-        device, manifest.roots.fs, TreeId::Fs,
-        root.volume_id, root.generation,
+        device,
+        manifest.roots.fs,
+        TreeId::Fs,
+        root.volume_id,
+        root.generation,
     )?;
     if fs.level != 0 || !fs.items.is_empty() {
         return Err(Error::CorruptTree);
     }
     let mut owned = BTreeSet::from([manifest.roots.fs.address]);
     let catalog = read_snapshot_tree(
-        device, manifest.roots.snapshots, root.volume_id, root.generation,
+        device,
+        manifest.roots.snapshots,
+        root.volume_id,
+        root.generation,
     )?;
     owned.extend(catalog.owned_pages);
     // Snapshot descriptors are immutable references, even if Dropping.
@@ -97,9 +102,7 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, BTreeSet<u
         }
         all_owned.extend(owned);
         if let Some((older_generation, older_watermark)) = previous {
-            if root.generation != older_generation + 1
-                || manifest.high_water > older_watermark
-            {
+            if root.generation != older_generation + 1 || manifest.high_water > older_watermark {
                 return Err(Error::CorruptTree);
             }
         }
@@ -187,10 +190,7 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
             free_blocks: 0,
             pending_blocks: 0,
         };
-        volume.commit_root_with_blocks(
-            &[(fs.address, fs.encode()?)],
-            &manifest.encode(total)?,
-        )?;
+        volume.commit_root_with_blocks(&[(fs.address, fs.encode()?)], &manifest.encode(total)?)?;
         Ok(Self { volume, manifest })
     }
 
@@ -211,7 +211,10 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
         let volume_id = self.volume_id();
         self.volume.inspect(|device| {
             read_snapshot_tree(
-                device, current.roots.snapshots, volume_id, current.generation,
+                device,
+                current.roots.snapshots,
+                volume_id,
+                current.generation,
             )
             .map(|result| result.descriptors)
         })
@@ -229,12 +232,20 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
         if current != self.manifest {
             return Err(Error::CorruptTree);
         }
-        let next_generation = current.generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        let next_generation = current
+            .generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
         let volume_id = self.volume_id();
         let total = self.volume.block_count();
         let before = self.volume.inspect(|device| {
-            read_snapshot_tree(device, current.roots.snapshots, volume_id, current.generation)
-                .map(|scan| scan.descriptors)
+            read_snapshot_tree(
+                device,
+                current.roots.snapshots,
+                volume_id,
+                current.generation,
+            )
+            .map(|scan| scan.descriptors)
         })?;
         let mut expected = before.clone();
         match edit {
@@ -246,7 +257,9 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
                 expected.sort_by_key(|d| d.generation);
             }
             CatalogEdit::MarkDropping(generation) => {
-                let desc = expected.iter_mut().find(|d| d.generation == generation)
+                let desc = expected
+                    .iter_mut()
+                    .find(|d| d.generation == generation)
                     .ok_or(Error::InvalidSnapshot)?;
                 if desc.state != SnapshotState::Pinned {
                     return Err(Error::InvalidSnapshot);
@@ -264,7 +277,8 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
                 return Err(Error::CorruptTree);
             }
             let mut block = [0; BLOCK_SIZE];
-            self.volume.inspect(|device| device.read_block(cursor, &mut block))?;
+            self.volume
+                .inspect(|device| device.read_block(cursor, &mut block))?;
             if block.iter().all(|&b| b == 0) {
                 candidates.push(cursor);
             }
@@ -298,9 +312,8 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
                 device,
                 staged: staged.staged_pages.iter().copied().collect(),
             };
-            let scan = read_snapshot_tree(
-                &mut overlay, Some(staged.root), volume_id, next_generation,
-            )?;
+            let scan =
+                read_snapshot_tree(&mut overlay, Some(staged.root), volume_id, next_generation)?;
             if scan.descriptors != expected {
                 return Err(Error::CorruptTree);
             }
@@ -315,7 +328,8 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
             }
             Ok(())
         })?;
-        self.volume.commit_root_with_blocks(&staged.staged_pages, &payload)?;
+        self.volume
+            .commit_root_with_blocks(&staged.staged_pages, &payload)?;
         self.manifest = next;
         Ok(next_generation)
     }
