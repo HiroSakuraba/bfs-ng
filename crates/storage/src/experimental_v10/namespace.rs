@@ -294,6 +294,8 @@ impl Builder<'_> {
 
 /// Pure, non-publishing bulk CoW builder. Safe allocation, fallback roots,
 /// and data/checksum ownership are responsibilities of the caller.
+// Wire geometry, generation and the internal reuse gate are explicit here.
+#[allow(clippy::too_many_arguments)]
 fn stage_namespace_tree_with_mode(
     records: &BTreeMap<String, NamespaceRecord>,
     reservations: &[u64],
