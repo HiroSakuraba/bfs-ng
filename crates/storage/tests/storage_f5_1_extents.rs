@@ -44,11 +44,11 @@ fn sparse_holes_truncate_and_zero_tail_are_canonical() {
     let snap = writer.manifest().generation;
     writer.pin_current().unwrap();
     writer.truncate(3).unwrap();
-    assert_eq!(writer.read_current().unwrap(), b"hea");
+    assert_eq!(writer.read_current().unwrap(), [0, 0, b'h']);
     assert_eq!(writer.read_snapshot_at(snap, 0, expected.len()).unwrap(), expected);
     writer.truncate(2 * BLOCK_SIZE as u64 + 11).unwrap();
     let extended = writer.read_current().unwrap();
-    assert_eq!(&extended[..3], b"hea");
+    assert_eq!(&extended[..3], &[0, 0, b'h']);
     assert!(extended[3..].iter().all(|&b| b == 0));
     writer = ExtentDataWriter::open(writer.into_device().power_loss()).unwrap();
     assert_eq!(writer.read_current().unwrap(), extended);
