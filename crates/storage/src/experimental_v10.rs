@@ -11,8 +11,8 @@ use std::collections::BTreeSet;
 
 mod snapshot_tree;
 pub use snapshot_tree::{
-    CatalogEdit, CatalogScan, MAX_SNAPSHOT_DESCRIPTORS, MAX_SNAPSHOT_TREE_PAGES,
-    StagedCatalog, plan_snapshot_edit, read_snapshot_tree,
+    CatalogEdit, CatalogScan, MAX_SNAPSHOT_DESCRIPTORS, MAX_SNAPSHOT_TREE_PAGES, StagedCatalog,
+    plan_snapshot_edit, read_snapshot_tree,
 };
 
 pub const MANIFEST_MAGIC: [u8; 8] = *b"BFSNGM10";
