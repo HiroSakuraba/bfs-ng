@@ -478,5 +478,22 @@ pub fn retire_step(
         out_dead.remove(&key);
         released += u64::from(item.blocks);
     }
+    // Coalesce only contiguous runs with the *same absolute epoch*.
+    // Never merge different epochs into an earlier-ready range.
+    let mut runs: Vec<FreeRun> = Vec::new();
+    for run in out_free.values().copied() {
+        if let Some(last) = runs.last_mut() {
+            let adjoining = last.start + u64::from(last.blocks) == run.start;
+            let total = u64::from(last.blocks) + u64::from(run.blocks);
+            if adjoining && last.eligible_after == run.eligible_after
+                && total <= u64::from(u32::MAX)
+            {
+                last.blocks += run.blocks;
+                continue;
+            }
+        }
+        runs.push(run);
+    }
+    out_free = runs.into_iter().map(|run| (run.start, run)).collect();
     Ok(RetireStep { free: out_free, dead: out_dead, scanned, released })
 }
