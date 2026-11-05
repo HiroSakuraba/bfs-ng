@@ -9,7 +9,7 @@
 use super::{
     BlockRef, CatalogEdit, FileExtents, Manifest, Page, SnapshotDescriptor, SnapshotState,
     TreeId, VirginSnapshotWriter, MAX_FILE_BYTES, plan_snapshot_edit,
-    read_checksum_tree, read_page, read_snapshot_tree, read_verified_block, stage_checksum_tree,
+    read_checksum_tree, read_page, read_snapshot_tree, read_verified_block, stage_checksum_delta,
 };
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
@@ -408,9 +408,28 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                     .ok_or(Error::CorruptTree)?;
                 required.insert(reference.physical, *checksum);
             }
-            let cs = stage_checksum_tree(
-                &required, &candidates[used..], id, generation, old.high_water, total,
-            )?;
+            // Diff physical checksums against the independently verified
+            // current tree. Only changed leaf-to-root paths are copied;
+            // untouched checksum pages remain shared with the new root.
+            let mut delta = BTreeMap::new();
+            for (&physical, &crc) in &checked.checksums {
+                match required.get(&physical) {
+                    None => { delta.insert(physical, None); }
+                    Some(&new_crc) if new_crc != crc => return Err(Error::CorruptTree),
+                    _ => {}
+                }
+            }
+            for (&physical, &crc) in &required {
+                if !checked.checksums.contains_key(&physical) {
+                    delta.insert(physical, Some(crc));
+                }
+            }
+            let cs = self.volume.inspect(|device| {
+                stage_checksum_delta(
+                    device, old.roots.checksum, &delta, &candidates[used..],
+                    id, generation, old.high_water,
+                )
+            })?;
             used += cs.consumed_reservations;
             next.roots.checksum = cs.root;
             staged.extend(cs.staged_pages);
