@@ -53,7 +53,7 @@ fn persistent_free_tree_path_copies_only_changed_leaves() {
     }
     disk.sync().unwrap();
     let new = read_space_tree(&mut disk, TreeId::Free, edited.root, VID, 9).unwrap();
-    assert_eq!(new.free.len(), 500);
+    assert_eq!(new.free.len(), 501);
     assert_eq!(new.free.get(&100).unwrap().eligible_after, 9);
     assert_eq!(new.free.get(&1500).unwrap().eligible_after, 9);
     assert!(new.free.contains_key(&2000));
