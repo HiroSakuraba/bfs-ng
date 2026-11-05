@@ -16,6 +16,9 @@ pub const MAX_SNAPSHOT_DESCRIPTORS: usize = 131_072;
 pub struct CatalogScan {
     pub descriptors: Vec<SnapshotDescriptor>,
     pub pages_read: usize,
+    /// Every referenced snapshot-catalog metadata page, including branches.
+    /// This is *not* an entire filesystem reachability map.
+    pub owned_pages: BTreeSet<u64>,
 }
 
 struct Walker<'a, D: BlockDevice> {
@@ -95,6 +98,7 @@ pub fn read_snapshot_tree<D: BlockDevice>(
         return Ok(CatalogScan {
             descriptors: Vec::new(),
             pages_read: 0,
+            owned_pages: BTreeSet::new(),
         });
     };
     let mut walker = Walker {
@@ -108,6 +112,7 @@ pub fn read_snapshot_tree<D: BlockDevice>(
     Ok(CatalogScan {
         descriptors: walker.descriptors,
         pages_read: walker.seen.len(),
+        owned_pages: walker.seen,
     })
 }
 

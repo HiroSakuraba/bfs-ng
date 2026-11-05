@@ -32,7 +32,7 @@ This is the **current cross-cutting design and status document**. Format-specifi
 | F0.R1 staging correction | Never-published intermediate CoW namespace/reference pages returned to the certified ready pool before the journal is sealed | Separate from published-root retirement: these pages never require an F0 fallback rotation |
 | F3 namespace updater | Path-copy changed nodes; page splits; bounded localized sibling redistribution/merges on affected deletion paths; disk range scans with generation cursors | Transactions still clone/materialize a namespace map; no end-to-end logarithmic bound |
 | F4 durable searchable attributes | Private CoW catalog committed with the F3 root, typed stable-inode attributes and ordered secondary postings; historical snapshot queries | Catalog/postings are bounded and rewritten as a whole on changes; not an incremental on-disk posting tree |
-| F5.0a **isolated format foundation** | Canonical v10 manifest, authenticated pointers/pages/descriptors, read-only F0 root verification, **multilevel snapshot catalog validation**, a non-publishing CoW pin/drop-mark planner, and split/corruption/crash tests | **Not a v10 filesystem writer, allocator, persistent snapshot updater or multilevel snapshot reader**; v9 remains default; see [F5.0a contract](F5_0A_WIRE_FORMAT.md) |
+| F5.0a **isolated format foundation** | Canonical v10 codecs and multilevel catalog; a **restricted virgin-only metadata writer** can publish snapshot pins and retained dropping states through F0 after independent checks of both candidate roots and zero pages | **Not a general v10 filesystem, data/attribute writer, free-space allocator or snapshot recycler**; v9 remains default. See [wire codec](F5_0A_WIRE_FORMAT.md) and [restricted writer](F5_0A_VIRGIN_WRITER.md) |
 | Real-world cache workload suite | Deterministic AxiomZig, DVE asset/dependency and AxiomMegaDoc corpus/trace generators, recorded bounded reads and pinned smoke workflows | Model/record traces are **not** traces from a BFS-NG mount or proof of hardware performance |
 
 **Historical milestone docs are not current disk-format contracts.** F2.R1 introduced v5, F2.R2 v6, F2.R3 v7, F2.R4 v8, and F0.R1 advances the **current root manifest to v9**. The current free-run pages still use their checked `BFSFRJ8\0` encoding; current reference B+tree pages still use their v6 leaf/branch encodings. Do not infer page-format version from the manifest version.
@@ -145,7 +145,7 @@ The proposed [F5 data layer](F5_DATA_LAYER.md) (manifest v10, **not yet a workin
 
 | Priority | Next milestone | F5 | Proof and acceptance gate |
 | --- | --- | --- | --- |
-| P0 | **Finish v10 pointer/snapshot foundation** | F5.0a | Wire codecs, checked multilevel snapshot traversal, and page-local CoW snapshot pin/drop-mark staging now exist experimentally; remaining: independently certified v10 allocation, general atomic CoW writer and safe final snapshot retirement. Preserve full two-root reuse audit until deeper proof |
+| P0 | **Finish v10 pointer/snapshot foundation** | F5.0a | Wire codecs, checked multilevel snapshot traversal, and page-local CoW snapshot pin/drop-mark staging now exist experimentally; remaining: independently certified **reusable** v10 allocation, general data/attribute CoW writer and safe final snapshot retirement. A restricted zero-verified snapshot-catalog-only writer now demonstrates atomic F0 publication. Preserve full two-root reuse audit until deeper proof |
 | P0 | **Headerless data and checksum-tree safety** | F5.0b | 4 KiB data blocks with a global physically keyed checksum tree covering **all live and pinned historical data**; detect lost/misdirected writes on verified reads; lazy open is explicitly separate from verified free-space certification |
 | P0 | **Extent map, inline files and byte writes** | F5.1 | Per-inode extents with holes and preallocation, inline small files and `pwrite`/`truncate`/`punch_hole`/`fallocate`. Spill-before-publication orphans remain unavailable after crash until independently proved free |
 | P0 | **Localized durable free-space structure** | F5.2 | CoW extent tree with **absolute immutable eligibility epochs**, derived ready/pending views, deferred state and geometry-aware reserve. Prove a finite nonrecursive metadata-update arena, fail-closed virgin high-water claim and stable free-tree pages across 1,000 unrelated generations |
@@ -193,7 +193,8 @@ A clean test suite establishes the behavior of this **model and test-image proto
 
 ## 10. Primary project design references
 
-- [F5.0a — implemented experimental v10 wire codecs and read-only root verifier](F5_0A_WIRE_FORMAT.md)
+- [F5.0a — experimental v10 wire codecs and authenticated reader](F5_0A_WIRE_FORMAT.md)
+- [F5.0a — strict snapshot-only virgin writer and two-root audit](F5_0A_VIRGIN_WRITER.md)
 - [F5 — extent data layer, birth-time reclamation and inode namespace (proposed, v10)](F5_DATA_LAYER.md)
 - [F0.R1 — rotating root payload safety and v9 compatibility](F0_R1_ROTATING_ROOTS.md)
 - [F2.R2 — CoW reference B+tree and delayed-free fences](F2_R2_INCREMENTAL_REFERENCES.md)

@@ -1,6 +1,6 @@
 # F5.0a — experimental v10 codec and authenticated root-read foundation
 
-**Implementation status:** isolated format codecs and direct-root reader from PR #20; PR #21 adds authenticated multilevel snapshot traversal and a **non-publishing CoW staging planner**. **The default \`FileSystem\` remains v9**, F0 superblocks remain v2, and all actual v9 commits still use F2.R4's two-root certified allocator. This work **does not implement a v10 filesystem writer, generic namespace tree traversal, user file I/O, physical allocation certification, or durable snapshot-drop reclamation.** The new staging planner constructs pages but does not write or publish them. No production images or migration are supported.
+**Implementation status:** isolated format codecs and direct-root reader from PR #20; PR #21 adds authenticated multilevel snapshot traversal and a **non-publishing CoW staging planner**. **The default \`FileSystem\` remains v9**, F0 superblocks remain v2, and all actual v9 commits still use F2.R4's two-root certified allocator. PR #22 adds a **restricted experimental metadata-only `VirginSnapshotWriter`** that publishes pins/drop-marks through F0 after full two-root validation and zero-verified virgin page selection. This work still **does not implement a general v10 filesystem writer, nonempty namespace, user file I/O, reusable physical allocation, or durable snapshot-drop reclamation.** The pure staging planner remains non-publishing. No production images or migration are supported.
 
 Entry point: \`crates/storage/src/experimental_v10.rs\`. The public module name deliberately signals that these APIs are not a production filesystem.
 
@@ -94,7 +94,7 @@ The current prototype **reads multilevel snapshot catalogs**, verifies every par
 
 \`ReadOnlyV10::snapshot_descriptors()\` additionally traverses **all** bounded snapshot-catalog levels and reads each descriptor's historical root pages with its own parent checksum, generation and volume identity. A deep corruption detected during this later operation is a read error; it does **not** secretly roll the volume back.
 
-**Crucial:** nothing in \`experimental_v10\` returns a certified free-run set, changes a physical block, publishes a v10 transaction, or authorizes allocation. The pure \`plan_snapshot_edit\` function returns bytes for *caller-verified virgin reservations* without writing them; the caller must separately prove allocation safety and use correct F0 staged-page publication. A dropping pin is **retained**, never actually removed/freed. Lazy root validation must **never** be mistaken for F2.R4's full ownership scrub.
+**Crucial:** the pure \`plan_snapshot_edit\` function returns bytes for *caller-verified virgin reservations* without writing them. The separately implemented, strictly profiled `VirginSnapshotWriter` now performs that full two-root audit and publishes **only the snapshot-catalog metadata** through F0. It has no reusable free-run set, free-space index, or general v10 file operations. A dropping pin is **retained**, never actually removed/freed. Lazy root validation must **never** be mistaken for F2.R4's full ownership scrub.
 
 ## 3. Reproducible tests
 
@@ -121,6 +121,11 @@ The new `experimental_v10::read_snapshot_tree` reads the whole catalog, not only
 
 ## 4. Deliberately deferred work / next tranche
 
-This is the **F5.0a codec + direct-root validation tranche** only. Completing F5.0a still requires independently safe durable snapshot-catalog publication, generic CoW B+tree support beyond snapshots and fully specified startup/format gating, all retaining v9's conservative allocator until the later v10 safety proofs. F5.0b adds headerless data and a global checksum tree covering every live and pinned historical data block. F5.2/F5.3 add safe free-run accounting only after a separate adversarial ownership proof.
+This is the **F5.0a codec, multilevel snapshot and strict virgin-only metadata writer tranche**. Completing general-purpose v10 requires an independently certified general allocation system, generic CoW B+tree support beyond snapshots and fully specified startup/format gating, all retaining v9's conservative allocator until the later v10 safety proofs. F5.0b adds headerless data and a global checksum tree covering every live and pinned historical data block. F5.2/F5.3 add safe free-run accounting only after a separate adversarial ownership proof.
 
 References: [F5 design and safety corrections](F5_DATA_LAYER.md), [F0 root ring](F0_R1_ROTATING_ROOTS.md), [F2.R4 certified allocation](F2_R4_CERTIFIED_RECLAMATION.md), [architecture](ARCHITECTURE.md).
+
+
+## 5. PR #22: restricted, audited virgin-only metadata publication
+
+See [F5.0a strict writer contract](F5_0A_VIRGIN_WRITER.md). The profile deliberately accepts only an empty filesystem leaf and a checked multilevel snapshot catalog. Unlike the pure CoW planner, the separate writer can publish pins and dropping states, but only after checking **both** F0 candidate graphs and each selected page for zero contents, verifying a complete proposed tree against an independent read-only overlay, and using F0's ordered staged-block publication. Nonzero crash-orphan blocks are skipped permanently. It does **not** implement free-list reuse, files, attributes, or snapshot release.
