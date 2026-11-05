@@ -10,6 +10,7 @@
 //! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
+use super::allocation_certificate::{OwnerGraph, TwoRootOwners};
 use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
@@ -1378,7 +1379,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             old.high_water
         };
         let payload = next.encode(total)?;
-        self.volume.inspect(|device| {
+        let candidate_checked = self.volume.inspect(|device| {
             let mut overlay = Overlay {
                 disk: device,
                 staged: staged.iter().copied().collect(),
@@ -1414,8 +1415,48 @@ impl<D: BlockDevice> UnifiedV10<D> {
             if staged_addrs.len() != staged.len() || !staged_addrs.is_disjoint(&owned) {
                 return Err(Error::CorruptTree);
             }
-            Ok(())
+            Ok(checked)
         })?;
+        if indexed {
+            // A proof model of the eventual Accounted allocation authority.
+            // Old head + old fallback were already independently audited;
+            // the staged candidate was just fully verified in the overlay.
+            // Rotate their certified ownership sets and compare against the
+            // full-graph oracle BEFORE F0 can publish a new Free root.
+            let owner_graph =
+                OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
+            let shadow = TwoRootOwners::from_audit(
+                owner_graph,
+                &owned,
+                checked.retired_global.clone(),
+            )?;
+            let candidate_graph = OwnerGraph::new(
+                candidate_checked.owned.clone(),
+                candidate_checked.global_pages.clone(),
+            )?;
+            let staged_addrs: BTreeSet<u64> =
+                staged.iter().map(|(address, _)| *address).collect();
+            let transition = shadow.transition(
+                candidate_graph,
+                &staged_addrs,
+                &candidate_checked.free,
+                &candidate_checked.dead,
+                generation,
+                total,
+                INDEX_ARENA_END,
+            )?;
+            let expected: BTreeSet<u64> = checked
+                .owned
+                .union(&candidate_checked.owned)
+                .copied()
+                .collect();
+            if transition.next.protected() != expected
+                || !transition.allocated.is_subset(&staged_addrs)
+                || transition.retired.iter().any(|address| expected.contains(address))
+            {
+                return Err(Error::CorruptTree);
+            }
+        }
         // Record actual overwrites of nonzero, independently unowned pages.
         // Do this only after the entire candidate graph has passed verification.
         let reused = self.volume.inspect(|device| {
