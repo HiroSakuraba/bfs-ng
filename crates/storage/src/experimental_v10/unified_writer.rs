@@ -10,11 +10,10 @@
 //! F0 candidates before the next virgin-only allocation. No block recycling,
 //! F4 attribute index or hard links are enabled yet.
 use super::{
-    BlockPointer, BlockRef, FileExtents, Manifest, NamespaceRecord, Page, SnapshotDescriptor,
-    SnapshotState, TreeId, VirginSnapshotWriter, MAX_FILE_BYTES,
-    plan_snapshot_edit, read_checksum_tree, read_namespace_tree, read_page,
-    read_snapshot_tree, read_verified_block, stage_checksum_delta, stage_namespace_tree,
-    validate_namespace, validate_namespace_path, CatalogEdit,
+    BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
+    Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, plan_snapshot_edit,
+    read_checksum_tree, read_namespace_tree, read_page, read_snapshot_tree, read_verified_block,
+    stage_checksum_delta, stage_namespace_tree, validate_namespace, validate_namespace_path,
 };
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
@@ -29,15 +28,18 @@ struct Reachability {
     data_births: BTreeMap<u64, u64>,
     tail_restrictions: BTreeMap<u64, Vec<usize>>,
 }
-fn collect<D: BlockDevice>(
-    device: &mut D, id: u128, m: Manifest,
-) -> Result<Reachability> {
-    if m.roots.free.is_some() || m.roots.dead_list.is_some()
+fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reachability> {
+    if m.roots.free.is_some()
+        || m.roots.dead_list.is_some()
         || m.roots.attribute_rows.is_some()
         || m.roots.attribute_postings.is_some()
         || m.roots.schema.is_some()
-        || m.sweep_snapshot != 0 || m.sweep_key != 0 || m.metadata_reserve != 0
-        || m.used_blocks != 0 || m.free_blocks != 0 || m.pending_blocks != 0
+        || m.sweep_snapshot != 0
+        || m.sweep_key != 0
+        || m.metadata_reserve != 0
+        || m.used_blocks != 0
+        || m.free_blocks != 0
+        || m.pending_blocks != 0
     {
         return Err(Error::CorruptTree);
     }
@@ -49,7 +51,8 @@ fn collect<D: BlockDevice>(
     let current_root = m.roots.fs;
     all_ns_roots.insert(current_root.address, current_root);
     for desc in &snapshots.descriptors {
-        if desc.attribute_rows_root.is_some() || desc.attribute_postings_root.is_some()
+        if desc.attribute_rows_root.is_some()
+            || desc.attribute_postings_root.is_some()
             || desc.attribute_schema_root.is_some()
         {
             return Err(Error::CorruptTree);
@@ -62,9 +65,7 @@ fn collect<D: BlockDevice>(
     let mut data_births = BTreeMap::new();
     let mut tails: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for root in all_ns_roots.values() {
-        let scan = read_namespace_tree(
-            device, *root, id, m.generation, m.next_inode,
-        )?;
+        let scan = read_namespace_tree(device, *root, id, m.generation, m.next_inode)?;
         all_ns_pages.extend(scan.metadata_pages);
         if *root == current_root {
             records = Some(scan.records.clone());
@@ -94,10 +95,10 @@ fn collect<D: BlockDevice>(
                 Some(previous) if previous != reference.birth => return Err(Error::CorruptTree),
                 _ => {}
             }
-            if logical == file.size / BLOCK_SIZE as u64
-                && file.size % BLOCK_SIZE as u64 != 0
-            {
-                tails.entry(reference.physical).or_default()
+            if logical == file.size / BLOCK_SIZE as u64 && file.size % BLOCK_SIZE as u64 != 0 {
+                tails
+                    .entry(reference.physical)
+                    .or_default()
                     .push((file.size % BLOCK_SIZE as u64) as usize);
             }
         }
@@ -125,9 +126,7 @@ struct Verified {
 }
 fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result<Verified> {
     let reach = collect(device, root.volume_id, m)?;
-    let checksums = read_checksum_tree(
-        device, m.roots.checksum, root.volume_id, root.generation,
-    )?;
+    let checksums = read_checksum_tree(device, m.roots.checksum, root.volume_id, root.generation)?;
     if !reach.owned_metadata.is_disjoint(&checksums.metadata_pages) {
         return Err(Error::CorruptTree);
     }
@@ -153,18 +152,22 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
     if owned.iter().any(|&address| address < m.high_water) {
         return Err(Error::CorruptTree);
     }
-    Ok(Verified { reach, checksums: checksums.checksums, owned })
+    Ok(Verified {
+        reach,
+        checksums: checksums.checksums,
+        owned,
+    })
 }
-fn audit<D: BlockDevice>(
-    volume: &mut Volume<D>,
-) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
+fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
     let latest = volume.info();
     let mut selected = None;
     let mut owned = BTreeSet::new();
     let mut previous: Option<(u64, u64)> = None;
     for (root, payload) in volume.candidate_roots()? {
         if root.generation == 0 {
-            if payload.is_some() { return Err(Error::CorruptRoot); }
+            if payload.is_some() {
+                return Err(Error::CorruptRoot);
+            }
             continue;
         }
         let raw = payload.ok_or(Error::CorruptRoot)?;
@@ -189,22 +192,30 @@ struct Overlay<'a, D: BlockDevice> {
     staged: BTreeMap<u64, [u8; BLOCK_SIZE]>,
 }
 impl<D: BlockDevice> BlockDevice for Overlay<'_, D> {
-    fn block_count(&self) -> u64 { self.disk.block_count() }
+    fn block_count(&self) -> u64 {
+        self.disk.block_count()
+    }
     fn read_block(&mut self, n: u64, into: &mut [u8; BLOCK_SIZE]) -> Result<()> {
-        if let Some(bytes) = self.staged.get(&n) { *into = *bytes; Ok(()) }
-        else { self.disk.read_block(n, into) }
+        if let Some(bytes) = self.staged.get(&n) {
+            *into = *bytes;
+            Ok(())
+        } else {
+            self.disk.read_block(n, into)
+        }
     }
     fn write_block(&mut self, _n: u64, _bytes: &[u8; BLOCK_SIZE]) -> Result<()> {
         Err(Error::Poisoned)
     }
-    fn sync(&mut self) -> Result<()> { Err(Error::Poisoned) }
+    fn sync(&mut self) -> Result<()> {
+        Err(Error::Poisoned)
+    }
 }
-fn parent_is_directory(
-    records: &BTreeMap<String, NamespaceRecord>, path: &str,
-) -> Result<()> {
+fn parent_is_directory(records: &BTreeMap<String, NamespaceRecord>, path: &str) -> Result<()> {
     validate_namespace_path(path)?;
     let at = path.rfind('/').ok_or(Error::InvalidPath)?;
-    if at == 0 { return Ok(()); }
+    if at == 0 {
+        return Ok(());
+    }
     match records.get(&path[..at]) {
         Some(record) if record.directory => Ok(()),
         Some(_) => Err(Error::NotDirectory),
@@ -212,19 +223,26 @@ fn parent_is_directory(
     }
 }
 fn rename_records(
-    records: &mut BTreeMap<String, NamespaceRecord>, from: &str, to: &str,
+    records: &mut BTreeMap<String, NamespaceRecord>,
+    from: &str,
+    to: &str,
 ) -> Result<()> {
     validate_namespace_path(from)?;
     validate_namespace_path(to)?;
     let original = *records.get(from).ok_or(Error::NotFound)?;
-    if from == to { return Ok(()); }
-    if records.contains_key(to) { return Err(Error::AlreadyExists); }
+    if from == to {
+        return Ok(());
+    }
+    if records.contains_key(to) {
+        return Err(Error::AlreadyExists);
+    }
     if original.directory && to.starts_with(&format!("{from}/")) {
         return Err(Error::InvalidPath);
     }
     parent_is_directory(records, to)?;
     let prefix = format!("{from}/");
-    let moved = records.keys()
+    let moved = records
+        .keys()
         .filter(|key| key.as_str() == from || (original.directory && key.starts_with(&prefix)))
         .map(|key| {
             let next = format!("{to}{}", key.strip_prefix(from).ok_or(Error::CorruptTree)?);
@@ -247,9 +265,19 @@ fn rename_records(
 #[derive(Clone, Copy)]
 enum Edit<'a> {
     Mkdir(&'a str),
-    Write { path: &'a str, offset: u64, bytes: &'a [u8] },
-    Truncate { path: &'a str, size: u64 },
-    Rename { from: &'a str, to: &'a str },
+    Write {
+        path: &'a str,
+        offset: u64,
+        bytes: &'a [u8],
+    },
+    Truncate {
+        path: &'a str,
+        size: u64,
+    },
+    Rename {
+        from: &'a str,
+        to: &'a str,
+    },
     Unlink(&'a str),
     Pin,
     MarkDropping(u64),
@@ -272,60 +300,104 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let (manifest, _, _) = audit(&mut volume)?;
         Ok(Self { volume, manifest })
     }
-    pub fn manifest(&self) -> &Manifest { &self.manifest }
-    pub fn into_device(self) -> D { self.volume.into_device() }
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+    pub fn into_device(self) -> D {
+        self.volume.into_device()
+    }
     pub fn list_dir(&mut self, path: &str) -> Result<Vec<String>> {
         let (m, verified, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         if path != "/" {
             validate_namespace_path(path)?;
-            if !verified.reach.records.get(path).is_some_and(|r| r.directory) {
+            if !verified
+                .reach
+                .records
+                .get(path)
+                .is_some_and(|r| r.directory)
+            {
                 return Err(Error::NotDirectory);
             }
         }
-        let prefix = if path == "/" { "/".to_owned() } else { format!("{path}/") };
-        Ok(verified.reach.records.keys()
+        let prefix = if path == "/" {
+            "/".to_owned()
+        } else {
+            format!("{path}/")
+        };
+        Ok(verified
+            .reach
+            .records
+            .keys()
             .filter(|name| name.starts_with(&prefix))
             .filter(|name| !name[prefix.len()..].contains('/'))
-            .cloned().collect())
+            .cloned()
+            .collect())
     }
     pub fn stat(&mut self, path: &str) -> Result<(u64, bool, u64)> {
         validate_namespace_path(path)?;
         let (m, verified, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         let entry = *verified.reach.records.get(path).ok_or(Error::NotFound)?;
-        if entry.directory { return Ok((entry.inode, true, 0)); }
+        if entry.directory {
+            return Ok((entry.inode, true, 0));
+        }
         let id = self.volume.info().volume_id;
         let size = self.volume.inspect(|device| {
             if let Some(root) = entry.file_root {
                 let page = read_page(device, root, TreeId::Fs, id, m.generation)?;
                 Ok(FileExtents::decode(&page, device.block_count())?.size)
-            } else { Ok(0) }
+            } else {
+                Ok(0)
+            }
         })?;
         Ok((entry.inode, false, size))
     }
-    fn read(&mut self, path: &str, snapshot: Option<u64>, offset: u64, length: usize) -> Result<Vec<u8>> {
+    fn read(
+        &mut self,
+        path: &str,
+        snapshot: Option<u64>,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>> {
         validate_namespace_path(path)?;
         let (m, checked, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         let id = self.volume.info().volume_id;
         self.volume.inspect(|device| {
             let entry = if let Some(generation) = snapshot {
-                let desc = checked.reach.snapshots.iter()
+                let desc = checked
+                    .reach
+                    .snapshots
+                    .iter()
                     .find(|desc| desc.generation == generation)
                     .ok_or(Error::InvalidSnapshot)?;
-                read_namespace_tree(
-                    device, desc.fs_root, id, m.generation, m.next_inode,
-                )?.records.get(path).copied().ok_or(Error::NotFound)?
+                read_namespace_tree(device, desc.fs_root, id, m.generation, m.next_inode)?
+                    .records
+                    .get(path)
+                    .copied()
+                    .ok_or(Error::NotFound)?
             } else {
                 *checked.reach.records.get(path).ok_or(Error::NotFound)?
             };
-            if entry.directory { return Err(Error::IsDirectory); }
+            if entry.directory {
+                return Err(Error::IsDirectory);
+            }
             let file = if let Some(root) = entry.file_root {
                 let page = read_page(device, root, TreeId::Fs, id, m.generation)?;
                 FileExtents::decode(&page, device.block_count())?
-            } else { FileExtents::default() };
-            if offset >= file.size || length == 0 { return Ok(Vec::new()); }
+            } else {
+                FileExtents::default()
+            };
+            if offset >= file.size || length == 0 {
+                return Ok(Vec::new());
+            }
             let count = (file.size - offset).min(length as u64) as usize;
             let mut out = vec![0_u8; count];
             let mut copied = 0;
@@ -335,9 +407,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 let within = (pos % BLOCK_SIZE as u64) as usize;
                 let take = (BLOCK_SIZE - within).min(count - copied);
                 if let Some(reference) = file.blocks.get(&logical) {
-                    let bytes = read_verified_block(
-                        device, reference.physical, &checked.checksums,
-                    )?;
+                    let bytes =
+                        read_verified_block(device, reference.physical, &checked.checksums)?;
                     out[copied..copied + take].copy_from_slice(&bytes[within..within + take]);
                 }
                 copied += take;
@@ -362,13 +433,25 @@ impl<D: BlockDevice> UnifiedV10<D> {
         self.commit(Edit::Mkdir(path))
     }
     pub fn write_at(&mut self, path: &str, offset: u64, bytes: &[u8]) -> Result<u64> {
-        let end = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
-        if end > MAX_FILE_BYTES { return Err(Error::TooLarge); }
-        if bytes.is_empty() { return Ok(self.manifest.generation); }
-        self.commit(Edit::Write { path, offset, bytes })
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or(Error::TooLarge)?;
+        if end > MAX_FILE_BYTES {
+            return Err(Error::TooLarge);
+        }
+        if bytes.is_empty() {
+            return Ok(self.manifest.generation);
+        }
+        self.commit(Edit::Write {
+            path,
+            offset,
+            bytes,
+        })
     }
     pub fn truncate(&mut self, path: &str, size: u64) -> Result<u64> {
-        if size > MAX_FILE_BYTES { return Err(Error::TooLarge); }
+        if size > MAX_FILE_BYTES {
+            return Err(Error::TooLarge);
+        }
         self.commit(Edit::Truncate { path, size })
     }
     pub fn rename(&mut self, from: &str, to: &str) -> Result<u64> {
@@ -377,14 +460,21 @@ impl<D: BlockDevice> UnifiedV10<D> {
     pub fn remove_file(&mut self, path: &str) -> Result<u64> {
         self.commit(Edit::Unlink(path))
     }
-    pub fn pin_current(&mut self) -> Result<u64> { self.commit(Edit::Pin) }
+    pub fn pin_current(&mut self) -> Result<u64> {
+        self.commit(Edit::Pin)
+    }
     pub fn mark_dropping(&mut self, generation: u64) -> Result<u64> {
         self.commit(Edit::MarkDropping(generation))
     }
     fn commit(&mut self, edit: Edit<'_>) -> Result<u64> {
         let (old, checked, owned) = audit(&mut self.volume)?;
-        if old != self.manifest { return Err(Error::CorruptTree); }
-        let generation = old.generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        if old != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let generation = old
+            .generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
         let id = self.volume.info().volume_id;
         let total = self.volume.block_count();
         let mut records = checked.reach.records.clone();
@@ -398,16 +488,24 @@ impl<D: BlockDevice> UnifiedV10<D> {
         match edit {
             Edit::Mkdir(path) => {
                 parent_is_directory(&records, path)?;
-                if records.contains_key(path) { return Err(Error::AlreadyExists); }
+                if records.contains_key(path) {
+                    return Err(Error::AlreadyExists);
+                }
                 let inode = next.next_inode;
                 next.next_inode = inode.checked_add(1).ok_or(Error::GenerationOverflow)?;
                 records.insert(path.to_owned(), NamespaceRecord::directory(inode));
                 namespace_changed = true;
             }
-            Edit::Write { path, offset, bytes } => {
+            Edit::Write {
+                path,
+                offset,
+                bytes,
+            } => {
                 parent_is_directory(&records, path)?;
                 let entry = if let Some(entry) = records.get(path) {
-                    if entry.directory { return Err(Error::IsDirectory); }
+                    if entry.directory {
+                        return Err(Error::IsDirectory);
+                    }
                     *entry
                 } else {
                     let inode = next.next_inode;
@@ -418,7 +516,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
                     if let Some(root) = entry.file_root {
                         let page = read_page(device, root, TreeId::Fs, id, old.generation)?;
                         FileExtents::decode(&page, device.block_count())
-                    } else { Ok(FileExtents::default()) }
+                    } else {
+                        Ok(FileExtents::default())
+                    }
                 })?;
                 file.size = file.size.max(offset + bytes.len() as u64);
                 let mut copied = 0;
@@ -430,15 +530,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
                     if let std::collections::btree_map::Entry::Vacant(slot) = dirty.entry(logical) {
                         let prior = if let Some(reference) = file.blocks.get(&logical) {
                             self.volume.inspect(|device| {
-                                read_verified_block(
-                                    device, reference.physical, &checked.checksums,
-                                )
+                                read_verified_block(device, reference.physical, &checked.checksums)
                             })?
-                        } else { [0_u8; BLOCK_SIZE] };
+                        } else {
+                            [0_u8; BLOCK_SIZE]
+                        };
                         slot.insert(prior);
                     }
-                    dirty.get_mut(&logical).ok_or(Error::CorruptTree)?
-                        [within..within + count].copy_from_slice(&bytes[copied..copied + count]);
+                    dirty.get_mut(&logical).ok_or(Error::CorruptTree)?[within..within + count]
+                        .copy_from_slice(&bytes[copied..copied + count]);
                     copied += count;
                 }
                 records.insert(path.to_owned(), entry);
@@ -447,14 +547,20 @@ impl<D: BlockDevice> UnifiedV10<D> {
             }
             Edit::Truncate { path, size } => {
                 let entry = *records.get(path).ok_or(Error::NotFound)?;
-                if entry.directory { return Err(Error::IsDirectory); }
+                if entry.directory {
+                    return Err(Error::IsDirectory);
+                }
                 let mut file = self.volume.inspect(|device| {
                     if let Some(root) = entry.file_root {
                         let page = read_page(device, root, TreeId::Fs, id, old.generation)?;
                         FileExtents::decode(&page, device.block_count())
-                    } else { Ok(FileExtents::default()) }
+                    } else {
+                        Ok(FileExtents::default())
+                    }
                 })?;
-                if file.size == size { return Ok(old.generation); }
+                if file.size == size {
+                    return Ok(old.generation);
+                }
                 file.size = size;
                 let remaining = size.div_ceil(BLOCK_SIZE as u64);
                 file.blocks.retain(|&logical, _| logical < remaining);
@@ -462,9 +568,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                     let last = remaining - 1;
                     if let Some(reference) = file.blocks.get(&last) {
                         let mut data = self.volume.inspect(|device| {
-                            read_verified_block(
-                                device, reference.physical, &checked.checksums,
-                            )
+                            read_verified_block(device, reference.physical, &checked.checksums)
                         })?;
                         let tail = (size % BLOCK_SIZE as u64) as usize;
                         if data[tail..].iter().any(|&byte| byte != 0) {
@@ -479,7 +583,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
             Edit::Rename { from, to } => {
                 if from == to {
                     validate_namespace_path(from)?;
-                    if !records.contains_key(from) { return Err(Error::NotFound); }
+                    if !records.contains_key(from) {
+                        return Err(Error::NotFound);
+                    }
                     return Ok(old.generation);
                 }
                 rename_records(&mut records, from, to)?;
@@ -500,16 +606,21 @@ impl<D: BlockDevice> UnifiedV10<D> {
                     return Err(Error::AlreadyExists);
                 }
                 let desc = SnapshotDescriptor {
-                    generation: old.generation, fs_root: old.roots.fs,
-                    attribute_rows_root: None, attribute_postings_root: None,
-                    attribute_schema_root: None, state: SnapshotState::Pinned,
+                    generation: old.generation,
+                    fs_root: old.roots.fs,
+                    attribute_rows_root: None,
+                    attribute_postings_root: None,
+                    attribute_schema_root: None,
+                    state: SnapshotState::Pinned,
                 };
                 pins.push(desc);
                 pins.sort_by_key(|d| d.generation);
                 catalog_edit = Some(CatalogEdit::Pin(desc));
             }
             Edit::MarkDropping(snapshot) => {
-                let desc = pins.iter_mut().find(|d| d.generation == snapshot)
+                let desc = pins
+                    .iter_mut()
+                    .find(|d| d.generation == snapshot)
                     .ok_or(Error::InvalidSnapshot)?;
                 if desc.state != SnapshotState::Pinned {
                     return Err(Error::InvalidSnapshot);
@@ -524,9 +635,12 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let mut cursor = old.high_water;
         while cursor > ROOT_PAYLOAD_LAST + 1 && candidates.len() < STAGING_LIMIT {
             cursor -= 1;
-            if owned.contains(&cursor) { return Err(Error::CorruptTree); }
+            if owned.contains(&cursor) {
+                return Err(Error::CorruptTree);
+            }
             let mut bytes = [0; BLOCK_SIZE];
-            self.volume.inspect(|device| device.read_block(cursor, &mut bytes))?;
+            self.volume
+                .inspect(|device| device.read_block(cursor, &mut bytes))?;
             if bytes.iter().all(|&byte| byte == 0) {
                 candidates.push(cursor);
             }
@@ -538,7 +652,13 @@ impl<D: BlockDevice> UnifiedV10<D> {
             for (logical, bytes) in dirty.iter().rev() {
                 let physical = *candidates.get(used).ok_or(Error::NoSpace)?;
                 used += 1;
-                file.blocks.insert(*logical, BlockRef { physical, birth: generation });
+                file.blocks.insert(
+                    *logical,
+                    BlockRef {
+                        physical,
+                        birth: generation,
+                    },
+                );
                 staged.push((physical, *bytes));
                 added_crc.insert(physical, crc32c(bytes));
             }
@@ -548,8 +668,11 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 let address = *candidates.get(used).ok_or(Error::NoSpace)?;
                 used += 1;
                 let page = Page {
-                    tree: TreeId::Fs, level: 0, address,
-                    birth: generation, volume_id: id,
+                    tree: TreeId::Fs,
+                    level: 0,
+                    address,
+                    birth: generation,
+                    volume_id: id,
                     items: file.encode_items(generation, total)?,
                 };
                 let pointer = page.pointer()?;
@@ -561,8 +684,13 @@ impl<D: BlockDevice> UnifiedV10<D> {
         }
         if namespace_changed {
             let ns = stage_namespace_tree(
-                &records, &candidates[used..], id, generation,
-                next.next_inode, old.high_water, total,
+                &records,
+                &candidates[used..],
+                id,
+                generation,
+                next.next_inode,
+                old.high_water,
+                total,
             )?;
             used += ns.used;
             next.roots.fs = ns.root;
@@ -571,8 +699,13 @@ impl<D: BlockDevice> UnifiedV10<D> {
         if let Some(edit) = catalog_edit {
             let cat = self.volume.inspect(|device| {
                 plan_snapshot_edit(
-                    device, old.roots.snapshots, edit, id, generation,
-                    old.high_water, &candidates[used..],
+                    device,
+                    old.roots.snapshots,
+                    edit,
+                    id,
+                    generation,
+                    old.high_water,
+                    &candidates[used..],
                 )
             })?;
             used += cat.consumed_reservations;
@@ -583,13 +716,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
         // staged graph before constructing its new global checksum index.
         let required = self.volume.inspect(|device| {
             let mut overlay = Overlay {
-                disk: device, staged: staged.iter().copied().collect(),
+                disk: device,
+                staged: staged.iter().copied().collect(),
             };
             collect(&mut overlay, id, next).map(|graph| graph.data_births)
         })?;
         let mut expected_crc = BTreeMap::new();
         for physical in required.keys() {
-            let checksum = added_crc.get(physical)
+            let checksum = added_crc
+                .get(physical)
                 .or_else(|| checked.checksums.get(physical))
                 .ok_or(Error::CorruptTree)?;
             expected_crc.insert(*physical, *checksum);
@@ -597,7 +732,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let mut delta = BTreeMap::new();
         for (&physical, &crc) in &checked.checksums {
             match expected_crc.get(&physical) {
-                None => { delta.insert(physical, None); }
+                None => {
+                    delta.insert(physical, None);
+                }
                 Some(&new_crc) if new_crc != crc => return Err(Error::CorruptTree),
                 _ => {}
             }
@@ -610,23 +747,32 @@ impl<D: BlockDevice> UnifiedV10<D> {
         if !delta.is_empty() {
             let cs = self.volume.inspect(|device| {
                 stage_checksum_delta(
-                    device, old.roots.checksum, &delta, &candidates[used..],
-                    id, generation, old.high_water,
+                    device,
+                    old.roots.checksum,
+                    &delta,
+                    &candidates[used..],
+                    id,
+                    generation,
+                    old.high_water,
                 )
             })?;
             used += cs.consumed_reservations;
             next.roots.checksum = cs.root;
             staged.extend(cs.staged_pages);
         }
-        if used == 0 { return Err(Error::CorruptTree); }
+        if used == 0 {
+            return Err(Error::CorruptTree);
+        }
         next.high_water = candidates[used - 1];
         let payload = next.encode(total)?;
         self.volume.inspect(|device| {
             let mut overlay = Overlay {
-                disk: device, staged: staged.iter().copied().collect(),
+                disk: device,
+                staged: staged.iter().copied().collect(),
             };
             let root = RootInfo {
-                volume_id: id, generation,
+                volume_id: id,
+                generation,
                 root_block: Some(2 + (generation - 1) % 3),
             };
             let checked = verify(&mut overlay, root, next)?;
