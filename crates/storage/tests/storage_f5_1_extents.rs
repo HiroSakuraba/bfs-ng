@@ -94,10 +94,10 @@ fn exact_file_limit_rejects_out_of_bounds_without_publishing() {
     writer.write_at(0, &vec![0x67; size]).unwrap();
     assert_eq!(writer.file_size().unwrap(), MAX_FILE_BYTES);
     assert_eq!(writer.read_at(MAX_FILE_BYTES - 16, 64).unwrap(), vec![0x67; 16]);
-    let gen = writer.manifest().generation;
+    let generation = writer.manifest().generation;
     assert!(matches!(writer.write_at(MAX_FILE_BYTES, b"x"), Err(Error::TooLarge)));
     assert!(matches!(writer.truncate(MAX_FILE_BYTES + 1), Err(Error::TooLarge)));
-    assert_eq!(writer.manifest().generation, gen);
+    assert_eq!(writer.manifest().generation, generation);
     assert_eq!(writer.read_at(MAX_FILE_BYTES, 5).unwrap(), Vec::<u8>::new());
 }
 
@@ -135,14 +135,14 @@ fn corrupted_data_is_detected_and_writer_refuses_unknown_fallback_ownership() {
     let mut writer = ExtentDataWriter::format(CrashDevice::new(400), VID).unwrap();
     writer.write_at(0, &vec![0x47; 3 * BLOCK_SIZE]).unwrap();
     let pointer = writer.manifest().roots.fs;
-    let gen = writer.manifest().generation;
+    let generation = writer.manifest().generation;
     let mut disk = writer.into_device().power_loss();
-    let root = read_page(&mut disk, pointer, TreeId::Fs, VID, gen).unwrap();
+    let root = read_page(&mut disk, pointer, TreeId::Fs, VID, generation).unwrap();
     let file = FileExtents::decode(&root, disk.block_count()).unwrap();
     let physical = file.blocks.get(&1).unwrap().physical;
     disk.corrupt_stable_for_testing(physical as usize, 21, 0);
     let reader = ReadOnlyV10::open(disk.power_loss()).unwrap();
-    assert_eq!(reader.root_info().generation, gen);
+    assert_eq!(reader.root_info().generation, generation);
     assert!(ExtentDataWriter::open(reader.into_device()).is_err());
 }
 
