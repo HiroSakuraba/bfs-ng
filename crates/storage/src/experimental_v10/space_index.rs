@@ -442,6 +442,9 @@ pub struct RetireStep {
     pub dead: BTreeMap<(u64, u64), DeadRun>,
     pub scanned: usize,
     pub released: u64,
+    /// Last visited (retirement-generation, physical-start). Persist this
+    /// in the two manifest sweep fields atomically with the space-tree roots.
+    pub cursor: Option<(u64, u64)>,
 }
 pub fn retire_step(
     free: &BTreeMap<u64, FreeRun>,
@@ -450,6 +453,20 @@ pub fn retire_step(
     current_generation: u64,
     budget: usize,
 ) -> Result<RetireStep> {
+    retire_step_cursor(free, dead, protected, current_generation, budget, None)
+}
+/// Cursor-advanced bounded sweep. The previous scanned key (including a
+/// still-owned entry) is persisted in the manifest; on the next transaction
+/// the sweep resumes after it and wraps once. This prevents a permanently
+/// protected oldest entry from starving younger eligible retirements.
+pub fn retire_step_cursor(
+    free: &BTreeMap<u64, FreeRun>,
+    dead: &BTreeMap<(u64, u64), DeadRun>,
+    protected: &BTreeSet<u64>,
+    current_generation: u64,
+    budget: usize,
+    after: Option<(u64, u64)>,
+) -> Result<RetireStep> {
     if current_generation == 0 || budget > MAX_RETIRE_STEP {
         return Err(Error::Geometry);
     }
@@ -457,10 +474,16 @@ pub fn retire_step(
     let mut out_dead = dead.clone();
     let mut scanned = 0;
     let mut released = 0;
-    for (&key, &item) in dead {
+    let mut cursor = after;
+    let mut ordered: Vec<_> = dead.iter().collect();
+    if let Some(last) = after {
+        ordered.sort_by_key(|(key, _)| (**key <= last, **key));
+    }
+    for (&key, &item) in ordered {
         if scanned >= budget { break; }
         if item.eligible_after > current_generation { continue; }
         scanned += 1;
+        cursor = Some(key);
         let end = item.start + u64::from(item.blocks);
         if (item.start..end).any(|address| protected.contains(&address)) {
             continue;
@@ -495,5 +518,5 @@ pub fn retire_step(
         runs.push(run);
     }
     out_free = runs.into_iter().map(|run| (run.start, run)).collect();
-    Ok(RetireStep { free: out_free, dead: out_dead, scanned, released })
+    Ok(RetireStep { free: out_free, dead: out_dead, scanned, released, cursor })
 }
