@@ -9,7 +9,10 @@ use bfs_ng_storage::experimental_v10::{
     MANIFEST_BYTES, read_checksum_tree, read_namespace_tree, read_page,
     read_snapshot_tree, read_space_tree,
 };
-use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, RootInfo};
+use bfs_ng_storage::{
+    AttributeDef, AttributeType, BLOCK_SIZE, BlockDevice, CrashDevice, RootInfo,
+    Schema, TextCase, Value,
+};
 use std::collections::BTreeSet;
 
 const VID: u128 = 0xa110_c0de_f533_2026;
@@ -217,6 +220,22 @@ fn indexed_ownership_matches_two_root_oracle_through_snapshot_and_namespace_chur
     let mut fs = UnifiedV10::format_indexed(CrashDevice::new(768), VID).unwrap();
     fs.mkdir("/assets").unwrap();
     fs.write_at("/assets/payload", 0, b"initial").unwrap();
+    let schema = Schema::new(vec![AttributeDef {
+        id: 1,
+        name: "kind".into(),
+        ty: AttributeType::Text {
+            case: TextCase::AsciiFold,
+            max_bytes: 48,
+        },
+        indexed: true,
+    }])
+    .unwrap();
+    fs.install_schema(&schema).unwrap();
+    fs.set_attributes(
+        "/assets/payload",
+        &[("kind".into(), Value::Text("material".into()))],
+    )
+    .unwrap();
     let mut path = "/assets/payload";
     let mut model = b"initial".to_vec();
     let inode = fs.stat(path).unwrap().0;
@@ -251,6 +270,15 @@ fn indexed_ownership_matches_two_root_oracle_through_snapshot_and_namespace_chur
                 fs.reclaim_step().unwrap();
             }
             _ => unreachable!(),
+        }
+        if i == 44 {
+            // A changed live posting/root must not erase a pinned historical
+            // triple, even when the original directory entry was renamed.
+            fs.set_attributes(
+                path,
+                &[("kind".into(), Value::Text("texture".into()))],
+            )
+            .unwrap();
         }
         assert_eq!(fs.read_file(path).unwrap(), model, "step {i}");
         assert_eq!(fs.stat(path).unwrap().0, inode, "stable inode at step {i}");
