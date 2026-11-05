@@ -393,7 +393,13 @@ impl TreeRoots {
             schema: slots[7],
         })
     }
-    fn validate(self, total_blocks: u64, generation: u64, low: u64, arena_blocks: u64) -> Result<()> {
+    fn validate(
+        self,
+        total_blocks: u64,
+        generation: u64,
+        low: u64,
+        arena_blocks: u64,
+    ) -> Result<()> {
         let attr_set = [
             self.attribute_rows.is_some(),
             self.attribute_postings.is_some(),
@@ -406,12 +412,16 @@ impl TreeRoots {
         let arena_end = ROOT_PAYLOAD_LAST + 1 + arena_blocks;
         for (tree, pointer) in self.slots() {
             if let Some(p) = pointer {
-                let space_index = matches!(tree, TreeId::Free | TreeId::DeadList)
-                    && arena_blocks > 0;
+                let space_index =
+                    matches!(tree, TreeId::Free | TreeId::DeadList) && arena_blocks > 0;
                 p.validate(
                     total_blocks,
                     generation,
-                    if space_index { ROOT_PAYLOAD_LAST + 1 } else { low },
+                    if space_index {
+                        ROOT_PAYLOAD_LAST + 1
+                    } else {
+                        low
+                    },
                 )?;
                 // Keep persistent Free/Dead metadata strictly inside its
                 // dedicated, nonrecursive CoW arena; all ordinary roots
@@ -465,7 +475,10 @@ impl Manifest {
             return Err(bad());
         }
         self.roots.validate(
-            total_blocks, self.generation, self.high_water, self.metadata_reserve,
+            total_blocks,
+            self.generation,
+            self.high_water,
+            self.metadata_reserve,
         )
     }
     pub fn encode(&self, total_blocks: u64) -> Result<[u8; MANIFEST_BYTES]> {
