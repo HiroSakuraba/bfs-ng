@@ -400,87 +400,103 @@ Allocating pages to record allocations changes the free tree itself. A casual es
 
 ## 9. F5.3 — birth-time reclamation and dead lists
 
-This replaces the per-commit `count_roots` reconstruction and the F2.R2 physical-reference tree for the snapshot case.
+**Safety status:** birth-time reclamation is a proposed optimization, **not an established proof for BFS-NG's tree graph**. Through F5.2, keep the full two-root/snapshot reachability oracle as the allocator's default authority. F5.3 may replace the per-commit full scan only after the ownership model and gates below pass.
 
-### 9.1 Kill events
+### 9.1 Ownership domains and kill events
 
-A **kill** happens when the live fs tree, or any other tree under the manifest, stops pointing at a physical run. Kill sites are enumerated exhaustively:
+There are **different kinds of roots**. A pinned filesystem snapshot retains only the trees explicitly captured by its snapshot descriptor:
 
-- A CoW path copy replaces a page (old page killed, birth from its BP).
-- A `REG` or `PREALLOC` extent is trimmed, split, truncated, punched, overwritten or deleted (released sub-run killed, birth from the extent).
-- Checksum, free, dead-list and attribute tree pages replaced by path copy.
+| Domain | Owners | Retirement mechanism |
+| --- | --- | --- |
+| **Snapshot-scoped** | Inode/namespace/extent fs tree, attribute-row and attribute-posting trees, historical schema tree, and the data extents they reach | Candidate birth-time/dead-list algorithm; may have multiple snapshot references |
+| **Manifest-global** | Physical checksum tree (covering all currently retained snapshot data), free-space tree, dead-list tree, snapshot catalog, allocator bookkeeping | F0 two-root retirement and bounded accounting sweep; **never** assume an arbitrary filesystem snapshot pins an old global-tree root |
+| **F0-only root payloads** | Alternating superblocks and three reserved payload ring blocks | Fixed F0.R1 ring protocol; blocks 0–4 **never** enter the general allocator |
 
-Each kill carries `(start, blocks, birth)`.
+Every snapshot descriptor and every F0 candidate may point at different generations of metadata. Global checksum data *describes* retained snapshot blocks, but that does **not** turn a checksum-tree page into an ancestor of a snapshot's fs root. An old global-tree page born before a snapshot is not necessarily owned by that snapshot.
 
-### 9.2 Immediate rule
+A `kill` is the removal of one logical reference from a new candidate root graph—not an unconditional permission to free the physical address. Carry:
 
-Let `S_newest` be the generation of the newest snapshot, including one pinned in this transaction. For a kill in generation `g` with birth `b`:
+```rust
+struct KillCandidate {
+    physical_start: u64,
+    blocks: u64,
+    birth_generation: u64,
+    ownership_domain: OwnershipDomain,
+    releasing_owner: RootIdentity,
+    source: KillSite,
+}
+```
 
-| Condition | Result |
-| --- | --- |
-| `b == g` | Never published. **Ready** immediately (the F0.R1 rule). |
-| `S_newest < b < g`, or no snapshots | Referenced only by the previous live tree, which the fallback root still holds. **Pending**. |
-| `b <= S_newest` | The newest snapshot may reference it. Append to that snapshot's **dead list**. |
+`KillSite` covers CoW path replacements, extent trimming/overwrite/delete, attribute-tree changes, checksum-tree changes, free-tree page replacements, dead-list changes and snapshot-catalog changes. The validator rejects double retirements, overlaps and birth/owner mismatches. Each method that drops a block pointer must emit a typed candidate or prove the pointer was never published. **A kill event is a claim to verify, not an assertion of last ownership.**
 
-**Why this is exact:** a snapshot taken at generation `s` references precisely the blocks that were live at `s`: born at or before `s` and not yet killed. A block born after the newest snapshot cannot be in any snapshot. This is how ZFS frees blocks without global reference counts.
+### 9.2 Candidate rules and F0 epoch fence
 
-### 9.3 Dead lists
+Let `g` be the generation being published, `b` the allocation birth generation, and `s` the newest pinned snapshot generation in the proposed new manifest.
+
+| Candidate | Proposed disposition | Required proof |
+| --- | --- | --- |
+| Allocated and discarded entirely within this transaction, never F0-published | Return to transaction-private certified ready pool | Address absent from all recoverable roots and no staged reference remains |
+| Published **global** page removed from the new manifest | Retire on F0 fallback rotation using absolute `eligible_after_generation` | Neither snapshot nor latest root references it; only a still-valid fallback manifest may do so |
+| Published snapshot-scoped page or data run removed from live namespace; `b > s` or no snapshots | Fallback-fenced release candidate | Prove no pinned descriptor and no other logical references; delay availability beyond last F0 owner |
+| Published snapshot-scoped page or data run removed from live namespace; `b <= s` | Candidate entry in newest-snapshot dead list | Prove that the newest snapshot actually reaches this block under the no-clone lineage assumptions; birth comparison alone does not substitute for this proof in the implementation gate |
+| Clone/reflink/shared, reference count unresolved, or damaged ownership | **Quarantine**; never release | Full multi-owner reference accounting is required |
+
+Even when a dead-list entry becomes logically unreferenced after a snapshot drop, it is not immediately allocatable if an **older F0 manifest still pins that snapshot**. Record the relevant absolute release-after generation and wait for rotation plus certified ownership. Global tree pages are never inserted into per-snapshot dead lists merely because their birth predates `s`.
+
+**Why this differs from the original rule:** the earlier text applied `b <= s` to every tree under the manifest, which can strand free-tree and checksum-tree pages that no snapshot actually owns. It also conflated "no longer referenced by the new root" with "absent from both recoverable roots."
+
+### 9.3 Candidate dead-list representation
 
 ```text
 key   = snapshot_gen: u64 BE | birth: u64 BE | start: u64 BE
-value = blocks: u32
+value = blocks: u32, ownership_domain: u8, reserved
 ```
 
-`D(s)` is the set of runs with birth at or before `s` that were killed after `s` and before the next **surviving** newer snapshot was taken (or are being killed now, if `s` is the newest). Every run in `D(s)` is referenced by snapshot `s`: it was live at `s` and killed after. "Surviving" matters: when a newer snapshot is dropped, its interval merges into `s`'s (§9.4).
+A `D(s)` entry is a **witness of a physical run retained by a snapshot lineage but no longer live**. It is not itself another live extent pointer and must not be interpreted as an independent exclusive physical owner. Multiple snapshots may still reference its described physical blocks.
 
-Taking a snapshot is O(1): add a catalog entry; the new snapshot starts with an empty dead list.
+A snapshot pin stores a **complete descriptor** (§6.5), including historical attribute/schema roots; creating the descriptor can be O(1) in fs tree size but still mutates the snapshot-catalog pages. The new snapshot's dead list starts empty.
 
-### 9.4 Dropping a snapshot
+Only snapshot-scoped blocks can enter `D(s)`; global accounting tree pages have a different retirement path. Before migration to `Accounted`, independently reconstruct the snapshot root reachability for every entry and verify that its birth, range and canonical dead-list assignment agree. Data-checksum entries for these runs remain in the global checksum tree while any descriptor or F0 fallback can require them.
 
-Let `s` be the snapshot being dropped, `p` the next older snapshot (if any), and `n` the next newer snapshot (if any).
+### 9.4 Dropping a snapshot, including a middle snapshot
 
-Two sets of runs are affected:
+Let `s` be the descriptor being dropped, `p` the nearest surviving older snapshot, and `n` the nearest surviving newer snapshot.
 
-**Runs in `D(s)`** (killed while `s` was newest, birth `<= s`):
+The original proposed split of `D(s)` by `birth > p` versus `birth <= p` is a **candidate algorithm**, not a completed proof. In particular, a block may have multiple historical snapshot references, and an F0 fallback can retain a snapshot that the new manifest has dropped.
 
-- `birth > p` (or no `p`): not in `p` (born after it), not in `n` or newer (killed before they existed), not live. **Free** (pending, by the two-root rule).
-- `birth <= p`: still referenced by `p`. **Move** to `D(p)`. This matches `D(p)`'s definition, because with `s` gone, `s`'s interval is now part of `p`'s.
+The implementation must, for each affected run, decide whether the surviving descriptors and **both** F0 candidate generations still reach it. If an older surviving snapshot retains the run, move its canonical dead-list witness to the correct interval; otherwise record an F0-epoch-fenced retirement, **not** an immediate free. Newer-snapshot witnesses must not be removed just because `s` disappears. Retain the dropping descriptor and progress marker until every required move or retirement is durably represented.
 
-Because dead-list keys sort by birth within a snapshot, this split is a range operation: the `birth <= p` prefix moves as a whole.
-
-**Runs in `D(n)`** (killed while `n` was newest, birth `<= n`). These may also have been referenced by `s`, but `n` still references all of them, so nothing in `D(n)` can be freed by dropping `s`. Its meaning is unchanged, since its condition `birth <= n` does not mention `s`.
-
-So dropping a snapshot costs O(|D(s)|), not O(volume).
-
-**Proof obligation for the implementation PR:** state and test the invariant "every physical run is exactly one of: reachable from the live tree or a manifest tree; in exactly one dead list; in the free tree; in the pending set; above the high-water mark", and that the immediate rule and drop rule preserve it.
+**Required proof statement:** for any no-clone history of creates/writes/overwrites/truncates, snapshot pins and arbitrary drops, every physical snapshot-scoped block referenced by any surviving pinned root is excluded from the allocatable set; each dead-list entry has a well-defined canonical lineage position; dropping a middle snapshot preserves that property. Prove with a small executable model before making this the allocator's authority. If the proof fails or the model disagrees, fall back to full two-root reachability scanning, without a heuristic partial fix.
 
 ### 9.5 Bounded processing
 
-A snapshot drop can free millions of runs. Dropping marks the snapshot `dropping` in the catalog and moves its dead-list processing into the **deferred** class. Each commit (or an explicit `reclaim_step()`) processes at most a fixed budget of dead-list entries and persists the sweep cursor in the manifest. Interruption resumes from the last published cursor.
+Dropping a snapshot can produce millions of interval moves and retirements. Mark it `dropping` and persist a **versioned processing cursor** in the manifest. Each committed `reclaim_step()` processes at most a configured budget of canonical entries; it must durably publish both the cursor and the dead-list/free-tree changes in the same F0 root transaction. Power loss resumes from the last **fully published** generation; processing is replay-safe and idempotent on reopening.
 
-**Why:** this reuses the F2.R4 bounded-sweep idea and its crash argument unchanged, applied to dead lists instead of a per-block queue.
+While a descriptor is `dropping`, treat every not-yet-processed reference it protects as *still retained*, including across F0 fallback candidate rotation. Persisting a cursor must never authorize blocks from an incomplete interval.
 
-### 9.6 The trust shift, stated plainly
+### 9.6 Reuse trust modes and exact invariants
 
-v9 authorizes reuse with an independent full two-root ownership scan. F5.3 authorizes reuse by **accounting**: correct kill events plus the rules above. That is how ZFS and btrfs work, and it is what makes commits O(changes). It is also a real change in what the code trusts.
+`reuse_verification = Full | Accounted` is an in-handle policy, not an on-disk excuse to trust unverified free-space entries.
 
-Mitigations:
+- **Full (default until proof):** independently reconstruct both F0 candidate graphs and all pinned snapshot trees, including all global metadata roots, before certifying new reusable regions. An unopened or damaged older root is a quarantine condition, not a reason to presume its blocks are free.
+- **Accounted (future F5.3 only):** use incrementally updated kills/dead lists/epochs as the fast-path authority *only after* the exact model and fault tests prove agreement with Full. Reverting to Full on discrepancy is mandatory; a periodic scrub is an additional detector, not a replacement for validation before enabling Accounted.
 
-- `reuse_verification = Full | Accounted`, recorded per handle, not on disk.
-  - **Full:** before any freed run becomes ready, check it against an independent full ownership scan (current behavior). Default in tests.
-  - **Accounted:** trust the accounting. Default for benchmarks and, eventually, mounts.
-- `count_roots` and the F2.R2 reference reconstruction are kept as the **oracle**. In test builds, every commit compares the free tree, dead lists and pending set against it.
-- A periodic `scrub()` re-runs the oracle on a live volume and flips the handle to `reuse_blocked` on any disagreement.
+**Correct set invariants** (physical addresses are compared per actual block/range, not just identical extent start keys):
 
-**Why the failure modes are asymmetric:** a missed kill leaks space (benign, found by scrub). A double kill or a wrong birth frees live data (catastrophic). The oracle's job in tests is mostly to hunt the second kind; fuzzing should bias toward overwrite-after-snapshot, split-of-split and drop-middle-snapshot sequences.
+1. `Allocatable(g) ∩ Reachable(current_F0, fallback_F0, pinned_snapshots) = ∅`.
+2. A future-epoch pending record **may overlap fallback ownership** by design; it must not overlap current-root ownership, and cannot enter `Allocatable` before its absolute epoch matures.
+3. A dead-list witness **may overlap blocks reachable through a snapshot**. It is an accounting relationship, **not** a mutually exclusive class of physical space. Dead-list entries can never be used as unverified free-space records.
+4. Every published metadata/data reference has a valid birth and checksum contract; every live/pinned `REG` data block has exactly one current checksum entry under the selected F0 manifest. Global accounting pages remain protected through the complete F0 two-root fence.
+5. No candidate block is freed twice, no overlapping subrange has mismatched retirement state, and no `DEFERRED` or unverified orphan region becomes allocatable because an epoch counter advanced.
+6. The independent complete graph oracle is the authority for the testing contract: the proposed `Accounted` free-set must match exactly, under snapshot pin/drop, F0 rollback, arbitrary payload/data corruption and every injected crash point.
 
-### 9.7 What retires
+The old invariant "every block is exactly one of live, dead list, free tree, pending, or virgin" is **false** as stated: snapshot-owned data can legitimately appear in a dead-list witness, and F0 fallback ownership can overlap a pending free-run record. Distinguish *referenced*, *retirement evidence*, and *allocation eligibility*.
 
-- Per-commit `count_roots` traversal: becomes oracle-only.
-- F2.R2 CoW physical-reference B+tree: removed for snapshots; a much smaller shared-extent table replaces it only if F5.6 is enabled.
-- F2.R3/R4 rewritten sorted-run journal: replaced by the free tree plus dead lists.
+**Failure asymmetry:** missing kills leak space; an incorrect or duplicate kill can destroy live/snapshot data. Optimize only after correctness is established with the complete oracle.
 
----
+### 9.7 What can eventually retire
+
+On successful F5.3 proof and rollout, ordinary commits can stop reconstructing entire live/pinned reference counts. The F2.R2 CoW reference tree may become a testing/oracle or migration-only structure for unshared data, with future clone-specific accounting independent of the dead lists. The F2.R3/R4 whole-run journal can be replaced by the CoW free tree and dead-list metadata. Until then, **retain existing conservative reference accounting, delayed-free fences, and fail-closed recovery**. A speed claim that merely removes verification without a matching ownership proof is not an accepted F5 milestone.
 
 ## 10. F5.4 — inode table and directory entries
 
