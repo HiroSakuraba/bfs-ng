@@ -7,7 +7,7 @@
 //! Large/multilevel extent trees, multi-inode names, PREALLOC and reflinks are
 //! deliberately left to subsequent F5 tranches.
 use super::{
-    BlockRef, CatalogEdit, FileExtents, Item, Manifest, Page, SnapshotDescriptor, SnapshotState,
+    BlockRef, CatalogEdit, FileExtents, Manifest, Page, SnapshotDescriptor, SnapshotState,
     TreeId, VirginSnapshotWriter, MAX_FILE_BYTES, plan_snapshot_edit,
     read_checksum_tree, read_page, read_snapshot_tree, read_verified_block, stage_checksum_tree,
 };
