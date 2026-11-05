@@ -5,13 +5,12 @@
 //! It is an oracle for the current indexed Free set, NOT an Accounted-mode
 //! implementation or a proof of all conceivable graph histories.
 use bfs_ng_storage::experimental_v10::{
-    BlockPointer, FileExtents, Manifest, SnapshotState, TreeId, UnifiedV10,
-    MANIFEST_BYTES, read_checksum_tree, read_namespace_tree, read_page,
-    read_snapshot_tree, read_space_tree,
+    BlockPointer, FileExtents, MANIFEST_BYTES, Manifest, SnapshotState, TreeId, UnifiedV10,
+    read_checksum_tree, read_namespace_tree, read_page, read_snapshot_tree, read_space_tree,
 };
 use bfs_ng_storage::{
-    AttributeDef, AttributeType, BLOCK_SIZE, BlockDevice, CrashDevice, RootInfo,
-    Schema, TextCase, Value,
+    AttributeDef, AttributeType, BLOCK_SIZE, BlockDevice, CrashDevice, RootInfo, Schema, TextCase,
+    Value,
 };
 use std::collections::BTreeSet;
 
@@ -138,14 +137,8 @@ fn visit_namespace(
     owners: &mut BTreeSet<u64>,
     data: &mut BTreeSet<u64>,
 ) {
-    let namespace = read_namespace_tree(
-        disk,
-        root,
-        VID,
-        manifest.generation,
-        manifest.next_inode,
-    )
-    .unwrap();
+    let namespace =
+        read_namespace_tree(disk, root, VID, manifest.generation, manifest.next_inode).unwrap();
     owners.extend(namespace.metadata_pages);
     for entry in namespace.records.values() {
         if let Some(file_root) = entry.file_root {
@@ -194,7 +187,8 @@ fn graph_for_manifest(disk: &mut CrashDevice, m: Manifest) -> BTreeSet<u64> {
     owners.extend(checksums.metadata_pages);
 
     let free = read_space_tree(disk, TreeId::Free, m.roots.free, VID, m.generation).unwrap();
-    let dead = read_space_tree(disk, TreeId::DeadList, m.roots.dead_list, VID, m.generation).unwrap();
+    let dead =
+        read_space_tree(disk, TreeId::DeadList, m.roots.dead_list, VID, m.generation).unwrap();
     owners.extend(free.pages);
     owners.extend(dead.pages);
     owners
@@ -209,15 +203,35 @@ fn check_two_f0_roots(disk: &mut CrashDevice) {
 
     let latest = manifests[1];
     assert_eq!(latest.metadata_reserve, 64);
-    let free = read_space_tree(disk, TreeId::Free, latest.roots.free, VID, latest.generation).unwrap();
-    let dead = read_space_tree(disk, TreeId::DeadList, latest.roots.dead_list, VID, latest.generation).unwrap();
+    let free = read_space_tree(
+        disk,
+        TreeId::Free,
+        latest.roots.free,
+        VID,
+        latest.generation,
+    )
+    .unwrap();
+    let dead = read_space_tree(
+        disk,
+        TreeId::DeadList,
+        latest.roots.dead_list,
+        VID,
+        latest.generation,
+    )
+    .unwrap();
     assert_eq!(
         latest.free_blocks,
-        free.free.values().map(|run| u64::from(run.blocks)).sum::<u64>()
+        free.free
+            .values()
+            .map(|run| u64::from(run.blocks))
+            .sum::<u64>()
     );
     assert_eq!(
         latest.pending_blocks,
-        dead.dead.values().map(|run| u64::from(run.blocks)).sum::<u64>()
+        dead.dead
+            .values()
+            .map(|run| u64::from(run.blocks))
+            .sum::<u64>()
     );
     for run in free.free.values() {
         let end = run.start + u64::from(run.blocks);
@@ -301,11 +315,8 @@ fn indexed_ownership_matches_two_root_oracle_through_snapshot_and_namespace_chur
         if i == 44 {
             // A changed live posting/root must not erase a pinned historical
             // triple, even when the original directory entry was renamed.
-            fs.set_attributes(
-                path,
-                &[("kind".into(), Value::Text("texture".into()))],
-            )
-            .unwrap();
+            fs.set_attributes(path, &[("kind".into(), Value::Text("texture".into()))])
+                .unwrap();
         }
         assert_eq!(fs.read_file(path).unwrap(), model, "step {i}");
         assert_eq!(fs.stat(path).unwrap().0, inode, "stable inode at step {i}");
@@ -317,10 +328,7 @@ fn indexed_ownership_matches_two_root_oracle_through_snapshot_and_namespace_chur
         }
         if i == 65 {
             fs.mark_dropping(history[1].0).unwrap();
-            assert_eq!(
-                fs.snapshots().unwrap()[1].state,
-                SnapshotState::Dropping
-            );
+            assert_eq!(fs.snapshots().unwrap()[1].state, SnapshotState::Dropping);
         }
         if i % 8 == 0 || i == 95 {
             let mut device = fs.into_device().power_loss();
@@ -396,9 +404,10 @@ fn every_dropped_f0_owned_page_is_retired_before_it_can_be_reused() {
                 continue; // the 64-page nonrecursive index metadata reserve
             }
             assert!(
-                pending.dead.values().any(|run| {
-                    run.start <= lost && lost < run.start + u64::from(run.blocks)
-                }),
+                pending
+                    .dead
+                    .values()
+                    .any(|run| { run.start <= lost && lost < run.start + u64::from(run.blocks) }),
                 "block {lost} disappeared from both F0 graphs at generation {} without a delayed retirement witness",
                 selected.generation,
             );
@@ -413,5 +422,8 @@ fn every_dropped_f0_owned_page_is_retired_before_it_can_be_reused() {
             b"origin"
         );
     }
-    assert!(witnessed > 20, "insufficient F0 rotation/retirement coverage");
+    assert!(
+        witnessed > 20,
+        "insufficient F0 rotation/retirement coverage"
+    );
 }
