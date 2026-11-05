@@ -46,7 +46,9 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     let snapshots = read_snapshot_tree(device, m.roots.snapshots, id, m.generation)?;
     let mut all_ns_pages = BTreeSet::new();
     let mut all_ns_roots: BTreeMap<u64, BlockPointer> = BTreeMap::new();
-    let mut all_files: BTreeMap<u64, BlockPointer> = BTreeMap::new();
+    // A shared physical file root across snapshots must belong to the SAME
+    // stable inode. The first v10 profile has no reflinks or hard links.
+    let mut all_files: BTreeMap<u64, (BlockPointer, u64)> = BTreeMap::new();
     let mut records = None;
     let current_root = m.roots.fs;
     all_ns_roots.insert(current_root.address, current_root);
@@ -72,8 +74,10 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         }
         for entry in scan.records.values() {
             if let Some(file_root) = entry.file_root {
-                match all_files.insert(file_root.address, file_root) {
-                    Some(previous) if previous != file_root => return Err(Error::CorruptTree),
+                match all_files.insert(file_root.address, (file_root, entry.inode)) {
+                    Some(previous) if previous != (file_root, entry.inode) => {
+                        return Err(Error::CorruptTree);
+                    }
                     _ => {}
                 }
             }
@@ -84,8 +88,9 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         return Err(Error::CorruptTree);
     }
     let mut file_pages = BTreeSet::new();
-    for file_root in all_files.values() {
-        let page = read_page(device, *file_root, TreeId::Fs, id, m.generation)?;
+    let mut data_owner = BTreeMap::<u64, u64>::new();
+    for &(file_root, inode) in all_files.values() {
+        let page = read_page(device, file_root, TreeId::Fs, id, m.generation)?;
         let file = FileExtents::decode(&page, device.block_count())?;
         if !file_pages.insert(file_root.address) {
             return Err(Error::CorruptTree);
@@ -93,6 +98,13 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         for (&logical, &reference) in &file.blocks {
             match data_births.insert(reference.physical, reference.birth) {
                 Some(previous) if previous != reference.birth => return Err(Error::CorruptTree),
+                _ => {}
+            }
+            match data_owner.insert(reference.physical, inode) {
+                Some(previous) if previous != inode => {
+                    // An extent from one file cannot alias another file.
+                    return Err(Error::CorruptTree);
+                }
                 _ => {}
             }
             if logical == file.size / BLOCK_SIZE as u64 && file.size % BLOCK_SIZE as u64 != 0 {
