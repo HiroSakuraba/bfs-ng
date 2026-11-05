@@ -1,9 +1,9 @@
 //! F5.3 opt-in, in-handle certified allocator on an exclusive CrashDevice.
 //! This only skips repeated *old* F0 graph reads; every newly staged
 //! generation still passes full independent graph validation.
-use bfs_ng_storage::experimental_v10::UnifiedV10;
+use bfs_ng_storage::experimental_v10::{ReadOnlyV10, UnifiedV10};
 use bfs_ng_storage::{
-    AttributeDef, AttributeType, CrashDevice, Schema, TextCase, Value,
+    AttributeDef, AttributeType, CrashDevice, Error, Fault, Schema, TextCase, Value,
 };
 
 const VID: u128 = 0xc3f1_3a11_0ca7_2026;
@@ -121,4 +121,54 @@ fn exclusive_in_handle_allocator_matches_strict_mode_and_reduces_disk_walks() {
 fn the_fast_lease_is_not_available_on_an_unindexed_image() {
     let mut fs = UnifiedV10::format(CrashDevice::new(128), VID).unwrap();
     assert!(fs.enable_in_handle_allocation_certificate().is_err());
+}
+
+#[test]
+fn in_handle_certificate_crash_cuts_reopen_with_old_or_new_f0_graph() {
+    for operation in 1..=8 {
+        for torn_bytes in [0, 64, 4096] {
+            let mut fs = UnifiedV10::format_indexed(CrashDevice::new(448), VID).unwrap();
+            fs.mkdir("/demo").unwrap();
+            fs.write_at("/demo/file", 0, b"previous").unwrap();
+            let snap = fs.manifest().generation;
+            fs.pin_current().unwrap();
+            for i in 0..12_u64 {
+                fs.write_at("/demo/file", 0, &i.to_le_bytes()).unwrap();
+            }
+            let old_generation = fs.manifest().generation;
+            let previous = fs.read_file("/demo/file").unwrap();
+            let mut disk = fs.into_device().power_loss();
+            disk.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            })
+            .unwrap();
+            let mut writer = UnifiedV10::open(disk).unwrap();
+            writer.enable_in_handle_allocation_certificate().unwrap();
+            assert!(matches!(
+                writer.write_at("/demo/file", 0, b"new-data"),
+                Err(Error::InjectedCrash)
+            ));
+            let recovered = writer.into_device().power_loss();
+            let reader = ReadOnlyV10::open(recovered).unwrap();
+            let root_generation = reader.root_info().generation;
+            assert!(
+                root_generation == old_generation || root_generation == old_generation + 1
+            );
+            if let Ok(mut checked) = UnifiedV10::open(reader.into_device()) {
+                assert_eq!(
+                    checked.read_file("/demo/file").unwrap(),
+                    if root_generation == old_generation {
+                        previous.as_slice()
+                    } else {
+                        b"new-data"
+                    }
+                );
+                assert_eq!(
+                    checked.read_snapshot_file(snap, "/demo/file").unwrap(),
+                    b"previous"
+                );
+            }
+        }
+    }
 }
