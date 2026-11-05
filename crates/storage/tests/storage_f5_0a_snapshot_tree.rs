@@ -1,6 +1,6 @@
 use bfs_ng_storage::experimental_v10::{
-    plan_snapshot_edit, read_page, read_snapshot_tree, BlockPointer, CatalogEdit, Item, Manifest,
-    Page, ReadOnlyV10, SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
+    BlockPointer, CatalogEdit, Item, Manifest, Page, ReadOnlyV10, SnapshotDescriptor,
+    SnapshotState, TreeId, TreeRoots, plan_snapshot_edit, read_page, read_snapshot_tree,
 };
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, Result, Volume};
 
@@ -417,9 +417,8 @@ fn staged_snapshot_mark_survives_f0_crash_at_each_barrier() {
     for operation in 1..=4 {
         for torn_bytes in [0, 8, 124, BLOCK_SIZE] {
             let (volume, first, fs) = initial();
-            let (volume, committed, _) = stage_commit(
-                volume, &first, CatalogEdit::Pin(descriptor(1, fs)), 5,
-            ).unwrap();
+            let (volume, committed, _) =
+                stage_commit(volume, &first, CatalogEdit::Pin(descriptor(1, fs)), 5).unwrap();
             let mut disk = volume.into_device().power_loss();
             let pages = [
                 committed.high_water - 1,
@@ -434,7 +433,8 @@ fn staged_snapshot_mark_survives_f0_crash_at_each_barrier() {
                 3,
                 committed.high_water,
                 &pages,
-            ).unwrap();
+            )
+            .unwrap();
             for (address, bytes) in staged.staged_pages {
                 disk.write_block(address, &bytes).unwrap();
             }
@@ -442,18 +442,18 @@ fn staged_snapshot_mark_survives_f0_crash_at_each_barrier() {
             let mut publishing = Volume::open(disk.power_loss()).unwrap();
             let next = manifest(3, staged.high_water, fs, Some(staged.root));
             let mut device = publishing.into_device();
-            device.inject(Fault {
-                operation,
-                torn_bytes: Some(torn_bytes),
-            }).unwrap();
+            device
+                .inject(Fault {
+                    operation,
+                    torn_bytes: Some(torn_bytes),
+                })
+                .unwrap();
             publishing = Volume::open(device).unwrap();
             assert!(matches!(
                 publishing.commit_root(&next.encode(BLOCKS).unwrap()),
                 Err(Error::InjectedCrash)
             ));
-            let mut recovered = ReadOnlyV10::open(
-                publishing.into_device().power_loss(),
-            ).unwrap();
+            let mut recovered = ReadOnlyV10::open(publishing.into_device().power_loss()).unwrap();
             assert!(matches!(recovered.root_info().generation, 2 | 3));
             let pins = recovered.snapshot_descriptors().unwrap();
             assert_eq!(pins.len(), 1);
