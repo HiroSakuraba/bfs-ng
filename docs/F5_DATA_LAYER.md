@@ -1,6 +1,6 @@
 # F5 — extent data layer, birth-time reclamation and inode namespace (proposed)
 
-**Status:** design proposal. **Nothing in this document is implemented.** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
+**Status:** design proposal, **safety-corrected 2026-11-04**. **Nothing in F5 is implemented.** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
 
 **Baseline:** `main` after F0.R1 (manifest v9), as described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -22,7 +22,7 @@ F5 replaces that layer with:
 6. **The F4 attribute catalog in its own CoW trees**, off the file-data path.
 7. **Optional shared extents (clone/reflink)**, off by default and gated by an oracle.
 
-The F0 publication protocol, the two-root reuse invariant and the "oracle referees the fast path" methodology are kept unchanged.
+The F0 publication protocol, the two-root reuse invariant and the "oracle referees the fast path" methodology are kept unchanged. **Safety corrections:** snapshot descriptors retain attribute/schema roots; the checksum tree retains historical checksums while snapshots survive; snapshot-owned and volume-global metadata use different retirement rules; free-space eligibility is encoded as a stable absolute generation; fast opening never authorizes unverified reuse; and tree-allocation reservations must be bounded before publication. F5.3's birth/dead-list algorithm remains a hypothesis requiring an executable proof model, **not an approved allocator**.
 
 ## 2. What is wrong with the v9 data layer
 
@@ -70,19 +70,18 @@ One new principle:
 
 | Milestone | Delivers | Depends on |
 | --- | --- | --- |
-| **F5.0** | Format v10 foundation: `u64` generations, generic CoW B+tree page format, block pointers, headerless data blocks, checksum tree, lazy verification at open | — |
-| **F5.1** | Extent map, inline small files, streaming writes, partial overwrite, truncate, punch hole, preallocate | F5.0 |
-| **F5.2** | Extent free-space tree with epoch tags, allocation policy, metadata reserve | F5.0 |
-| **F5.3** | Birth-time reclamation and dead lists; retire per-commit `count_roots` | F5.1, F5.2 |
-| **F5.4** | Inode table and `(parent, name)` directory entries; rename, hard links | F5.0 |
-| **F5.5** | F4 attribute rows and postings in their own CoW trees | F5.0, F5.4 |
-| **F5.6** | Optional shared extents (clone), off by default | F5.3 |
+| **F5.0a** | v10 manifest and complete snapshot descriptors, `u64` generations, generic CoW metadata-page codec, typed block pointers and compatibility rejection | — |
+| **F5.0b** | Headerless data, physical checksum tree with historical-retention rules, read-time verification and safe lazy open | F5.0a |
+| **F5.1** | Extents, inline small files, partial writes and bounded streaming/spill | F5.0b |
+| **F5.2** | CoW free-space tree with **immutable eligibility epochs**, proven metadata-page reservation and verified full-graph reuse mode | F5.0a; existing F2 ownership oracle |
+| **F5.3** | Birth/dead-list accounting, snapshot-ownership-domain model and optional accounted reuse **only after proof gates** | F5.1, F5.2 |
+| **F5.4** | Inode table, `(parent, name)` directory entries, hard links and rename | F5.0a |
+| **F5.5** | Incremental attribute rows/postings with historical schema roots | F5.0a, F5.4 |
+| **F5.6** | Optional shared extents; no default enablement | F5.3 plus interval-sharing oracle |
 
-F5.0 through F5.4 together are one format break (manifest v10). They can land as separate PRs behind a test-only format flag, but only the combined result is published as v10.
+**Release ordering:** F5.0a and F5.0b may be tested as separate changes behind a feature/test-only format gate. Do not advertise a stable v10 image writer until its committed root, snapshot descriptor, checksums and safe default allocator are coherent. F5.0 through F5.4 are still **one public format break**; no series of incompatible v10/v11/v12 test images is intended.
 
-**Why one format break:** v9 policy is to reject old images rather than migrate. Shipping v10, v11 and v12 in quick succession would churn every test fixture three times for no user benefit.
-
----
+**Why:** isolating the generation/pointer format from checksum/recovery semantics makes failures attributable. The new format cannot make the allocation fast path less conservative merely because mount verification becomes lazy.
 
 ## 6. F5.0 — format v10 foundation
 
@@ -138,66 +137,84 @@ Every branch entry and every tree root in the manifest is a BP. A reader rejects
 
 ### 6.4 Headerless data blocks and the checksum tree
 
-Data blocks contain only file bytes. Tail bytes past end-of-file in the last block are zero.
-
-Data checksums live in the **checksum tree**, keyed by physical address:
+Data blocks contain only file bytes, with deterministic zero-filled tails beyond the logical end of an allocated final block. Each referenced aligned data block has a CRC32C in the **CoW checksum tree** keyed by its physical address:
 
 ```text
 key   = csum_run_start: u64 (big-endian)
 value = count: u16, reserved: u16, crc32c[count]: u32...
 ```
 
-One item covers a run of physically contiguous data blocks, up to the space available in a leaf (about 1,000 checksums, so about 4 MiB of data per leaf page). Checksum entries are inserted when a data block is written and deleted when that block is freed (§9).
+A contiguous checksum item holds a bounded run; branch/root BPs authenticate its metadata path. The checksum tree is a **volume-global manifest tree**, not a tree root stored in each snapshot descriptor.
 
-**Why headerless:** removes every problem in rows 5, 6 and 8 of §2. File offset *n* now lives at byte *n mod 4096* of a block, so page-cache, mmap, O_DIRECT and device atomic-write alignment all become possible. Blocks no longer name their owner, so they can be shared.
+**Historical-data obligation:** the checksum tree at generation `g` must contain exactly the checksums required to verify all `REG` data blocks reachable through the current live root **and every pinned snapshot descriptor at `g`**. A checksum for a snapshot-retained block is never removed when the live file is overwritten. When a snapshot is dropped, checksum deletion must wait until neither the newly committed manifest nor its F0 fallback candidate can require the corresponding data block. The previous F0 manifest already retains its own checksum-tree root during fallback rotation. No snapshot may rely on checksums that were removed from its selected manifest.
 
-**Why a separate tree rather than checksums in the extent record:** a 32 MiB extent has 8,192 blocks; inline checksums would make extent records 32 KiB. A separate tree keeps extent records fixed-size, lets cloned extents share checksums for free, and lets scrub walk data in physical order. This is the btrfs design.
+**Birth/reuse obligation:** a checksum is keyed by physical address, but it is also *bound to the matching data block's immutable allocation birth*. Before admitting a reused address, every old reference to that address, including snapshots and fallback candidates, must have retired. The new checksum and newly written data must be committed together; stale checksum entries may never verify a different block incarnation by accident. Incorporate birth in the extent reference and checked ownership model even if the checksum value stores only CRC32C.
 
-**Why keyed by physical address:** a checksum describes physical bytes. Keying by `(inode, offset)` would force a checksum rewrite on every clone and make shared blocks carry two copies.
+**Failure path:** if a data write is acknowledged but lost, the parent-authenticated checksum tree must reject the stale bytes on read. A misdirected write must be detected on **every affected, subsequently checked read**, not assumed to be detected immediately at open; a CRC collision is still possible. Before an affected block can be freed/reused, accounting must identify the correct referenced incarnation. Torn, missing or corrupt checksum-tree metadata disables the claimed read or reuse authority, never authorizes a free block.
 
-**Why per-4 KiB checksums:** any aligned 4 KiB read can be verified alone (row 8 of §2). The cost is 4 bytes per 4 KiB, about 0.1%.
+**Why headerless:** permits exact 4 KiB data addressing without v9's 32-byte in-band header and is compatible with later paging and shared extents. It does **not by itself** implement mmap, O_DIRECT or hardware atomic writes. CRC32C detects typical accidental corruption but does not provide cryptographic authentication or a collision-free stale-write identity.
 
-**Lost and misdirected data writes:** the checksum tree is written in the same transaction as the data. A dropped data write leaves stale bytes that fail the new checksum; a misdirected write fails at both the intended and the overwritten location. Detection is equivalent to v9's header checks without the header.
+**Why a global physical checksum tree:** fixed-sized extent records, independently checked partial reads, physically ordered scrub and eventual clone support. A snapshot's data checksum remains available only while the owning data remains retained, so checksum retirement and data retirement are one accounting obligation, not independent cleanup jobs.
 
-**Why CRC32C:** it is already in the codebase, hardware-accelerated and adequate for media-error detection. A checksum-kind field is reserved for a stronger hash if content dedupe is ever added; CRC32C is not suitable as a dedupe key.
+**F5.0b gate:** validate snapshot pin → overwrite → F0 root rotations → historical read; drop snapshot → crash at each publication barrier → check both manifest generations; reuse address only after actual ownership retirement. An independent full-graph scanner must compare the exact physical set of `REG` blocks with checksum coverage, including historical roots.
 
-### 6.5 Root manifest v10
+### 6.5 Root manifest v10 and complete snapshot descriptors
 
-The F0 superblock v2 and three-block root-payload ring are unchanged. The payload carries manifest v10:
+The F0 superblock v2 and its three-block root-payload ring remain unchanged. A new v10 manifest includes:
 
 | Field | Width | Notes |
 | --- | ---: | --- |
 | Magic | 8 | `BFSNGM10` |
 | Format | 4 | 10 |
 | Node size | 4 | Must be 4096 in v10 |
-| Generation | 8 | |
-| High-water mark | 8 | Lowest block ever written from the never-written region (§8.3) |
+| Generation | 8 | Current F0 generation |
+| High-water mark | 8 | Conservative virgin-region boundary (§8.3) |
 | Next inode | 8 | Never reused |
 | fs tree root | 24 | BP |
-| Checksum tree root | 24 | BP |
+| Checksum tree root | 24 | BP; global to this manifest and all its pinned snapshots |
 | Free tree root | 24 | BP |
 | Dead-list tree root | 24 | BP |
-| Snapshot catalog root | 24 | BP (a leaf of `(snapshot_gen → fs root BP, flags)`) |
+| Snapshot catalog root | 24 | BP; **values are complete snapshot descriptors**, not just fs root BPs |
 | Attr row tree root | 24 | BP, zero if no schema |
 | Attr posting tree root | 24 | BP, zero if no schema |
-| Sweep cursor | 16 | `(snapshot_gen, key position)` for bounded dead-list processing (§9.5) |
-| Metadata reserve | 8 | Blocks (§8.5) |
-| Counters | 32 | Inodes, used blocks, free blocks, pending blocks |
-| CRC32C | 4 | |
+| Attribute schema root | 24 | BP, zero if no schema; immutable/versioned schema state |
+| Sweep cursor | 16 | Persistent bounded cursor (§9.5) |
+| Metadata reserve | 8 | Blocks; policy §8.5 |
+| Counters | 32 | Checked inodes, used, free and pending counters |
+| CRC32C | 4 | Root payload is also protected by F0 |
 
-Well under the existing payload capacity.
+The snapshot catalog maps each `snapshot_generation` to the descriptor below. A zero BP means **absent**, not "inherit current live tree." The descriptor is immutable while pinned, except for separately journaled retirement state:
 
-### 6.6 Lazy verification at open
+```rust
+struct SnapshotDescriptorV10 {
+    generation: u64,
+    fs_root: BlockPointer,              // includes inode table + extents
+    attribute_rows_root: BlockPointer,
+    attribute_postings_root: BlockPointer,
+    attribute_schema_root: BlockPointer,
+    flags: u32,                         // live, dropping, reserved; defined by codec
+}
+```
 
-On open, verify both F0 candidates, their manifests, and the root page of each tree. Do **not** read every page or every data block. Every later read verifies what it touches through BPs and the checksum tree. Full verification moves to `scrub()` and `allocation_report()`.
+The actual binary codec must specify field offsets, length, zero padding and flag values before F5.0a is implemented. `F5.0a` writes and verifies these complete descriptors even while F5.5 is not active; absent attribute roots are zero and a v9-style catalog inside the fs tree is still reachable through `fs_root`.
 
-**Why:** v9's full verification makes mount time grow with total data. No production filesystem works that way.
+**Snapshot pin invariant:** capture the currently committed namespace root, attribute row/posting roots and schema root as one logical snapshot at the pin transaction's F0 publication. All later historical attribute lookups use the descriptor's roots, never the live manifest's attribute roots. The descriptor's filesystem root and retained schema must agree on inode identities and attribute normalization. Any validation failure is a historical-snapshot read error or reuse quarantine, not a reason to guess current rows.
 
-**What this costs, stated honestly:** v9 can fall back to the previous root if *any* part of the newest tree or file data is corrupt. v10 falls back only when corruption is visible at the manifest or tree-root level. Deeper corruption found later returns an error for the affected file or directory; it does not silently roll the whole volume back. That is the right behavior for a real filesystem (rolling back a whole volume because one file has a bad block loses every other change), but it is a semantic change and tests must be updated to assert it.
+**Checksum invariant:** snapshot descriptors intentionally **do not** carry their own checksum-tree root. The selected F0 manifest's global checksum tree covers the union of data blocks in every pinned descriptor and the live root; old F0 candidates still retain their own complete checksum roots. This is a distinct obligation tested in F5.0b. It avoids pinning every generation of a large global checksum tree as a separate snapshot.
 
-**Fail-closed rule kept:** if certification (§8.4) or a scrub finds an ownership structure it cannot verify, reuse stays blocked and allocation falls back to the never-written region, exactly as v9's `reuse_blocked`.
+**Why:** F4 currently obtains historical attributes through the private catalog inside its historical filesystem root. Separating attribute trees without preserving their historical BPs would silently lose snapshot query correctness after root rotation; [the PR #18 review](https://github.com/HiroSakuraba/bfs-ng/pull/18#discussion_r4475000939) identified this failure mode.
 
----
+### 6.6 Lazy read verification versus conservative reuse certification
+
+**Read/open phase:** parse both F0 superblock candidates, their complete v10 manifests and directly referenced tree-root pages. Verify checksums, identities, root generation and bounds. Do not traverse every data block at open. Later reads verify every traversed metadata BP and data block's immutable checksum/birth contract; deep corruption returns an error on the affected operation rather than silently rolling back unrelated changes.
+
+**Reuse-authority phase (separate):** successful lazy opening **does not certify a single free block**. Before any address from the CoW free tree can be reused in the default `Full` mode, perform independent complete ownership verification over both F0 candidates, all snapshot descriptors, all reachable namespace/data/attribute pages, and global metadata trees. A candidate whose deeper contents or ownership cannot be verified prevents *reuse*, even if ordinary unaffected reads are allowed.
+
+When ownership certification is unavailable, only a conservatively demonstrated virgin range beyond any recoverable candidate's published high-water mark may be allocated. The virgin boundary must be checked against both F0 roots and staged/failed writes; an unexplained generation/geometry mismatch blocks even this path. Never infer a writable address from an unchecked free-tree entry.
+
+**Trust upgrade:** `Accounted` mode is a future F5.3 option, not activated by F5.0a, F5.0b or F5.2. It requires the canonical ownership-domain invariant, interval-aware accounting, adversarial model tests, and periodic scrub checks in §9.6. No automatic transition from lazy `open` to `Accounted` occurs.
+
+**Why:** fast mount and safe allocation are independent questions. v9's full candidate verification is intentionally retained as a reuse oracle while F5 adds lazy data reads. This changes the user-visible recovery promise without relaxing overwrite safety.
 
 ## 7. F5.1 — extent map, inline files and streaming writes
 
