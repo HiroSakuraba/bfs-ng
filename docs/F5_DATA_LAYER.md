@@ -1,6 +1,6 @@
 # F5 — extent data layer, birth-time reclamation and inode namespace (proposed)
 
-**Status:** design proposal, **safety-corrected 2026-11-04**. **F5.0a's codecs, multilevel snapshot reader, CoW staging planner and [restricted virgin-only snapshot writer](F5_0A_VIRGIN_WRITER.md) are implemented experimentally. The writer can durably publish snapshot catalog pins/drop-marks after a full two-root audit, but does not edit ordinary files or recycle any metadata. The full v10 filesystem, general allocator, durable snapshot retirement and F5.0b onward are NOT implemented.** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
+**Status:** design proposal, **safety-corrected 2026-11-04**. **F5.0a's codecs, multilevel snapshot reader, CoW staging planner and [restricted virgin-only snapshot writer](F5_0A_VIRGIN_WRITER.md) are implemented experimentally. The writer can durably publish snapshot catalog pins/drop-marks after a full two-root audit, but does not edit ordinary files or recycle any metadata. The experimental [F5.0b one-blob checksum/data tranche](F5_0B_CHECKSUM_DATA.md) now adds headerless 4 KiB data blocks and full live/pinned snapshot checksum verification. **General multi-block files, incremental per-key checksum updates, a reusable allocator, durable snapshot retirement and F5.1 onward remain unimplemented.**** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
 
 **Baseline:** `main` after F0.R1 (manifest v9), as described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -155,6 +155,8 @@ A contiguous checksum item holds a bounded run; branch/root BPs authenticate its
 **Why headerless:** permits exact 4 KiB data addressing without v9's 32-byte in-band header and is compatible with later paging and shared extents. It does **not by itself** implement mmap, O_DIRECT or hardware atomic writes. CRC32C detects typical accidental corruption but does not provide cryptographic authentication or a collision-free stale-write identity.
 
 **Why a global physical checksum tree:** fixed-sized extent records, independently checked partial reads, physically ordered scrub and eventual clone support. A snapshot's data checksum remains available only while the owning data remains retained, so checksum retirement and data retirement are one accounting obligation, not independent cleanup jobs.
+
+**F5.0b status:** [PR #23's restricted writer](F5_0B_CHECKSUM_DATA.md) tests one 4 KiB logical blob, full checksums and historical snapshot roots. The following is the **broader target gate**, not yet discharged for multi-block files or general extents.
 
 **F5.0b gate:** validate snapshot pin → overwrite → F0 root rotations → historical read; drop snapshot → crash at each publication barrier → check both manifest generations; reuse address only after actual ownership retirement. An independent full-graph scanner must compare the exact physical set of `REG` blocks with checksum coverage, including historical roots.
 
