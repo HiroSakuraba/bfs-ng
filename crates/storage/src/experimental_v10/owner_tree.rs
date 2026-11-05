@@ -8,7 +8,7 @@
 //! All recovery/use remains subject to an independent full two-F0 audit.
 //! These entries are NOT yet authority for freeing physical storage.
 use super::space_index::{StagedSpace, stage_space_delta};
-use super::{BlockPointer, Item, Manifest, Page, TreeId, MANIFEST_BYTES, read_page};
+use super::{BlockPointer, MANIFEST_BYTES, TreeId, read_page};
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BlockDevice, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
