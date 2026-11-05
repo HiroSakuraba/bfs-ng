@@ -8,7 +8,10 @@ use crate::volume::ROOT_PAYLOAD_LAST;
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result};
 use std::collections::BTreeMap;
 
-struct Child { max_key: Vec<u8>, pointer: BlockPointer }
+struct Child {
+    max_key: Vec<u8>,
+    pointer: BlockPointer,
+}
 struct Planner<'a, D: BlockDevice> {
     device: &'a mut D,
     volume_id: u128,
@@ -21,8 +24,12 @@ impl<D: BlockDevice> Planner<'_, D> {
     fn write_page(&mut self, level: u8, items: Vec<Item>) -> Result<Child> {
         let address = *self.reservations.get(self.used).ok_or(Error::NoSpace)?;
         let page = Page {
-            tree: TreeId::Checksum, level, birth: self.generation,
-            address, volume_id: self.volume_id, items,
+            tree: TreeId::Checksum,
+            level,
+            birth: self.generation,
+            address,
+            volume_id: self.volume_id,
+            items,
         };
         let bytes = page.encode()?;
         let pointer = page.pointer()?;
@@ -53,27 +60,36 @@ impl<D: BlockDevice> Planner<'_, D> {
         Ok(out)
     }
     fn edit_node(
-        &mut self, pointer: BlockPointer, changes: &[(u64, Option<u32>)],
+        &mut self,
+        pointer: BlockPointer,
+        changes: &[(u64, Option<u32>)],
     ) -> Result<Vec<Child>> {
         if pointer.birth >= self.generation {
             return Err(Error::CorruptTree);
         }
         let page = read_page(
-            self.device, pointer, TreeId::Checksum, self.volume_id, self.generation - 1,
+            self.device,
+            pointer,
+            TreeId::Checksum,
+            self.volume_id,
+            self.generation - 1,
         )?;
         if page.level == 0 {
             let mut old = BTreeMap::new();
             for item in page.items {
-                if item.key.len() != 8 || item.value.len() != 8
-                    || item.value[..2] != [1, 0] || item.value[2..4] != [0; 2]
+                if item.key.len() != 8
+                    || item.value.len() != 8
+                    || item.value[..2] != [1, 0]
+                    || item.value[2..4] != [0; 2]
                 {
                     return Err(Error::CorruptTree);
                 }
-                let key = u64::from_be_bytes(
-                    item.key[..8].try_into().map_err(|_| Error::CorruptTree)?,
-                );
+                let key =
+                    u64::from_be_bytes(item.key[..8].try_into().map_err(|_| Error::CorruptTree)?);
                 let crc = u32::from_le_bytes(
-                    item.value[4..8].try_into().map_err(|_| Error::CorruptTree)?,
+                    item.value[4..8]
+                        .try_into()
+                        .map_err(|_| Error::CorruptTree)?,
                 );
                 if old.insert(key, crc).is_some() {
                     return Err(Error::CorruptTree);
@@ -82,7 +98,10 @@ impl<D: BlockDevice> Planner<'_, D> {
             for &(address, crc) in changes {
                 match crc {
                     Some(expected) => {
-                        if old.get(&address).is_some_and(|existing| *existing != expected) {
+                        if old
+                            .get(&address)
+                            .is_some_and(|existing| *existing != expected)
+                        {
                             return Err(Error::CorruptTree);
                         }
                         old.insert(address, expected);
@@ -94,12 +113,18 @@ impl<D: BlockDevice> Planner<'_, D> {
                     }
                 }
             }
-            let items = old.into_iter().map(|(address, crc)| {
-                let mut value = vec![0_u8; 8];
-                value[..2].copy_from_slice(&1_u16.to_le_bytes());
-                value[4..8].copy_from_slice(&crc.to_le_bytes());
-                Item { key: address.to_be_bytes().to_vec(), value }
-            }).collect();
+            let items = old
+                .into_iter()
+                .map(|(address, crc)| {
+                    let mut value = vec![0_u8; 8];
+                    value[..2].copy_from_slice(&1_u16.to_le_bytes());
+                    value[4..8].copy_from_slice(&crc.to_le_bytes());
+                    Item {
+                        key: address.to_be_bytes().to_vec(),
+                        value,
+                    }
+                })
+                .collect();
             return self.pack(0, items);
         }
         if page.items.is_empty() {
@@ -107,9 +132,10 @@ impl<D: BlockDevice> Planner<'_, D> {
         }
         let mut groups = vec![Vec::new(); page.items.len()];
         for &(key, checksum) in changes {
-            let target = match page.items.binary_search_by(
-                |item| item.key.as_slice().cmp(&key.to_be_bytes()),
-            ) {
+            let target = match page
+                .items
+                .binary_search_by(|item| item.key.as_slice().cmp(&key.to_be_bytes()))
+            {
                 Ok(i) | Err(i) if i < page.items.len() => i,
                 Ok(_) | Err(_) => page.items.len() - 1,
             };
@@ -119,14 +145,21 @@ impl<D: BlockDevice> Planner<'_, D> {
         for (item, mutations) in page.items.into_iter().zip(groups) {
             let child = BlockPointer::decode_required(&item.value)?;
             if mutations.is_empty() {
-                nodes.push(Child { max_key: item.key, pointer: child });
+                nodes.push(Child {
+                    max_key: item.key,
+                    pointer: child,
+                });
             } else {
                 nodes.extend(self.edit_node(child, &mutations)?);
             }
         }
-        let items = nodes.into_iter().map(|child| Item {
-            key: child.max_key, value: child.pointer.encode().to_vec(),
-        }).collect();
+        let items = nodes
+            .into_iter()
+            .map(|child| Item {
+                key: child.max_key,
+                value: child.pointer.encode().to_vec(),
+            })
+            .collect();
         self.pack(page.level, items)
     }
 }
@@ -146,22 +179,34 @@ pub fn stage_checksum_delta<D: BlockDevice>(
     new_generation: u64,
     high_water: u64,
 ) -> Result<StagedChecksums> {
-    if volume_id == 0 || new_generation <= 1
-        || high_water <= ROOT_PAYLOAD_LAST || high_water > device.block_count()
-        || reservations.iter().any(|&n| n <= ROOT_PAYLOAD_LAST || n >= high_water)
+    if volume_id == 0
+        || new_generation <= 1
+        || high_water <= ROOT_PAYLOAD_LAST
+        || high_water > device.block_count()
+        || reservations
+            .iter()
+            .any(|&n| n <= ROOT_PAYLOAD_LAST || n >= high_water)
         || reservations.windows(2).any(|w| w[0] <= w[1])
-        || changes.keys().any(|&n| n <= ROOT_PAYLOAD_LAST || n >= device.block_count())
+        || changes
+            .keys()
+            .any(|&n| n <= ROOT_PAYLOAD_LAST || n >= device.block_count())
     {
         return Err(Error::Geometry);
     }
     if changes.is_empty() {
         return Ok(StagedChecksums {
-            root: old_root, staged_pages: Vec::new(), consumed_reservations: 0,
+            root: old_root,
+            staged_pages: Vec::new(),
+            consumed_reservations: 0,
         });
     }
     let mut planner = Planner {
-        device, volume_id, generation: new_generation,
-        reservations, used: 0, staged: Vec::new(),
+        device,
+        volume_id,
+        generation: new_generation,
+        reservations,
+        used: 0,
+        staged: Vec::new(),
     };
     let mut children = if let Some(root) = old_root {
         root.validate(planner.device.block_count(), new_generation - 1, high_water)?;
@@ -174,23 +219,33 @@ pub fn stage_checksum_delta<D: BlockDevice>(
             let mut value = vec![0_u8; 8];
             value[..2].copy_from_slice(&1_u16.to_le_bytes());
             value[4..8].copy_from_slice(&crc.to_le_bytes());
-            items.push(Item { key: address.to_be_bytes().to_vec(), value });
+            items.push(Item {
+                key: address.to_be_bytes().to_vec(),
+                value,
+            });
         }
         planner.pack(0, items)?
     };
     if children.is_empty() {
         return Ok(StagedChecksums {
-            root: None, staged_pages: planner.staged,
+            root: None,
+            staged_pages: planner.staged,
             consumed_reservations: planner.used,
         });
     }
     let mut level = children[0].pointer.level;
     while children.len() > 1 {
-        if level >= MAX_LEVEL { return Err(Error::TooLarge); }
+        if level >= MAX_LEVEL {
+            return Err(Error::TooLarge);
+        }
         level += 1;
-        let items = children.into_iter().map(|child| Item {
-            key: child.max_key, value: child.pointer.encode().to_vec(),
-        }).collect();
+        let items = children
+            .into_iter()
+            .map(|child| Item {
+                key: child.max_key,
+                value: child.pointer.encode().to_vec(),
+            })
+            .collect();
         children = planner.pack(level, items)?;
     }
     Ok(StagedChecksums {
