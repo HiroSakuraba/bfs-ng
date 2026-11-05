@@ -11,6 +11,10 @@ use std::collections::BTreeSet;
 
 mod attribute_sections;
 mod checksum_delta;
+mod space_index;
+pub use space_index::{DeadRun, FreeRun, MAX_RETIRE_STEP, MAX_SPACE_PAGES, MAX_SPACE_RUNS,
+    RetireStep, SpaceDomain, SpaceScan, StagedSpace, dead_item, free_item,
+    read_space_tree, retire_step, stage_space_delta};
 mod checksum_tree;
 pub use checksum_delta::stage_checksum_delta;
 mod data_writer;
