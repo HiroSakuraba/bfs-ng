@@ -7,9 +7,9 @@
 //! Large/multilevel extent trees, multi-inode names, PREALLOC and reflinks are
 //! deliberately left to subsequent F5 tranches.
 use super::{
-    BlockRef, CatalogEdit, FileExtents, Manifest, Page, SnapshotDescriptor, SnapshotState,
-    TreeId, VirginSnapshotWriter, MAX_FILE_BYTES, plan_snapshot_edit,
-    read_checksum_tree, read_page, read_snapshot_tree, read_verified_block, stage_checksum_delta,
+    BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, Page, SnapshotDescriptor,
+    SnapshotState, TreeId, VirginSnapshotWriter, plan_snapshot_edit, read_checksum_tree, read_page,
+    read_snapshot_tree, read_verified_block, stage_checksum_delta,
 };
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
@@ -18,7 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_STAGING_PAGES: usize = 160;
 
 fn fs_file<D: BlockDevice>(
-    device: &mut D, pointer: super::BlockPointer, id: u128, generation: u64,
+    device: &mut D,
+    pointer: super::BlockPointer,
+    id: u128,
+    generation: u64,
 ) -> Result<FileExtents> {
     let page = read_page(device, pointer, TreeId::Fs, id, generation)?;
     FileExtents::decode(&page, device.block_count())
@@ -50,12 +53,8 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
     {
         return Err(Error::CorruptTree);
     }
-    let catalog = read_snapshot_tree(
-        device, m.roots.snapshots, root.volume_id, root.generation,
-    )?;
-    let checksums = read_checksum_tree(
-        device, m.roots.checksum, root.volume_id, root.generation,
-    )?;
+    let catalog = read_snapshot_tree(device, m.roots.snapshots, root.volume_id, root.generation)?;
+    let checksums = read_checksum_tree(device, m.roots.checksum, root.volume_id, root.generation)?;
     let mut owned = catalog.owned_pages;
     if !owned.is_disjoint(&checksums.metadata_pages) {
         return Err(Error::CorruptTree);
@@ -91,10 +90,10 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
             }
             let logical_end = logical.saturating_add(1) * BLOCK_SIZE as u64;
             if logical_end > file.size {
-                trailing.entry(reference.physical).or_default().push((
-                    file.size % BLOCK_SIZE as u64,
-                    reference.birth,
-                ));
+                trailing
+                    .entry(reference.physical)
+                    .or_default()
+                    .push((file.size % BLOCK_SIZE as u64, reference.birth));
             }
         }
     }
@@ -121,7 +120,9 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         return Err(Error::CorruptTree);
     }
     Ok(Verified {
-        owned, snapshots: catalog.descriptors, checksums: checksums.checksums,
+        owned,
+        snapshots: catalog.descriptors,
+        checksums: checksums.checksums,
     })
 }
 
@@ -161,7 +162,9 @@ struct Overlay<'a, D: BlockDevice> {
     staged: BTreeMap<u64, [u8; BLOCK_SIZE]>,
 }
 impl<D: BlockDevice> BlockDevice for Overlay<'_, D> {
-    fn block_count(&self) -> u64 { self.device.block_count() }
+    fn block_count(&self) -> u64 {
+        self.device.block_count()
+    }
     fn read_block(&mut self, block: u64, out: &mut [u8; BLOCK_SIZE]) -> Result<()> {
         if let Some(contents) = self.staged.get(&block) {
             *out = *contents;
@@ -201,36 +204,52 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
         let (manifest, _, _) = audit(&mut volume)?;
         Ok(Self { volume, manifest })
     }
-    pub fn into_device(self) -> D { self.volume.into_device() }
-    pub fn manifest(&self) -> &Manifest { &self.manifest }
+    pub fn into_device(self) -> D {
+        self.volume.into_device()
+    }
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
     pub fn snapshots(&mut self) -> Result<Vec<SnapshotDescriptor>> {
         let (m, checked, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         Ok(checked.snapshots)
     }
 
     pub fn file_size(&mut self) -> Result<u64> {
         let (m, _, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         let id = self.volume.info().volume_id;
-        self.volume.inspect(|device| {
-            fs_file(device, m.roots.fs, id, m.generation).map(|f| f.size)
-        })
+        self.volume
+            .inspect(|device| fs_file(device, m.roots.fs, id, m.generation).map(|f| f.size))
     }
 
     fn read_range(&mut self, snapshot: Option<u64>, offset: u64, length: usize) -> Result<Vec<u8>> {
         let (m, checked, _) = audit(&mut self.volume)?;
-        if m != self.manifest { return Err(Error::CorruptTree); }
+        if m != self.manifest {
+            return Err(Error::CorruptTree);
+        }
         let root = match snapshot {
             None => m.roots.fs,
-            Some(generation) => checked.snapshots.iter()
-                .find(|desc| desc.generation == generation)
-                .ok_or(Error::InvalidSnapshot)?.fs_root,
+            Some(generation) => {
+                checked
+                    .snapshots
+                    .iter()
+                    .find(|desc| desc.generation == generation)
+                    .ok_or(Error::InvalidSnapshot)?
+                    .fs_root
+            }
         };
         let id = self.volume.info().volume_id;
         self.volume.inspect(|device| {
             let file = fs_file(device, root, id, m.generation)?;
-            if offset >= file.size || length == 0 { return Ok(Vec::new()); }
+            if offset >= file.size || length == 0 {
+                return Ok(Vec::new());
+            }
             let remaining = file.size - offset;
             let count = remaining.min(length as u64) as usize;
             let mut result = vec![0_u8; count];
@@ -255,35 +274,55 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
     pub fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
         self.read_range(None, offset, length)
     }
-    pub fn read_snapshot_at(&mut self, generation: u64, offset: u64, length: usize) -> Result<Vec<u8>> {
+    pub fn read_snapshot_at(
+        &mut self,
+        generation: u64,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>> {
         self.read_range(Some(generation), offset, length)
     }
     pub fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<u64> {
-        let end = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
-        if end > MAX_FILE_BYTES { return Err(Error::TooLarge); }
-        if bytes.is_empty() { return Ok(self.manifest.generation); }
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .ok_or(Error::TooLarge)?;
+        if end > MAX_FILE_BYTES {
+            return Err(Error::TooLarge);
+        }
+        if bytes.is_empty() {
+            return Ok(self.manifest.generation);
+        }
         self.commit(Edit::Write { offset, bytes })
     }
     pub fn truncate(&mut self, size: u64) -> Result<u64> {
-        if size > MAX_FILE_BYTES { return Err(Error::TooLarge); }
+        if size > MAX_FILE_BYTES {
+            return Err(Error::TooLarge);
+        }
         self.commit(Edit::Truncate(size))
     }
-    pub fn pin_current(&mut self) -> Result<u64> { self.commit(Edit::Pin) }
+    pub fn pin_current(&mut self) -> Result<u64> {
+        self.commit(Edit::Pin)
+    }
     pub fn mark_dropping(&mut self, generation: u64) -> Result<u64> {
         self.commit(Edit::MarkDropping(generation))
     }
 
     fn commit(&mut self, edit: Edit<'_>) -> Result<u64> {
         let (old, checked, owned) = audit(&mut self.volume)?;
-        if old != self.manifest { return Err(Error::CorruptTree); }
-        let generation = old.generation.checked_add(1).ok_or(Error::GenerationOverflow)?;
+        if old != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let generation = old
+            .generation
+            .checked_add(1)
+            .ok_or(Error::GenerationOverflow)?;
         let id = self.volume.info().volume_id;
         let total = self.volume.block_count();
         let mut pins = checked.snapshots.clone();
         let mut catalog_edit = None;
-        let mut new_file = self.volume.inspect(|device| {
-            fs_file(device, old.roots.fs, id, old.generation)
-        })?;
+        let mut new_file = self
+            .volume
+            .inspect(|device| fs_file(device, old.roots.fs, id, old.generation))?;
         let mut dirty = BTreeMap::<u64, [u8; BLOCK_SIZE]>::new();
         match edit {
             Edit::Pin => {
@@ -291,16 +330,21 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                     return Err(Error::AlreadyExists);
                 }
                 let desc = SnapshotDescriptor {
-                    generation: old.generation, fs_root: old.roots.fs,
-                    attribute_rows_root: None, attribute_postings_root: None,
-                    attribute_schema_root: None, state: SnapshotState::Pinned,
+                    generation: old.generation,
+                    fs_root: old.roots.fs,
+                    attribute_rows_root: None,
+                    attribute_postings_root: None,
+                    attribute_schema_root: None,
+                    state: SnapshotState::Pinned,
                 };
                 pins.push(desc);
                 pins.sort_by_key(|d| d.generation);
                 catalog_edit = Some(CatalogEdit::Pin(desc));
             }
             Edit::MarkDropping(generation) => {
-                let desc = pins.iter_mut().find(|d| d.generation == generation)
+                let desc = pins
+                    .iter_mut()
+                    .find(|d| d.generation == generation)
                     .ok_or(Error::InvalidSnapshot)?;
                 if desc.state != SnapshotState::Pinned {
                     return Err(Error::InvalidSnapshot);
@@ -309,7 +353,9 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                 catalog_edit = Some(CatalogEdit::MarkDropping(generation));
             }
             Edit::Write { offset, bytes } => {
-                let end = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
+                let end = offset
+                    .checked_add(bytes.len() as u64)
+                    .ok_or(Error::TooLarge)?;
                 new_file.size = new_file.size.max(end);
                 let mut copied = 0;
                 while copied < bytes.len() {
@@ -333,7 +379,9 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                 }
             }
             Edit::Truncate(size) => {
-                if size == new_file.size { return Ok(old.generation); }
+                if size == new_file.size {
+                    return Ok(old.generation);
+                }
                 new_file.size = size;
                 let blocks = size.div_ceil(BLOCK_SIZE as u64);
                 new_file.blocks.retain(|&logical, _| logical < blocks);
@@ -357,9 +405,12 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
         let mut cursor = old.high_water;
         while cursor > ROOT_PAYLOAD_LAST + 1 && candidates.len() < MAX_STAGING_PAGES {
             cursor -= 1;
-            if owned.contains(&cursor) { return Err(Error::CorruptTree); }
+            if owned.contains(&cursor) {
+                return Err(Error::CorruptTree);
+            }
             let mut bytes = [0_u8; BLOCK_SIZE];
-            self.volume.inspect(|device| device.read_block(cursor, &mut bytes))?;
+            self.volume
+                .inspect(|device| device.read_block(cursor, &mut bytes))?;
             if bytes.iter().all(|&byte| byte == 0) {
                 candidates.push(cursor);
             }
@@ -375,15 +426,24 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
             for (logical, bytes) in dirty.iter().rev() {
                 let physical = *candidates.get(used).ok_or(Error::NoSpace)?;
                 used += 1;
-                new_file.blocks.insert(*logical, BlockRef { physical, birth: generation });
+                new_file.blocks.insert(
+                    *logical,
+                    BlockRef {
+                        physical,
+                        birth: generation,
+                    },
+                );
                 staged.push((physical, *bytes));
                 added_checksums.insert(physical, crc32c(bytes));
             }
             let address = *candidates.get(used).ok_or(Error::NoSpace)?;
             used += 1;
             let fs = Page {
-                tree: TreeId::Fs, level: 0, birth: generation,
-                address, volume_id: id,
+                tree: TreeId::Fs,
+                level: 0,
+                birth: generation,
+                address,
+                volume_id: id,
                 items: new_file.encode_items(generation, total)?,
             };
             staged.push((address, fs.encode()?));
@@ -395,7 +455,9 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                 for desc in &pins {
                     let file = fs_file(device, desc.fs_root, id, old.generation)?;
                     for reference in file.blocks.values() {
-                        let checksum = *checked.checksums.get(&reference.physical)
+                        let checksum = *checked
+                            .checksums
+                            .get(&reference.physical)
                             .ok_or(Error::CorruptTree)?;
                         required.insert(reference.physical, checksum);
                     }
@@ -403,7 +465,8 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
                 Ok(())
             })?;
             for reference in new_file.blocks.values() {
-                let checksum = added_checksums.get(&reference.physical)
+                let checksum = added_checksums
+                    .get(&reference.physical)
                     .or_else(|| checked.checksums.get(&reference.physical))
                     .ok_or(Error::CorruptTree)?;
                 required.insert(reference.physical, *checksum);
@@ -414,7 +477,9 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
             let mut delta = BTreeMap::new();
             for (&physical, &crc) in &checked.checksums {
                 match required.get(&physical) {
-                    None => { delta.insert(physical, None); }
+                    None => {
+                        delta.insert(physical, None);
+                    }
                     Some(&new_crc) if new_crc != crc => return Err(Error::CorruptTree),
                     _ => {}
                 }
@@ -426,8 +491,13 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
             }
             let cs = self.volume.inspect(|device| {
                 stage_checksum_delta(
-                    device, old.roots.checksum, &delta, &candidates[used..],
-                    id, generation, old.high_water,
+                    device,
+                    old.roots.checksum,
+                    &delta,
+                    &candidates[used..],
+                    id,
+                    generation,
+                    old.high_water,
                 )
             })?;
             used += cs.consumed_reservations;
@@ -437,23 +507,33 @@ impl<D: BlockDevice> ExtentDataWriter<D> {
         if let Some(change) = catalog_edit {
             let plan = self.volume.inspect(|device| {
                 plan_snapshot_edit(
-                    device, old.roots.snapshots, change, id, generation,
-                    old.high_water, &candidates[used..],
+                    device,
+                    old.roots.snapshots,
+                    change,
+                    id,
+                    generation,
+                    old.high_water,
+                    &candidates[used..],
                 )
             })?;
             used += plan.consumed_reservations;
             next.roots.snapshots = Some(plan.root);
             staged.extend(plan.staged_pages);
         }
-        if used == 0 { return Err(Error::NoSpace); }
+        if used == 0 {
+            return Err(Error::NoSpace);
+        }
         next.high_water = candidates[used - 1];
         let payload = next.encode(total)?;
         self.volume.inspect(|device| {
             let mut overlay = Overlay {
-                device, staged: staged.iter().copied().collect(),
+                device,
+                staged: staged.iter().copied().collect(),
             };
             let root = RootInfo {
-                volume_id: id, generation, root_block: Some(2 + (generation - 1) % 3),
+                volume_id: id,
+                generation,
+                root_block: Some(2 + (generation - 1) % 3),
             };
             let validated = verify(&mut overlay, root, next)?;
             if validated.snapshots != pins {
