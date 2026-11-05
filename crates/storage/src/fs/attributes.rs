@@ -118,7 +118,7 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn validate_files(&self, files: &BTreeMap<String, Record>) -> Result<()> {
+    pub(super) fn validate_files(&self, files: &BTreeMap<String, Record>) -> Result<()> {
         let by_inode: BTreeSet<_> = files
             .iter()
             .filter(|(path, record)| path.as_str() != INTERNAL_PATH && !record.directory)
