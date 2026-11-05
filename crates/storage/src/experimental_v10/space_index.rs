@@ -502,9 +502,8 @@ pub fn validate_space_pair(
         // A Free entry must be unowned *now*, not merely when its
         // eligibility epoch arrives. Pages still owned by either F0 root
         // belong in delayed retirement, never in the Free tree.
-        if (run.start..run.start + u64::from(run.blocks))
-            .any(|address| both_root_owners.contains(&address))
-        {
+        let end = run.start + u64::from(run.blocks);
+        if both_root_owners.range(run.start..end).next().is_some() {
             return Err(Error::CorruptTree);
         }
         all.push((run.start, run.blocks, run.eligible_after));
@@ -537,12 +536,14 @@ pub fn reserve_free(
     // stale, future-eligible ownership claim could go unnoticed until a
     // later allocation transaction.
     for run in free.values() {
-        if run.blocks == 0 || run.start <= ROOT_PAYLOAD_LAST
-            || run.start.checked_add(u64::from(run.blocks)).is_none()
-            || run.eligible_after == 0
-            || (run.start..run.start + u64::from(run.blocks))
-                .any(|address| both_root_owners.contains(&address))
-        {
+        if run.blocks == 0 || run.start <= ROOT_PAYLOAD_LAST || run.eligible_after == 0 {
+            return Err(Error::CorruptTree);
+        }
+        let end = run.start.checked_add(u64::from(run.blocks))
+            .ok_or(Error::CorruptTree)?;
+        // Check the ordered owner set without visiting every block of a
+        // potentially enormous contiguous free extent.
+        if both_root_owners.range(run.start..end).next().is_some() {
             return Err(Error::CorruptTree);
         }
     }
@@ -635,22 +636,25 @@ pub fn retire_step_cursor(
     let mut out_dead = dead.clone();
     let mut scanned = 0;
     let mut released = 0;
-    let mut cursor = after;
-    let mut ordered: Vec<_> = dead.iter().collect();
-    if let Some(last) = after {
-        ordered.sort_by_key(|(key, _)| (**key <= last, **key));
-    }
-    for (&key, &item) in ordered {
+    let mut cursor = if dead.is_empty() { None } else { after };
+    // BTreeMap cursor ranges avoid collecting/sorting the entire retirement
+    // index on each bounded step. Resume strictly after the last visited key,
+    // then wrap once; even future-ineligible records consume the work budget.
+    let anchor = after.unwrap_or((0, 0));
+    for (&key, &item) in dead
+        .range((std::ops::Bound::Excluded(anchor), std::ops::Bound::Unbounded))
+        .chain(dead.range(..=anchor))
+    {
         if scanned >= budget {
             break;
         }
+        scanned += 1;
+        cursor = Some(key);
         if item.eligible_after > current_generation {
             continue;
         }
-        scanned += 1;
-        cursor = Some(key);
         let end = item.start + u64::from(item.blocks);
-        if (item.start..end).any(|address| protected.contains(&address)) {
+        if protected.range(item.start..end).next().is_some() {
             continue;
         }
         if out_free.values().any(|r| {
