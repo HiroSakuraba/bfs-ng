@@ -10,6 +10,7 @@ use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
 mod checksum_delta;
+mod attribute_sections;
 mod checksum_tree;
 pub use checksum_delta::stage_checksum_delta;
 mod data_writer;
