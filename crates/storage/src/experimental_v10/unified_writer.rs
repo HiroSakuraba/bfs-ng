@@ -11,6 +11,10 @@
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
 use super::allocation_certificate::{OwnerGraph, PublishedOwnerReceipt, TwoRootOwners};
+use super::owner_tree::{
+    OwnerRootAnchor, OwnerScan, changes as owner_changes, parse_anchor, payload_owners,
+    read_owner_tree, stage_owner_delta,
+};
 use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
@@ -226,6 +230,8 @@ struct Verified {
     dead: BTreeMap<(u64, u64), DeadRun>,
     global_pages: BTreeSet<u64>,
     retired_global: BTreeSet<u64>,
+    owner_root: Option<BlockPointer>,
+    owner_scan: Option<OwnerScan>,
 }
 fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result<Verified> {
     let reach = collect(device, root.volume_id, m)?;
@@ -329,8 +335,35 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         dead,
         global_pages,
         retired_global: BTreeSet::new(),
+        owner_root: None,
+        owner_scan: None,
     })
 }
+fn collect_payload_owner_set<D: BlockDevice>(
+    disk: &mut D,
+    id: u128,
+    manifest: Manifest,
+) -> Result<OwnerGraph> {
+    let reach = collect(disk, id, manifest)?;
+    let checksums = read_checksum_tree(disk, manifest.roots.checksum, id, manifest.generation)?;
+    if !reach.owned_metadata.is_disjoint(&checksums.metadata_pages)
+        || reach.data_births.keys().copied().collect::<BTreeSet<_>>()
+            != checksums.checksums.keys().copied().collect()
+    {
+        return Err(Error::CorruptTree);
+    }
+    let mut owned = reach.owned_metadata;
+    let mut global = checksums.metadata_pages.clone();
+    global.extend(reach.catalog_pages);
+    owned.extend(checksums.metadata_pages);
+    for address in reach.data_births.keys() {
+        if !owned.insert(*address) {
+            return Err(Error::CorruptTree);
+        }
+    }
+    OwnerGraph::new(owned, global)
+}
+
 fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
     let latest = volume.info();
     let mut selected = None;
@@ -348,14 +381,42 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         }
         let raw = payload.ok_or(Error::CorruptRoot)?;
         let m = Manifest::decode(&raw, root, volume.block_count())?;
-        let receipt = if raw.len() > super::MANIFEST_BYTES {
+        let anchor = parse_anchor(&raw, root, volume.block_count())?;
+        let receipt = if raw.len() > super::MANIFEST_BYTES && anchor.is_none() {
             Some(PublishedOwnerReceipt::decode(
                 &raw[super::MANIFEST_BYTES..],
             )?)
         } else {
             None
         };
-        let checked = volume.inspect(|device| verify(device, root, m))?;
+        let mut checked = volume.inspect(|device| verify(device, root, m))?;
+        if let Some(anchor) = anchor {
+            if m.metadata_reserve != INDEX_ARENA_BLOCKS {
+                return Err(Error::CorruptTree);
+            }
+            let scan = volume.inspect(|disk| {
+                read_owner_tree(disk, anchor.root, root.volume_id, root.generation)
+            })?;
+            let (expected_owners, expected_globals) =
+                payload_owners(&checked.owned, &checked.global_pages);
+            if scan.owners != expected_owners
+                || scan.globals != expected_globals
+                || !scan.pages.is_disjoint(&checked.owned)
+            {
+                return Err(Error::CorruptTree);
+            }
+            checked.owned.extend(scan.pages.iter().copied());
+            checked.global_pages.extend(scan.pages.iter().copied());
+            validate_space_pair(
+                &checked.free,
+                &checked.dead,
+                &checked.owned,
+                root.generation,
+                volume.block_count(),
+            )?;
+            checked.owner_root = Some(anchor.root);
+            checked.owner_scan = Some(scan);
+        }
         if let Some((generation, watermark)) = previous {
             if root.generation != generation + 1 || m.high_water > watermark {
                 return Err(Error::CorruptTree);
@@ -640,6 +701,7 @@ pub struct UnifiedV10<D: BlockDevice> {
     last_reused_blocks: usize,
     in_handle_certificate: Option<InHandleCertificate>,
     publish_f0_owner_receipts: bool,
+    publish_owner_tree: bool,
 }
 impl<D: BlockDevice> UnifiedV10<D> {
     pub fn format(device: D, id: u128) -> Result<Self> {
@@ -724,6 +786,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             last_reused_blocks: 0,
             in_handle_certificate: None,
             publish_f0_owner_receipts: false,
+            publish_owner_tree: false,
         })
     }
     pub fn manifest(&self) -> &Manifest {
@@ -1361,6 +1424,37 @@ impl<D: BlockDevice> UnifiedV10<D> {
             next.roots.checksum = cs.root;
             staged.extend(cs.staged_pages);
         }
+        let owner_tree_enabled = self.publish_owner_tree || checked.owner_root.is_some();
+        let mut new_owner_root = None;
+        if owner_tree_enabled {
+            if !indexed || self.publish_f0_owner_receipts {
+                return Err(Error::CorruptTree);
+            }
+            let target = self.volume.inspect(|disk| {
+                let mut overlay = Overlay {
+                    disk,
+                    staged: staged.iter().copied().collect(),
+                };
+                collect_payload_owner_set(&mut overlay, id, next)
+            })?;
+            let previous = checked.owner_scan.clone().unwrap_or_else(OwnerScan::empty);
+            let edits = owner_changes(&previous, &target.pages, &target.global, total)?;
+            let planned = self.volume.inspect(|disk| {
+                stage_owner_delta(
+                    disk,
+                    checked.owner_root,
+                    &edits,
+                    &candidates[used..],
+                    id,
+                    generation,
+                    old.high_water,
+                )
+            })?;
+            let root = planned.root.ok_or(Error::CorruptTree)?;
+            used += planned.consumed_reservations;
+            staged.extend(planned.staged_pages);
+            new_owner_root = Some(root);
+        }
         let mut intended_space = None;
         let mut index_pages = 0;
         if let Some(sweep) = retirement {
@@ -1441,7 +1535,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             old.high_water
         };
         let mut payload = next.encode(total)?.to_vec();
-        let candidate_checked = self.volume.inspect(|device| {
+        let mut candidate_checked = self.volume.inspect(|device| {
             let mut overlay = Overlay {
                 disk: device,
                 staged: staged.iter().copied().collect(),
@@ -1479,6 +1573,35 @@ impl<D: BlockDevice> UnifiedV10<D> {
             }
             Ok(checked)
         })?;
+        if let Some(root) = new_owner_root {
+            let scan = self.volume.inspect(|disk| {
+                let mut overlay = Overlay {
+                    disk,
+                    staged: staged.iter().copied().collect(),
+                };
+                read_owner_tree(&mut overlay, root, id, generation)
+            })?;
+            let (expected, expected_global) =
+                payload_owners(&candidate_checked.owned, &candidate_checked.global_pages);
+            if scan.owners != expected
+                || scan.globals != expected_global
+                || !scan.pages.is_disjoint(&candidate_checked.owned)
+            {
+                return Err(Error::CorruptTree);
+            }
+            candidate_checked.owned.extend(scan.pages.iter().copied());
+            candidate_checked.global_pages.extend(scan.pages.iter().copied());
+            candidate_checked.owner_root = Some(root);
+            candidate_checked.owner_scan = Some(scan);
+            validate_space_pair(
+                &candidate_checked.free,
+                &candidate_checked.dead,
+                &candidate_checked.owned,
+                generation,
+                total,
+            )?;
+            payload.extend_from_slice(&OwnerRootAnchor { root, generation }.encode());
+        }
         let mut next_certificate = None;
         if indexed {
             // A proof model of the eventual Accounted allocation authority.
@@ -1631,6 +1754,7 @@ impl UnifiedV10<CrashDevice> {
                 ownership,
             }),
             publish_f0_owner_receipts: false,
+            publish_owner_tree: false,
         })
     }
     /// Enable bounded F0-atomic owner receipts on a private CrashDevice.
@@ -1656,6 +1780,37 @@ impl UnifiedV10<CrashDevice> {
             return Err(Error::CorruptTree);
         }
         writer.enable_f0_published_allocation_receipts()?;
+        Ok(writer)
+    }
+
+    /// Explicitly enable F0-anchored owner B+tree path-copying on a private
+    /// CrashDevice. Recovery still audits both physical F0 graphs completely.
+    pub fn enable_f0_published_owner_tree(&mut self) -> Result<()> {
+        if self.publish_f0_owner_receipts {
+            return Err(Error::CorruptTree);
+        }
+        self.enable_in_handle_allocation_certificate()?;
+        self.publish_owner_tree = true;
+        Ok(())
+    }
+
+    /// Reject a missing or corrupt owner root before resuming test-only writes.
+    pub fn reopen_with_verified_owner_tree(device: CrashDevice) -> Result<Self> {
+        let mut writer = Self::open(device)?;
+        let latest = writer.volume.info().generation;
+        let has_root = writer.volume.candidate_roots()?.iter().any(|(root, raw)| {
+            root.generation == latest
+                && raw.as_ref().is_some_and(|bytes| {
+                    parse_anchor(bytes, *root, writer.volume.block_count())
+                        .ok()
+                        .flatten()
+                        .is_some()
+                })
+        });
+        if !has_root {
+            return Err(Error::CorruptTree);
+        }
+        writer.enable_f0_published_owner_tree()?;
         Ok(writer)
     }
 

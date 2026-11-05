@@ -1,9 +1,9 @@
 //! F5.3 opt-in, in-handle certified allocator on an exclusive CrashDevice.
 //! This only skips repeated *old* F0 graph reads; every newly staged
 //! generation still passes full independent graph validation.
-use bfs_ng_storage::experimental_v10::{ReadOnlyV10, UnifiedV10};
+use bfs_ng_storage::experimental_v10::{MANIFEST_BYTES, ReadOnlyV10, UnifiedV10};
 use bfs_ng_storage::{
-    AttributeDef, AttributeType, CrashDevice, Error, Fault, Schema, TextCase, Value,
+    AttributeDef, AttributeType, BlockDevice, CrashDevice, Error, Fault, Schema, TextCase, Value,
 };
 
 const VID: u128 = 0xc3f1_3a11_0ca7_2026;
@@ -304,4 +304,119 @@ fn interrupted_f0_owner_receipt_publication_preserves_recovery() {
         let contents = recovered.read_file("/a/f").unwrap();
         assert!(contents.starts_with(b"stable") || contents.starts_with(b"new"));
     }
+}
+
+#[test]
+fn f0_owner_btree_survives_many_cow_mutations_and_retained_snapshots() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(1536), VID).unwrap();
+    fs.mkdir("/assets").unwrap();
+    fs.write_at("/assets/a", 0, b"initial").unwrap();
+    let snap = fs.manifest().generation;
+    fs.pin_current().unwrap();
+    fs.enable_f0_published_owner_tree().unwrap();
+    for i in 0..48_u64 {
+        if i % 9 == 3 {
+            fs.truncate("/assets/a", 22).unwrap();
+        } else {
+            fs.write_at("/assets/a", (i % 3) * 4096, &i.to_le_bytes()).unwrap();
+        }
+        if i % 7 == 0 {
+            fs.reclaim_step().unwrap();
+        }
+    }
+    let expected = fs.read_file("/assets/a").unwrap();
+    let committed = fs.manifest().generation;
+    let disk = fs.into_device().power_loss();
+    let mut recovered = UnifiedV10::reopen_with_verified_owner_tree(disk).unwrap();
+    assert_eq!(recovered.manifest().generation, committed);
+    assert_eq!(recovered.read_file("/assets/a").unwrap(), expected);
+    assert_eq!(recovered.read_snapshot_file(snap, "/assets/a").unwrap(), b"initial");
+    recovered.write_at("/assets/a", 0, b"after").unwrap();
+    let mut again = UnifiedV10::open(recovered.into_device().power_loss()).unwrap();
+    assert!(again.read_file("/assets/a").unwrap().starts_with(b"after"));
+}
+
+#[test]
+fn f0_owner_btree_handles_more_than_one_leaf_and_many_payload_blocks() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(4_096), VID).unwrap();
+    fs.mkdir("/large").unwrap();
+    fs.enable_f0_published_owner_tree().unwrap();
+    let payload = vec![0x5au8; 60 * 4096];
+    for i in 0..4 {
+        fs.write_at(&format!("/large/file{i}"), 0, &payload).unwrap();
+    }
+    let generation = fs.manifest().generation;
+    let mut reopened = UnifiedV10::reopen_with_verified_owner_tree(
+        fs.into_device().power_loss(),
+    )
+    .unwrap();
+    assert_eq!(reopened.manifest().generation, generation);
+    for i in 0..4 {
+        assert_eq!(reopened.read_file(&format!("/large/file{i}")).unwrap(), payload);
+    }
+    reopened.write_at("/large/file0", 21, b"updated").unwrap();
+    assert_eq!(
+        &reopened.read_file("/large/file0").unwrap()[21..28],
+        b"updated"
+    );
+}
+
+#[test]
+fn f0_owner_btree_keeps_fallback_during_power_loss() {
+    for operation in 1..=6 {
+        let mut fs = UnifiedV10::format_indexed(CrashDevice::new(576), VID).unwrap();
+        fs.mkdir("/demo").unwrap();
+        fs.write_at("/demo/file", 0, b"old").unwrap();
+        fs.enable_f0_published_owner_tree().unwrap();
+        fs.write_at("/demo/file", 0, b"stable").unwrap();
+        let old_generation = fs.manifest().generation;
+        let mut disk = fs.into_device().power_loss();
+        disk.inject(Fault {
+            operation,
+            torn_bytes: Some(96),
+        })
+        .unwrap();
+        let mut tx = UnifiedV10::reopen_with_verified_owner_tree(disk).unwrap();
+        assert!(matches!(
+            tx.write_at("/demo/file", 0, b"new"),
+            Err(Error::InjectedCrash)
+        ));
+        let mut recovered = UnifiedV10::open(tx.into_device().power_loss()).unwrap();
+        assert!(
+            recovered.manifest().generation == old_generation
+                || recovered.manifest().generation == old_generation + 1
+        );
+        let contents = recovered.read_file("/demo/file").unwrap();
+        assert!(contents.starts_with(b"stable") || contents.starts_with(b"new"));
+    }
+}
+
+#[test]
+fn malformed_owner_btree_node_is_rejected_even_when_f0_remains_checksummed() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(512), VID).unwrap();
+    fs.mkdir("/a").unwrap();
+    fs.enable_f0_published_owner_tree().unwrap();
+    fs.write_at("/a/file", 0, b"payload").unwrap();
+    let generation = fs.manifest().generation;
+    let mut disk = fs.into_device().power_loss();
+
+    let mut superblock = [0_u8; 4096];
+    disk.read_block(generation % 2, &mut superblock).unwrap();
+    let payload_address =
+        u64::from_le_bytes(superblock[40..48].try_into().unwrap());
+    let mut root_payload = [0_u8; 4096];
+    disk.read_block(payload_address, &mut root_payload).unwrap();
+    let owner_offset = 16 + MANIFEST_BYTES + 8;
+    let owner_address = u64::from_le_bytes(
+        root_payload[owner_offset..owner_offset + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert!(owner_address >= 69);
+    disk.write_block(owner_address, &[0_u8; 4096]).unwrap();
+    disk.sync().unwrap();
+    assert!(
+        UnifiedV10::open(disk.power_loss()).is_err(),
+        "a valid F0 CRC must not authorize a corrupt owner tree"
+    );
 }
