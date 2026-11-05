@@ -3,9 +3,7 @@ use bfs_ng_storage::experimental_v10::{
     ReadOnlyV10, SNAPSHOT_BYTES, SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
     decode_snapshot_leaf, read_page,
 };
-use bfs_ng_storage::{
-    BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, RootInfo, Volume,
-};
+use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, RootInfo, Volume};
 
 const VID: u128 = 0x86a4_32dd_98af_e10a;
 const TOTAL: u64 = 80;
@@ -109,26 +107,20 @@ fn v10_pages_are_canonical_and_parent_authenticated() {
     let mut forged = raw;
     forged[BLOCK_SIZE - 1] ^= 1;
     crc_field(&mut forged, 12);
-    assert!(Page::decode_verified(
-        &forged,
-        pointer,
-        TreeId::AttributeRows,
-        VID,
-        TOTAL,
-        7
-    )
-    .is_err());
+    assert!(Page::decode_verified(&forged, pointer, TreeId::AttributeRows, VID, TOTAL, 7).is_err());
     let mut wrong_crc_pointer = pointer;
     wrong_crc_pointer.crc32c ^= 0x80;
-    assert!(Page::decode_verified(
-        &raw,
-        wrong_crc_pointer,
-        TreeId::AttributeRows,
-        VID,
-        TOTAL,
-        7
-    )
-    .is_err());
+    assert!(
+        Page::decode_verified(
+            &raw,
+            wrong_crc_pointer,
+            TreeId::AttributeRows,
+            VID,
+            TOTAL,
+            7
+        )
+        .is_err()
+    );
 
     // Even a freshly forged BP matching an uncanonical slotted directory
     // cannot legitimize overlapping offsets, nonzero padding, bad key order.
@@ -137,56 +129,30 @@ fn v10_pages_are_canonical_and_parent_authenticated() {
     crc_field(&mut malformed, 12);
     let mut forged_pointer = pointer;
     forged_pointer.crc32c = crc32c(&malformed);
-    assert!(Page::decode_verified(
-        &malformed,
-        forged_pointer,
-        TreeId::AttributeRows,
-        VID,
-        TOTAL,
-        7
-    )
-    .is_err());
-
-    for bad_addr in [0, 1, 2, 3, 4, TOTAL] {
-        let mut ptr = pointer;
-        ptr.address = bad_addr;
-        assert!(Page::decode_verified(
-            &raw,
-            ptr,
+    assert!(
+        Page::decode_verified(
+            &malformed,
+            forged_pointer,
             TreeId::AttributeRows,
             VID,
             TOTAL,
             7
         )
-        .is_err());
+        .is_err()
+    );
+
+    for bad_addr in [0, 1, 2, 3, 4, TOTAL] {
+        let mut ptr = pointer;
+        ptr.address = bad_addr;
+        assert!(Page::decode_verified(&raw, ptr, TreeId::AttributeRows, VID, TOTAL, 7).is_err());
     }
-    assert!(Page::decode_verified(
-        &raw,
-        pointer,
-        TreeId::AttributePostings,
-        VID,
-        TOTAL,
-        7
-    )
-    .is_err());
-    assert!(Page::decode_verified(
-        &raw,
-        pointer,
-        TreeId::AttributeRows,
-        VID + 1,
-        TOTAL,
-        7
-    )
-    .is_err());
-    assert!(Page::decode_verified(
-        &raw,
-        pointer,
-        TreeId::AttributeRows,
-        VID,
-        TOTAL,
-        6
-    )
-    .is_err());
+    assert!(
+        Page::decode_verified(&raw, pointer, TreeId::AttributePostings, VID, TOTAL, 7).is_err()
+    );
+    assert!(
+        Page::decode_verified(&raw, pointer, TreeId::AttributeRows, VID + 1, TOTAL, 7).is_err()
+    );
+    assert!(Page::decode_verified(&raw, pointer, TreeId::AttributeRows, VID, TOTAL, 6).is_err());
 }
 
 #[test]
@@ -205,8 +171,15 @@ fn branch_pointers_validate_child_level_and_birth_generation() {
     };
     let encoded = branch.encode().unwrap();
     assert_eq!(
-        Page::decode_verified(&encoded, branch.pointer().unwrap(), TreeId::Fs, VID, TOTAL, 12)
-            .unwrap(),
+        Page::decode_verified(
+            &encoded,
+            branch.pointer().unwrap(),
+            TreeId::Fs,
+            VID,
+            TOTAL,
+            12
+        )
+        .unwrap(),
         branch
     );
     let mut wrong_level = branch.clone();
@@ -322,9 +295,16 @@ fn v10_read_only_view_retains_historical_attribute_roots_after_f0_rotation() {
     r1.attribute_rows = Some(old_rows.pointer().unwrap());
     r1.attribute_postings = Some(old_postings.pointer().unwrap());
     r1.schema = Some(old_schema.pointer().unwrap());
-    v = commit_with_pages(v, manifest(1, 72, r1), &[
-        old_fs.clone(), old_rows.clone(), old_postings.clone(), old_schema.clone()
-    ]);
+    v = commit_with_pages(
+        v,
+        manifest(1, 72, r1),
+        &[
+            old_fs.clone(),
+            old_rows.clone(),
+            old_postings.clone(),
+            old_schema.clone(),
+        ],
+    );
     let pinned = SnapshotDescriptor {
         generation: 1,
         fs_root: old_fs.pointer().unwrap(),
@@ -355,9 +335,11 @@ fn v10_read_only_view_retains_historical_attribute_roots_after_f0_rotation() {
     latest_roots.attribute_postings = Some(new_postings.pointer().unwrap());
     latest_roots.schema = Some(new_schema.pointer().unwrap());
     latest_roots.snapshots = Some(snapshots.pointer().unwrap());
-    v = commit_with_pages(v, manifest(2, 67, latest_roots), &[
-        new_fs, new_rows, new_postings, new_schema, snapshots
-    ]);
+    v = commit_with_pages(
+        v,
+        manifest(2, 67, latest_roots),
+        &[new_fs, new_rows, new_postings, new_schema, snapshots],
+    );
 
     // Rotate both F0 root slots away from g1 and g2. All four g1 pages
     // still have to verify through the immutable snapshot descriptor.
@@ -471,20 +453,20 @@ fn v10_and_f0_continue_past_the_u32_generation_limit_with_test_only_seed() {
     for (generation, p) in [(last_u32 - 1, p_prev), (last_u32, p_last)] {
         let m = manifest(generation, p.address, roots(&p));
         let wrapped = make_payload(&m.encode(TOTAL).unwrap());
-        disk.write_block(2 + (generation - 1) % 3, &wrapped).unwrap();
-        disk.write_block(generation % 2, &make_superblock(generation, crc32c(&wrapped)))
+        disk.write_block(2 + (generation - 1) % 3, &wrapped)
             .unwrap();
+        disk.write_block(
+            generation % 2,
+            &make_superblock(generation, crc32c(&wrapped)),
+        )
+        .unwrap();
     }
     disk.sync().unwrap();
 
     let v = Volume::open(disk.power_loss()).unwrap();
     assert_eq!(v.info().generation, last_u32);
     let next = fs_root(73, last_u32 + 1);
-    let v = commit_with_pages(
-        v,
-        manifest(last_u32 + 1, 73, roots(&next)),
-        &[next],
-    );
+    let v = commit_with_pages(v, manifest(last_u32 + 1, 73, roots(&next)), &[next]);
     let view = ReadOnlyV10::open(v.into_device().power_loss()).unwrap();
     assert_eq!(view.manifest().generation, last_u32 + 1);
     assert_eq!(view.root_info().generation, last_u32 + 1);
