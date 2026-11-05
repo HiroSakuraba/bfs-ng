@@ -1,7 +1,7 @@
 //! F5.3 opt-in indexed-space integration: verify F0 publication, persisted
 //! Free/Dead roots, historical data and repeated-write endurance.
 use bfs_ng_storage::experimental_v10::{ReadOnlyV10, UnifiedV10};
-use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault};
+use bfs_ng_storage::{BLOCK_SIZE, CrashDevice, Error, Fault};
 
 const VID: u128 = 0xabcc_3521_0457_9988;
 
