@@ -1423,19 +1423,14 @@ impl<D: BlockDevice> UnifiedV10<D> {
             // the staged candidate was just fully verified in the overlay.
             // Rotate their certified ownership sets and compare against the
             // full-graph oracle BEFORE F0 can publish a new Free root.
-            let owner_graph =
-                OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
-            let shadow = TwoRootOwners::from_audit(
-                owner_graph,
-                &owned,
-                checked.retired_global.clone(),
-            )?;
+            let owner_graph = OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
+            let shadow =
+                TwoRootOwners::from_audit(owner_graph, &owned, checked.retired_global.clone())?;
             let candidate_graph = OwnerGraph::new(
                 candidate_checked.owned.clone(),
                 candidate_checked.global_pages.clone(),
             )?;
-            let staged_addrs: BTreeSet<u64> =
-                staged.iter().map(|(address, _)| *address).collect();
+            let staged_addrs: BTreeSet<u64> = staged.iter().map(|(address, _)| *address).collect();
             let transition = shadow.transition(
                 candidate_graph,
                 &staged_addrs,
@@ -1452,7 +1447,10 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 .collect();
             if transition.next.protected() != expected
                 || !transition.allocated.is_subset(&staged_addrs)
-                || transition.retired.iter().any(|address| expected.contains(address))
+                || transition
+                    .retired
+                    .iter()
+                    .any(|address| expected.contains(address))
             {
                 return Err(Error::CorruptTree);
             }
