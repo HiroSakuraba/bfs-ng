@@ -1,5 +1,6 @@
 use bfs_ng_storage::experimental_v10::{
-    HeaderlessDataWriter, ReadOnlyV10, SnapshotState, read_checksum_tree, stage_checksum_tree,
+    HeaderlessDataWriter, Item, Page, ReadOnlyV10, SnapshotState, TreeId, read_checksum_tree,
+    stage_checksum_tree,
 };
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault};
 use std::collections::BTreeMap;
@@ -204,4 +205,25 @@ fn no_space_never_creates_a_partial_file_publication() {
     assert_eq!(writer.manifest().generation, 2);
     let mut reopened = HeaderlessDataWriter::open(writer.into_device().power_loss()).unwrap();
     assert_eq!(reopened.read_current().unwrap(), b"a");
+}
+
+#[test]
+fn unsupported_checksum_run_count_is_rejected_even_with_valid_parent_checksum() {
+    let mut disk = CrashDevice::new(256);
+    let page = Page {
+        tree: TreeId::Checksum,
+        level: 0,
+        birth: 2,
+        address: 250,
+        volume_id: VID,
+        items: vec![Item {
+            key: 100_u64.to_be_bytes().to_vec(),
+            // The future run format may support count >1. The current
+            // single-block codec must fail closed rather than skip entries.
+            value: vec![2, 0, 0, 0, 1, 2, 3, 4],
+        }],
+    };
+    disk.write_block(250, &page.encode().unwrap()).unwrap();
+    disk.sync().unwrap();
+    assert!(read_checksum_tree(&mut disk, Some(page.pointer().unwrap()), VID, 2).is_err());
 }
