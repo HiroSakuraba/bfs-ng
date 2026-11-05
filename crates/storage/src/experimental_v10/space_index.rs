@@ -362,6 +362,78 @@ pub fn stage_space_delta<D: BlockDevice>(
         staged_pages: planner.staged,
     })
 }
+/// Authenticated-tree contents are still not an ownership proof. Check the
+/// independent two-root owner set before any allocation from free runs,
+/// and prove free/dead intervals do not contradict one another.
+pub fn validate_space_pair(
+    free: &BTreeMap<u64, FreeRun>,
+    dead: &BTreeMap<(u64, u64), DeadRun>,
+    both_root_owners: &BTreeSet<u64>,
+    published_generation: u64,
+    total: u64,
+) -> Result<()> {
+    if published_generation == 0 { return Err(Error::CorruptTree); }
+    let mut all = Vec::new();
+    for run in free.values() {
+        free_item(*run, total).map_err(|_| Error::CorruptTree)?;
+        if run.eligible_after <= published_generation
+            && (run.start..run.start + u64::from(run.blocks))
+                .any(|address| both_root_owners.contains(&address))
+        {
+            return Err(Error::CorruptTree);
+        }
+        all.push((run.start, run.blocks, run.eligible_after));
+    }
+    for run in dead.values() {
+        dead_item(*run, total).map_err(|_| Error::CorruptTree)?;
+        all.push((run.start, run.blocks, run.eligible_after));
+    }
+    no_overlaps(all, false)
+}
+
+/// Fast index lookup against a previously certified two-root owner set.
+/// Returns descending physical reservations and a new exact free-run map.
+/// The caller must stage/publish the new Free root atomically with writes.
+pub struct FreeReservation {
+    pub selected: Vec<u64>,
+    pub remaining: BTreeMap<u64, FreeRun>,
+}
+pub fn reserve_free(
+    free: &BTreeMap<u64, FreeRun>,
+    both_root_owners: &BTreeSet<u64>,
+    current_generation: u64,
+    requested: usize,
+) -> Result<FreeReservation> {
+    if current_generation == 0 { return Err(Error::Geometry); }
+    if requested == 0 {
+        return Ok(FreeReservation {
+            selected: Vec::new(), remaining: free.clone(),
+        });
+    }
+    let mut remaining = free.clone();
+    let mut selected = Vec::new();
+    for (&start, &run) in free.iter().rev() {
+        if run.eligible_after > current_generation { continue; }
+        let mut taken = 0_u32;
+        for address in (run.start..run.start + u64::from(run.blocks)).rev() {
+            if selected.len() >= requested { break; }
+            if both_root_owners.contains(&address) { return Err(Error::CorruptTree); }
+            selected.push(address);
+            taken += 1;
+        }
+        if taken > 0 {
+            let rest = run.blocks - taken;
+            remaining.remove(&start);
+            if rest > 0 {
+                remaining.insert(start, FreeRun { blocks: rest, ..run });
+            }
+        }
+        if selected.len() == requested { break; }
+    }
+    if selected.len() != requested { return Err(Error::NoSpace); }
+    Ok(FreeReservation { selected, remaining })
+}
+
 /// Bounded, deliberately non-authoritative incremental retirement planner.
 /// The caller supplies a FULL independently certified set of both-F0 owners,
 /// and must atomically publish resulting Free/Dead tree deltas with F0.
