@@ -273,7 +273,7 @@ impl<D: BlockDevice> Planner<'_, D> {
 /// list must contain distinct *descending* physical blocks strictly below
 /// the previous published high-water mark and above F0's 0-4 blocks.
 /// This is NOT an independently verified allocator; no writes occur here.
-pub fn plan_snapshot_edit<D: BlockDevice>(
+fn plan_snapshot_edit_with_mode<D: BlockDevice>(
     device: &mut D,
     old_root: Option<BlockPointer>,
     edit: CatalogEdit,
@@ -281,6 +281,7 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
     new_generation: u64,
     high_water: u64,
     reserved_virgin_pages: &[u64],
+    audited_reuse: bool,
 ) -> Result<StagedCatalog> {
     if volume_id == 0
         || new_generation <= 1
@@ -289,7 +290,7 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
         || reserved_virgin_pages.is_empty()
         || reserved_virgin_pages
             .iter()
-            .any(|&x| x <= ROOT_PAYLOAD_LAST || x >= high_water)
+            .any(|&x| x <= ROOT_PAYLOAD_LAST || x >= device.block_count() || (!audited_reuse && x >= high_water))
         || reserved_virgin_pages
             .windows(2)
             .any(|pair| pair[0] <= pair[1])
@@ -349,4 +350,37 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
         consumed_reservations: planner.used,
         staged_pages: planner.staged,
     })
+}
+
+/// Original virgin-only public catalog planner.
+pub fn plan_snapshot_edit<D: BlockDevice>(
+    device: &mut D,
+    old_root: Option<BlockPointer>,
+    edit: CatalogEdit,
+    volume_id: u128,
+    new_generation: u64,
+    high_water: u64,
+    reserved_virgin_pages: &[u64],
+) -> Result<StagedCatalog> {
+    plan_snapshot_edit_with_mode(
+        device, old_root, edit, volume_id, new_generation,
+        high_water, reserved_virgin_pages, false,
+    )
+}
+
+/// Only for writer operations that have independently reconstructed every
+/// ownership path across both recoverable F0 candidates. Still no writes.
+pub(super) fn plan_snapshot_edit_reusing<D: BlockDevice>(
+    device: &mut D,
+    old_root: Option<BlockPointer>,
+    edit: CatalogEdit,
+    volume_id: u128,
+    new_generation: u64,
+    high_water: u64,
+    reservations: &[u64],
+) -> Result<StagedCatalog> {
+    plan_snapshot_edit_with_mode(
+        device, old_root, edit, volume_id, new_generation,
+        high_water, reservations, true,
+    )
 }
