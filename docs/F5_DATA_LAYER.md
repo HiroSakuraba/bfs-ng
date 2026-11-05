@@ -115,7 +115,7 @@ Branch values are block pointers (§6.3).
 
 **Why keep a header on metadata pages:** own address plus volume id makes a misdirected or foreign page detectable even before the parent's checksum is consulted, and lets an orphan scan (backlog P0) recognize F5 pages. Metadata is a small fraction of space, so the 48 bytes are cheap there.
 
-**Why 4 KiB pages:** smaller pages keep CoW amplification low for small updates, and 4 KiB matches the minimum atomic write unit of common devices. A `node_size` field is reserved in the manifest; larger nodes are a measured follow-up, not a default.
+**Why 4 KiB pages:** smaller pages keep CoW amplification low for small updates and align with common logical sector/page conventions; **4 KiB physical write atomicity is not assumed or guaranteed**. A `node_size` field is reserved in the manifest; larger nodes are a measured follow-up, not a default.
 
 **Why variable-length items:** with short binary keys (§7.1) a branch holds roughly 80 children instead of 12. That makes trees about three levels shallower at 100,000 entries and cuts path-copy writes accordingly.
 
@@ -258,7 +258,7 @@ A byte range with no covering extent is a hole and reads as zeros. File size com
 
 **Why no "offset into a larger disk extent" field (unlike btrfs):** F5 extents are block-granular and uncompressed, so any aligned sub-range of a physical run is itself a valid physical run with its own per-block checksums. A partial overwrite can trim the surviving pieces by adjusting `disk_start` and `blocks` and release the overwritten middle immediately. btrfs keeps an inner offset because compressed extents cannot be cut, and pays for it with "bookend" space that stays allocated after partial overwrites. If compression is added later, compressed extents become indivisible units with their own kind and keep the inner-offset field then.
 
-**Why cap extents at 32 MiB:** bounds the work for one split, keeps checksum lookups to a handful of leaves, and stops one huge write from monopolizing the allocator's largest free run.
+**Why cap extents at 32 MiB:** bounds the work for one split, limits checksum lookup scope and stops one huge write from monopolizing the allocator's largest free run. A file can contain arbitrarily many extents; the limit applies per record, not per file.
 
 ### 7.3 Inline small files
 
@@ -282,7 +282,7 @@ fn fallocate(&mut self, ino: Ino, offset: u64, len: u64) -> Result<()>;
 
 `write_file(path, bytes)` remains as a convenience that truncates to zero and writes.
 
-Dirty data is held in a per-transaction overlay of 4 KiB buffers keyed by `(inode, block index)`, with a byte budget. When the budget is exceeded, the oldest dirty runs are **spilled**: blocks are allocated (§8), written without sync, and recorded in the overlay as staged extents. A spilled block is never-published, so on abort it returns to the ready pool immediately, by the same rule as the F0.R1 staging correction.
+Dirty data is held in a per-transaction overlay of 4 KiB buffers keyed by `(inode, block index)`, with a byte budget. When the budget is exceeded, the oldest dirty runs are **spilled**: blocks are allocated (§8), written without sync, and recorded in the overlay as staged extents. A spilled block that is **known** to have never been published can return to the live transaction's private certified pool on an in-process abort, following F0.R1. After a power loss the corresponding address is an *unreconciled orphan* until a full independent scan proves it unreferenced; do not trust a stale in-memory ready set or assume crashed allocations can be returned immediately.
 
 At commit:
 
@@ -327,7 +327,7 @@ value = blocks: u64, state: u8, reserved: 7 bytes (zero),
         eligible_after_generation: u64
 ```
 
-`state = EPOCH` identifies an independently proven, released run. `state = DEFERRED` indicates a retirement candidate still awaiting proof/bounded sweep; it is **never** available for allocation irrespective of the generation. Other states are invalid in v10. A run must be disjoint from all live data/metadata and all root/snapshot ownership before it enters `EPOCH`; a fallback-owned block may be checkpointed as a release candidate with a future epoch but must not be treated as allocatable until that root rotates out.
+`state = EPOCH` identifies an independently proven, released run. `state = DEFERRED` indicates a retirement candidate still awaiting proof/bounded sweep; it is **never** available for allocation irrespective of the generation. Other states are invalid in v10. A run in `EPOCH` state must be absent from the **newly published manifest's live/pinned ownership**. It may remain referenced by its **older F0 fallback**, but only with a future eligibility epoch that prevents allocation until that fallback rotates out. An EPOCH run may never be allocated while still referenced by either candidate.
 
 **Precisely define eligibility:** let `g` be the currently selected, fully published F0 generation at the **start** of the next transaction. An `EPOCH` run is available for reservation only if `eligible_after_generation <= g`, the current handle is ownership-certified in `Full` mode (or the explicitly gated F5.3 `Accounted` mode), and the run is not claimed by that transaction. This distinguishes being *marked* ready in the newly published manifest from being safely allocatable while preparing it.
 
@@ -556,7 +556,7 @@ key   = start: u64 BE
 value = blocks: u32, extra_refs: u32
 ```
 
-Cloning sets `MAY_BE_SHARED` on both the source and destination extent items and increments `extra_refs`. A kill of a run with `MAY_BE_SHARED` set consults the table: if `extra_refs > 0`, decrement and stop; otherwise apply §9.2. Kills of runs without the flag skip the table.
+Cloning sets `MAY_BE_SHARED` on both the source and destination extent items and increments `extra_refs`. The original simple keyed-by-start share table is **not approved for implementation**: partial clones, overlapping subranges and split extents can make independent physical intervals share one address range. Future sharing requires an **interval-aware, normalized reference model** that splits/coalesces on every change, counts *all* live and snapshot references, and delays physical release until both F0 candidates and every saved descriptor are clear. The `MAY_BE_SHARED` flag may optimize lookups, but must never by itself authorize freeing a region or skipping a required reference check.
 
 **Why the flag bit:** OpenZFS block cloning has no such bit, so every free must check its Block Reference Table. A new format can add it cheaply.
 
@@ -566,19 +566,18 @@ Cloning sets `MAY_BE_SHARED` on both the source and destination extent items and
 
 ## 13. Commit ordering
 
-Unchanged from F0.R1 in its barriers:
+The F0.R1 barrier order remains unchanged; **the source of allocation authority does not change until F5.3 is proved**:
 
-1. Apply the transaction to an in-memory delta of the fs, checksum and attribute trees.
-2. Allocate data runs (§8.4); reserve tree-update blocks (§8.6).
-3. Path-copy all trees; record kill events; apply §9.2; update free tree and dead lists; process at most one bounded dead-list budget (§9.5).
-4. Return unused reservations to ready.
-5. In test builds, run the oracle against the staged state.
-6. Write all staged pages and data blocks not already spilled. **Sync.**
-7. Write manifest v10 into the next ring slot. **Sync.**
-8. Write the alternating superblock. **Sync.**
-9. Install the new in-handle state only after step 8 succeeds; any failure poisons the handle.
-
-Spilled data blocks (§7.4) may be written before step 6; the step-6 sync covers them.
+1. Start with a certified live generation and a complete snapshot catalog; gather a transaction-local delta to fs, checksum and attribute trees. A transaction that pins a snapshot captures one **well-defined pre-commit view** (the current published roots); a future pin-new-generation API would need a separate explicit contract.
+2. Reserve data runs and an independent, pre-bounded metadata arena (§8.6), only from certified ready or proven virgin space.
+3. Path-copy the fs tree and the exact historical attribute/schema descriptors; preserve physical checksums for *all* live and pinned data (§6.4). Build typed release candidates, distinguishing global-tree pages from snapshot-owned pages (§9.1).
+4. Apply stable eligibility epoch updates and bounded deferred/dead-list bookkeeping. Do **not** promote a run merely because a fallback will rotate on this same commit.
+5. Apply the final free-tree delta once, consuming its reserved arena. Return genuinely never-published, unused reservations to the private pool; emit no accounting record that overlaps a staged page or two-root owner.
+6. In `Full` verification mode, independently verify the **staged new candidate and existing F0 fallback** plus all snapshot descriptors, checksum reachability, free-run eligibility and metadata self-allocation. Any disagreement aborts without publication. Later `Accounted` mode needs the F5.3 proof gate.
+7. Write all staged immutable metadata and data blocks not already spilled. **Sync.** Prewritten spill blocks are included in this barrier; uncommitted orphan cleanup remains a separate verified operation.
+8. Write the new v10 manifest into the next F0 payload ring slot. **Sync.**
+9. Write the alternate F0 superblock. **Sync.**
+10. Only after final successful sync update the writer's state/certificate. Any ambiguous write/sync failure poisons the handle and requires reopening under the read-vs-reuse policy (§6.6).
 
 **Not in F5, but unblocked by it:** group commit (several transactions per generation, with `fsync` meaning "wait for the next published generation"). This belongs in the mount milestone. It matters for throughput and for how fast generations are consumed.
 
