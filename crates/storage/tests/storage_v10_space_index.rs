@@ -1,6 +1,7 @@
 use bfs_ng_storage::experimental_v10::{
     DeadRun, FreeRun, SpaceDomain, TreeId, dead_item, free_item,
-    read_space_tree, reserve_free, retire_step, stage_space_delta, validate_space_pair,
+    read_space_tree, reserve_free, retire_step, retire_step_cursor, stage_space_delta,
+    validate_space_pair,
 };
 use bfs_ng_storage::{BlockDevice, CrashDevice, Error};
 use std::collections::{BTreeMap, BTreeSet};
@@ -225,4 +226,39 @@ fn retirement_coalesces_equal_epochs_but_not_different_eligibility() {
     assert_eq!(step.free.get(&30).unwrap().blocks, 4);
     assert_eq!(step.free.get(&34).unwrap().blocks, 2);
     assert_eq!(step.free.len(), 2);
+}
+
+#[test]
+fn persisted_retirement_cursor_prevents_blocked_oldest_entry_starvation() {
+    let mut dead = BTreeMap::new();
+    for start in [20, 30, 40, 50] {
+        dead.insert((2, start), DeadRun {
+            dead_generation: 2, start, blocks: 1,
+            eligible_after: 4, domain: SpaceDomain::Snapshot,
+        });
+    }
+    let protected = BTreeSet::from([20]);
+    let first = retire_step_cursor(
+        &BTreeMap::new(), &dead, &protected, 5, 1, None,
+    ).unwrap();
+    assert_eq!(first.scanned, 1);
+    assert_eq!(first.released, 0);
+    assert_eq!(first.cursor, Some((2, 20)));
+    // Simulate reopening F0 after the first atomic cursor publication.
+    let second = retire_step_cursor(
+        &first.free, &first.dead, &protected, 5, 1, first.cursor,
+    ).unwrap();
+    assert_eq!(second.released, 1);
+    assert_eq!(second.cursor, Some((2, 30)));
+    let third = retire_step_cursor(
+        &second.free, &second.dead, &protected, 5, 1, second.cursor,
+    ).unwrap();
+    assert_eq!(third.released, 1);
+    assert_eq!(third.cursor, Some((2, 40)));
+    let fourth = retire_step_cursor(
+        &third.free, &third.dead, &protected, 5, 1, third.cursor,
+    ).unwrap();
+    assert_eq!(fourth.released, 1);
+    assert_eq!(fourth.cursor, Some((2, 50)));
+    assert_eq!(fourth.dead.len(), 1);
 }
