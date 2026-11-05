@@ -9,13 +9,13 @@ use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
-mod snapshot_tree;
-mod virgin_writer;
 mod checksum_tree;
 mod data_writer;
+mod snapshot_tree;
+mod virgin_writer;
 pub use checksum_tree::{
-    ChecksumScan, MAX_CHECKSUM_BLOCKS, MAX_CHECKSUM_PAGES, StagedChecksums,
-    read_checksum_tree, read_verified_block, stage_checksum_tree,
+    ChecksumScan, MAX_CHECKSUM_BLOCKS, MAX_CHECKSUM_PAGES, StagedChecksums, read_checksum_tree,
+    read_verified_block, stage_checksum_tree,
 };
 pub use data_writer::HeaderlessDataWriter;
 pub use snapshot_tree::{
