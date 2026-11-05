@@ -170,6 +170,8 @@ impl<D: BlockDevice> Planner<'_, D> {
 ///
 /// Reservations are only geometry-validated; the caller must independently
 /// prove virgin ownership, verify resulting tree, and publish through F0.
+// Wire geometry, generation and the internal reuse gate are explicit here.
+#[allow(clippy::too_many_arguments)]
 fn stage_checksum_delta_with_mode<D: BlockDevice>(
     device: &mut D,
     old_root: Option<BlockPointer>,
