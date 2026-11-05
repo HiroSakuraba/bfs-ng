@@ -11,11 +11,11 @@ use std::collections::BTreeSet;
 
 mod snapshot_tree;
 mod virgin_writer;
-pub use virgin_writer::VirginSnapshotWriter;
 pub use snapshot_tree::{
     CatalogEdit, CatalogScan, MAX_SNAPSHOT_DESCRIPTORS, MAX_SNAPSHOT_TREE_PAGES, StagedCatalog,
     plan_snapshot_edit, read_snapshot_tree,
 };
+pub use virgin_writer::VirginSnapshotWriter;
 
 pub const MANIFEST_MAGIC: [u8; 8] = *b"BFSNGM10";
 pub const PAGE_MAGIC: [u8; 8] = *b"BFSNGT10";
