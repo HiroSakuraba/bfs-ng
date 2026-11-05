@@ -547,6 +547,12 @@ pub fn reserve_free(
             return Err(Error::CorruptTree);
         }
     }
+    no_overlaps(
+        free.values()
+            .map(|run| (run.start, run.blocks, run.eligible_after))
+            .collect(),
+        true,
+    )?;
     if requested == 0 {
         return Ok(FreeReservation {
             selected: Vec::new(),
