@@ -539,7 +539,9 @@ pub fn reserve_free(
         if run.blocks == 0 || run.start <= ROOT_PAYLOAD_LAST || run.eligible_after == 0 {
             return Err(Error::CorruptTree);
         }
-        let end = run.start.checked_add(u64::from(run.blocks))
+        let end = run
+            .start
+            .checked_add(u64::from(run.blocks))
             .ok_or(Error::CorruptTree)?;
         // Check the ordered owner set without visiting every block of a
         // potentially enormous contiguous free extent.
@@ -648,7 +650,10 @@ pub fn retire_step_cursor(
     // then wrap once; even future-ineligible records consume the work budget.
     let anchor = after.unwrap_or((0, 0));
     for (&key, &item) in dead
-        .range((std::ops::Bound::Excluded(anchor), std::ops::Bound::Unbounded))
+        .range((
+            std::ops::Bound::Excluded(anchor),
+            std::ops::Bound::Unbounded,
+        ))
         .chain(dead.range(..=anchor))
     {
         if scanned >= budget {
