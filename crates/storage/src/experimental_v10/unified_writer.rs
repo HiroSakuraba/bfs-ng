@@ -11,13 +11,13 @@
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
 use super::allocation_certificate::{OwnerGraph, PublishedOwnerReceipt, TwoRootOwners};
+use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
+use super::checksum_delta::stage_checksum_delta_reusing;
+use super::namespace::stage_namespace_tree_reusing;
 use super::owner_tree::{
     OwnerRootAnchor, OwnerScan, changes as owner_changes, parse_anchor, payload_owners,
     read_owner_tree, stage_owner_delta,
 };
-use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
-use super::checksum_delta::stage_checksum_delta_reusing;
-use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
 use super::space_index::{
     DeadRun, FreeRun, MAX_RETIRE_STEP, SpaceDomain, dead_item, free_item, read_space_tree,
@@ -1590,7 +1590,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 return Err(Error::CorruptTree);
             }
             candidate_checked.owned.extend(scan.pages.iter().copied());
-            candidate_checked.global_pages.extend(scan.pages.iter().copied());
+            candidate_checked
+                .global_pages
+                .extend(scan.pages.iter().copied());
             candidate_checked.owner_root = Some(root);
             candidate_checked.owner_scan = Some(scan);
             validate_space_pair(

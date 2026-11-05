@@ -318,7 +318,8 @@ fn f0_owner_btree_survives_many_cow_mutations_and_retained_snapshots() {
         if i % 9 == 3 {
             fs.truncate("/assets/a", 22).unwrap();
         } else {
-            fs.write_at("/assets/a", (i % 3) * 4096, &i.to_le_bytes()).unwrap();
+            fs.write_at("/assets/a", (i % 3) * 4096, &i.to_le_bytes())
+                .unwrap();
         }
         if i % 7 == 0 {
             fs.reclaim_step().unwrap();
@@ -330,7 +331,10 @@ fn f0_owner_btree_survives_many_cow_mutations_and_retained_snapshots() {
     let mut recovered = UnifiedV10::reopen_with_verified_owner_tree(disk).unwrap();
     assert_eq!(recovered.manifest().generation, committed);
     assert_eq!(recovered.read_file("/assets/a").unwrap(), expected);
-    assert_eq!(recovered.read_snapshot_file(snap, "/assets/a").unwrap(), b"initial");
+    assert_eq!(
+        recovered.read_snapshot_file(snap, "/assets/a").unwrap(),
+        b"initial"
+    );
     recovered.write_at("/assets/a", 0, b"after").unwrap();
     let mut again = UnifiedV10::open(recovered.into_device().power_loss()).unwrap();
     assert!(again.read_file("/assets/a").unwrap().starts_with(b"after"));
@@ -343,16 +347,18 @@ fn f0_owner_btree_handles_more_than_one_leaf_and_many_payload_blocks() {
     fs.enable_f0_published_owner_tree().unwrap();
     let payload = vec![0x5au8; 60 * 4096];
     for i in 0..4 {
-        fs.write_at(&format!("/large/file{i}"), 0, &payload).unwrap();
+        fs.write_at(&format!("/large/file{i}"), 0, &payload)
+            .unwrap();
     }
     let generation = fs.manifest().generation;
-    let mut reopened = UnifiedV10::reopen_with_verified_owner_tree(
-        fs.into_device().power_loss(),
-    )
-    .unwrap();
+    let mut reopened =
+        UnifiedV10::reopen_with_verified_owner_tree(fs.into_device().power_loss()).unwrap();
     assert_eq!(reopened.manifest().generation, generation);
     for i in 0..4 {
-        assert_eq!(reopened.read_file(&format!("/large/file{i}")).unwrap(), payload);
+        assert_eq!(
+            reopened.read_file(&format!("/large/file{i}")).unwrap(),
+            payload
+        );
     }
     reopened.write_at("/large/file0", 21, b"updated").unwrap();
     assert_eq!(
@@ -402,8 +408,7 @@ fn malformed_owner_btree_node_is_rejected_even_when_f0_remains_checksummed() {
 
     let mut superblock = [0_u8; 4096];
     disk.read_block(generation % 2, &mut superblock).unwrap();
-    let payload_address =
-        u64::from_le_bytes(superblock[40..48].try_into().unwrap());
+    let payload_address = u64::from_le_bytes(superblock[40..48].try_into().unwrap());
     let mut root_payload = [0_u8; 4096];
     disk.read_block(payload_address, &mut root_payload).unwrap();
     let owner_offset = 16 + MANIFEST_BYTES + 8;

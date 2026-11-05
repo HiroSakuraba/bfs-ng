@@ -57,15 +57,10 @@ impl OwnerRootAnchor {
     }
 
     pub fn decode(bytes: &[u8], f0: RootInfo, total: u64) -> Result<Self> {
-        if bytes.len() != Self::BYTES
-            || bytes[..8] != Self::MAGIC
-            || bytes[44..48] != [0; 4]
-        {
+        if bytes.len() != Self::BYTES || bytes[..8] != Self::MAGIC || bytes[44..48] != [0; 4] {
             return Err(Error::CorruptTree);
         }
-        let crc = u32::from_le_bytes(
-            bytes[40..44].try_into().map_err(|_| Error::CorruptTree)?,
-        );
+        let crc = u32::from_le_bytes(bytes[40..44].try_into().map_err(|_| Error::CorruptTree)?);
         let mut copy = [0_u8; Self::BYTES];
         copy.copy_from_slice(bytes);
         copy[40..44].fill(0);
@@ -73,9 +68,8 @@ impl OwnerRootAnchor {
             return Err(Error::CorruptTree);
         }
         let root = BlockPointer::decode_required(&bytes[8..32])?;
-        let generation = u64::from_le_bytes(
-            bytes[32..40].try_into().map_err(|_| Error::CorruptTree)?,
-        );
+        let generation =
+            u64::from_le_bytes(bytes[32..40].try_into().map_err(|_| Error::CorruptTree)?);
         if generation != f0.generation || f0.volume_id == 0 {
             return Err(Error::CorruptTree);
         }
@@ -129,11 +123,12 @@ impl<D: BlockDevice> Walker<'_, D> {
             for item in page.items {
                 validate_owner_item(&item.key, &item.value, self.disk.block_count())?;
                 let address = u64::from_be_bytes(
-                    item.key.as_slice().try_into().map_err(|_| Error::CorruptTree)?,
+                    item.key
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| Error::CorruptTree)?,
                 );
-                if self.scan.owners.len() >= MAX_OWNER_ITEMS
-                    || !self.scan.owners.insert(address)
-                {
+                if self.scan.owners.len() >= MAX_OWNER_ITEMS || !self.scan.owners.insert(address) {
                     return Err(Error::CorruptTree);
                 }
                 if item.value[0] == 1 {
@@ -157,7 +152,10 @@ impl<D: BlockDevice> Walker<'_, D> {
                 last = Some(max);
             }
         }
-        Ok((first.ok_or(Error::CorruptTree)?, last.ok_or(Error::CorruptTree)?))
+        Ok((
+            first.ok_or(Error::CorruptTree)?,
+            last.ok_or(Error::CorruptTree)?,
+        ))
     }
 }
 
@@ -247,8 +245,14 @@ pub(super) fn payload_owners(
     verified_globals: &BTreeSet<u64>,
 ) -> (BTreeSet<u64>, BTreeSet<u64>) {
     (
-        verified_owners.range(MIN_OWNER_ADDRESS..).copied().collect(),
-        verified_globals.range(MIN_OWNER_ADDRESS..).copied().collect(),
+        verified_owners
+            .range(MIN_OWNER_ADDRESS..)
+            .copied()
+            .collect(),
+        verified_globals
+            .range(MIN_OWNER_ADDRESS..)
+            .copied()
+            .collect(),
     )
 }
 
@@ -271,7 +275,7 @@ pub(super) fn parse_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CrashDevice, BlockDevice};
+    use crate::{BlockDevice, CrashDevice};
 
     const VOLUME: u128 = 0x55aa_1234;
 
@@ -322,7 +326,10 @@ mod tests {
         let after = read_owner_tree(&mut disk, second.root.unwrap(), VOLUME, 6).unwrap();
         assert_eq!(after.owners, changed);
         assert_eq!(after.globals, global);
-        assert_eq!(read_owner_tree(&mut disk, root, VOLUME, 5).unwrap().owners, initial);
+        assert_eq!(
+            read_owner_tree(&mut disk, root, VOLUME, 5).unwrap().owners,
+            initial
+        );
     }
 
     #[test]
@@ -333,18 +340,31 @@ mod tests {
             crc32c: 123,
             level: 0,
         };
-        let encoded = OwnerRootAnchor { root, generation: 5 }.encode();
+        let encoded = OwnerRootAnchor {
+            root,
+            generation: 5,
+        }
+        .encode();
         let f0 = RootInfo {
             volume_id: VOLUME,
             generation: 5,
             root_block: Some(3),
         };
-        assert_eq!(OwnerRootAnchor::decode(&encoded, f0, 1024).unwrap().root, root);
-        assert!(OwnerRootAnchor::decode(
-            &encoded,
-            RootInfo { generation: 6, ..f0 },
-            1024,
-        ).is_err());
+        assert_eq!(
+            OwnerRootAnchor::decode(&encoded, f0, 1024).unwrap().root,
+            root
+        );
+        assert!(
+            OwnerRootAnchor::decode(
+                &encoded,
+                RootInfo {
+                    generation: 6,
+                    ..f0
+                },
+                1024,
+            )
+            .is_err()
+        );
         let mut corrupt = encoded;
         corrupt[10] ^= 1;
         assert!(OwnerRootAnchor::decode(&corrupt, f0, 1024).is_err());
