@@ -499,9 +499,11 @@ pub fn validate_space_pair(
     let mut all = Vec::new();
     for run in free.values() {
         free_item(*run, total).map_err(|_| Error::CorruptTree)?;
-        if run.eligible_after <= published_generation
-            && (run.start..run.start + u64::from(run.blocks))
-                .any(|address| both_root_owners.contains(&address))
+        // A Free entry must be unowned *now*, not merely when its
+        // eligibility epoch arrives. Pages still owned by either F0 root
+        // belong in delayed retirement, never in the Free tree.
+        if (run.start..run.start + u64::from(run.blocks))
+            .any(|address| both_root_owners.contains(&address))
         {
             return Err(Error::CorruptTree);
         }
@@ -529,6 +531,20 @@ pub fn reserve_free(
 ) -> Result<FreeReservation> {
     if current_generation == 0 {
         return Err(Error::Geometry);
+    }
+    // Validate the *entire* advertised free map, not just the highest
+    // addresses this particular request happens to consume. Otherwise a
+    // stale, future-eligible ownership claim could go unnoticed until a
+    // later allocation transaction.
+    for run in free.values() {
+        if run.blocks == 0 || run.start <= ROOT_PAYLOAD_LAST
+            || run.start.checked_add(u64::from(run.blocks)).is_none()
+            || run.eligible_after == 0
+            || (run.start..run.start + u64::from(run.blocks))
+                .any(|address| both_root_owners.contains(&address))
+        {
+            return Err(Error::CorruptTree);
+        }
     }
     if requested == 0 {
         return Ok(FreeReservation {
