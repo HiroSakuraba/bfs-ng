@@ -10,9 +10,14 @@
 //! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
+use super::allocation_certificate::{OwnerGraph, PublishedOwnerReceipt, TwoRootOwners};
 use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
+use super::owner_tree::{
+    OwnerRootAnchor, OwnerScan, changes as owner_changes, parse_anchor, payload_owners,
+    read_owner_tree, stage_owner_delta,
+};
 use super::snapshot_tree::plan_snapshot_edit_reusing;
 use super::space_index::{
     DeadRun, FreeRun, MAX_RETIRE_STEP, SpaceDomain, dead_item, free_item, read_space_tree,
@@ -26,7 +31,7 @@ use super::{
 };
 use crate::fs::Catalog;
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
-use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
+use crate::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Result, Volume};
 use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -225,6 +230,8 @@ struct Verified {
     dead: BTreeMap<(u64, u64), DeadRun>,
     global_pages: BTreeSet<u64>,
     retired_global: BTreeSet<u64>,
+    owner_root: Option<BlockPointer>,
+    owner_scan: Option<OwnerScan>,
 }
 fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result<Verified> {
     let reach = collect(device, root.volume_id, m)?;
@@ -328,14 +335,43 @@ fn verify<D: BlockDevice>(device: &mut D, root: RootInfo, m: Manifest) -> Result
         dead,
         global_pages,
         retired_global: BTreeSet::new(),
+        owner_root: None,
+        owner_scan: None,
     })
 }
+fn collect_payload_owner_set<D: BlockDevice>(
+    disk: &mut D,
+    id: u128,
+    manifest: Manifest,
+) -> Result<OwnerGraph> {
+    let reach = collect(disk, id, manifest)?;
+    let checksums = read_checksum_tree(disk, manifest.roots.checksum, id, manifest.generation)?;
+    if !reach.owned_metadata.is_disjoint(&checksums.metadata_pages)
+        || reach.data_births.keys().copied().collect::<BTreeSet<_>>()
+            != checksums.checksums.keys().copied().collect()
+    {
+        return Err(Error::CorruptTree);
+    }
+    let mut owned = reach.owned_metadata;
+    let mut global = checksums.metadata_pages.clone();
+    global.extend(reach.catalog_pages);
+    owned.extend(checksums.metadata_pages);
+    for address in reach.data_births.keys() {
+        if !owned.insert(*address) {
+            return Err(Error::CorruptTree);
+        }
+    }
+    OwnerGraph::new(owned, global)
+}
+
 fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, BTreeSet<u64>)> {
     let latest = volume.info();
     let mut selected = None;
     let mut owned = BTreeSet::new();
     let mut previous: Option<(u64, u64)> = None;
     let mut fallback_global = BTreeSet::new();
+    let mut fallback_manifest = None;
+    let mut latest_receipt = None;
     for (root, payload) in volume.candidate_roots()? {
         if root.generation == 0 {
             if payload.is_some() {
@@ -345,7 +381,42 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         }
         let raw = payload.ok_or(Error::CorruptRoot)?;
         let m = Manifest::decode(&raw, root, volume.block_count())?;
-        let checked = volume.inspect(|device| verify(device, root, m))?;
+        let anchor = parse_anchor(&raw, root, volume.block_count())?;
+        let receipt = if raw.len() > super::MANIFEST_BYTES && anchor.is_none() {
+            Some(PublishedOwnerReceipt::decode(
+                &raw[super::MANIFEST_BYTES..],
+            )?)
+        } else {
+            None
+        };
+        let mut checked = volume.inspect(|device| verify(device, root, m))?;
+        if let Some(anchor) = anchor {
+            if m.metadata_reserve != INDEX_ARENA_BLOCKS {
+                return Err(Error::CorruptTree);
+            }
+            let scan = volume.inspect(|disk| {
+                read_owner_tree(disk, anchor.root, root.volume_id, root.generation)
+            })?;
+            let (expected_owners, expected_globals) =
+                payload_owners(&checked.owned, &checked.global_pages);
+            if scan.owners != expected_owners
+                || scan.globals != expected_globals
+                || !scan.pages.is_disjoint(&checked.owned)
+            {
+                return Err(Error::CorruptTree);
+            }
+            checked.owned.extend(scan.pages.iter().copied());
+            checked.global_pages.extend(scan.pages.iter().copied());
+            validate_space_pair(
+                &checked.free,
+                &checked.dead,
+                &checked.owned,
+                root.generation,
+                volume.block_count(),
+            )?;
+            checked.owner_root = Some(anchor.root);
+            checked.owner_scan = Some(scan);
+        }
         if let Some((generation, watermark)) = previous {
             if root.generation != generation + 1 || m.high_water > watermark {
                 return Err(Error::CorruptTree);
@@ -354,9 +425,11 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         previous = Some((root.generation, m.high_water));
         owned.extend(checked.owned.iter().copied());
         if root.generation == latest.generation {
+            latest_receipt = receipt;
             selected = Some((m, checked));
         } else {
             fallback_global = checked.global_pages.clone();
+            fallback_manifest = Some(m);
         }
     }
     let (m, mut checked) = selected.ok_or(Error::CorruptRoot)?;
@@ -372,6 +445,26 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
             &checked.dead,
             &owned,
             m.generation,
+            volume.block_count(),
+        )?;
+    }
+    if let Some(receipt) = latest_receipt {
+        // Even an F0-atomic receipt is NOT an ownership certificate by
+        // itself. Validate its current and fallback physical sets against
+        // both full, independently traversed on-disk F0 graphs first.
+        let parent = fallback_manifest.ok_or(Error::CorruptTree)?;
+        let head_graph = OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
+        let owners = TwoRootOwners::from_audit(
+            m.generation,
+            head_graph,
+            &owned,
+            checked.retired_global.clone(),
+        )?;
+        receipt.verify_audited(
+            &owners,
+            &m,
+            &parent,
+            volume.info().volume_id,
             volume.block_count(),
         )?;
     }
@@ -590,6 +683,15 @@ enum Edit<'a> {
     Reclaim,
 }
 
+// Memory-only certificate: the audited current graph and fallback-only
+// projection are stable inside an exclusive CrashDevice handle. Never copy
+// this lease across reopen, a power cut or an independently writable device.
+struct InHandleCertificate {
+    manifest: Manifest,
+    verified: Verified,
+    ownership: TwoRootOwners,
+}
+
 /// One coherent v10 namespace/data/checksum writer for multiple files.
 /// It is single-writer, bounded (4KiB metadata pages; 256KiB per file),
 /// and virgin-only. No mount, hard links or incremental retirement yet.
@@ -597,6 +699,9 @@ pub struct UnifiedV10<D: BlockDevice> {
     volume: Volume<D>,
     manifest: Manifest,
     last_reused_blocks: usize,
+    in_handle_certificate: Option<InHandleCertificate>,
+    publish_f0_owner_receipts: bool,
+    publish_owner_tree: bool,
 }
 impl<D: BlockDevice> UnifiedV10<D> {
     pub fn format(device: D, id: u128) -> Result<Self> {
@@ -679,6 +784,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
             volume,
             manifest,
             last_reused_blocks: 0,
+            in_handle_certificate: None,
+            publish_f0_owner_receipts: false,
+            publish_owner_tree: false,
         })
     }
     pub fn manifest(&self) -> &Manifest {
@@ -939,7 +1047,25 @@ impl<D: BlockDevice> UnifiedV10<D> {
         self.commit(Edit::Reclaim)
     }
     fn commit(&mut self, edit: Edit<'_>) -> Result<u64> {
-        let (old, checked, owned) = audit(&mut self.volume)?;
+        // Default storage mode re-audits both F0 roots. The test-only
+        // exclusive CrashDevice lease retains an already-audited graph and
+        // is advanced only after full validation of the staged candidate.
+        let full_audit = if self.in_handle_certificate.is_some() {
+            None
+        } else {
+            Some(audit(&mut self.volume)?)
+        };
+        let cached_owners: BTreeSet<u64>;
+        let (old, checked, owned) = if let Some((manifest, verified, owners)) = &full_audit {
+            (*manifest, verified, owners)
+        } else {
+            let cached = self
+                .in_handle_certificate
+                .as_ref()
+                .ok_or(Error::CorruptTree)?;
+            cached_owners = cached.ownership.protected();
+            (cached.manifest, &cached.verified, &cached_owners)
+        };
         if old != self.manifest {
             return Err(Error::CorruptTree);
         }
@@ -1142,7 +1268,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             Some(retire_step_cursor(
                 &checked.free,
                 &checked.dead,
-                &owned,
+                owned,
                 old.generation,
                 MAX_RETIRE_STEP,
                 if old.sweep_snapshot == 0 {
@@ -1165,7 +1291,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 .map(|run| u64::from(run.blocks))
                 .sum::<u64>()
                 .min(STAGING_LIMIT as u64) as usize;
-            reserve_free(&step.free, &owned, old.generation, available)?.selected
+            reserve_free(&step.free, owned, old.generation, available)?.selected
         } else {
             (ROOT_PAYLOAD_LAST + 1..total)
                 .rev()
@@ -1298,19 +1424,50 @@ impl<D: BlockDevice> UnifiedV10<D> {
             next.roots.checksum = cs.root;
             staged.extend(cs.staged_pages);
         }
+        let owner_tree_enabled = self.publish_owner_tree || checked.owner_root.is_some();
+        let mut new_owner_root = None;
+        if owner_tree_enabled {
+            if !indexed || self.publish_f0_owner_receipts {
+                return Err(Error::CorruptTree);
+            }
+            let target = self.volume.inspect(|disk| {
+                let mut overlay = Overlay {
+                    disk,
+                    staged: staged.iter().copied().collect(),
+                };
+                collect_payload_owner_set(&mut overlay, id, next)
+            })?;
+            let previous = checked.owner_scan.clone().unwrap_or_else(OwnerScan::empty);
+            let edits = owner_changes(&previous, &target.pages, &target.global, total)?;
+            let planned = self.volume.inspect(|disk| {
+                stage_owner_delta(
+                    disk,
+                    checked.owner_root,
+                    &edits,
+                    &candidates[used..],
+                    id,
+                    generation,
+                    old.high_water,
+                )
+            })?;
+            let root = planned.root.ok_or(Error::CorruptTree)?;
+            used += planned.consumed_reservations;
+            staged.extend(planned.staged_pages);
+            new_owner_root = Some(root);
+        }
         let mut intended_space = None;
         let mut index_pages = 0;
         if let Some(sweep) = retirement {
             // Only actual staged data/normal metadata pages consume free
             // addresses; the Free/Dead index lives in its own reserved arena.
-            let reserved = reserve_free(&sweep.free, &owned, old.generation, used)?;
+            let reserved = reserve_free(&sweep.free, owned, old.generation, used)?;
             if reserved.selected != candidates[..used] {
                 return Err(Error::CorruptTree);
             }
             let free = reserved.remaining;
             let mut dead = sweep.dead;
-            queue_fallback_retirements(&free, &mut dead, &owned, &checked, generation)?;
-            validate_space_pair(&free, &dead, &owned, old.generation, total)?;
+            queue_fallback_retirements(&free, &mut dead, owned, checked, generation)?;
+            validate_space_pair(&free, &dead, owned, old.generation, total)?;
             let free_changes = free_deltas(&checked.free, &free, total)?;
             let dead_changes = dead_deltas(&checked.dead, &dead, total)?;
             // No allocator recursion: no Free/Dead tree page is itself in
@@ -1377,8 +1534,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
         } else {
             old.high_water
         };
-        let payload = next.encode(total)?;
-        self.volume.inspect(|device| {
+        let mut payload = next.encode(total)?.to_vec();
+        let mut candidate_checked = self.volume.inspect(|device| {
             let mut overlay = Overlay {
                 disk: device,
                 staged: staged.iter().copied().collect(),
@@ -1411,11 +1568,116 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 return Err(Error::CorruptTree);
             }
             let staged_addrs: BTreeSet<u64> = staged.iter().map(|(addr, _)| *addr).collect();
-            if staged_addrs.len() != staged.len() || !staged_addrs.is_disjoint(&owned) {
+            if staged_addrs.len() != staged.len() || !staged_addrs.is_disjoint(owned) {
                 return Err(Error::CorruptTree);
             }
-            Ok(())
+            Ok(checked)
         })?;
+        if let Some(root) = new_owner_root {
+            let scan = self.volume.inspect(|disk| {
+                let mut overlay = Overlay {
+                    disk,
+                    staged: staged.iter().copied().collect(),
+                };
+                read_owner_tree(&mut overlay, root, id, generation)
+            })?;
+            let (expected, expected_global) =
+                payload_owners(&candidate_checked.owned, &candidate_checked.global_pages);
+            if scan.owners != expected
+                || scan.globals != expected_global
+                || !scan.pages.is_disjoint(&candidate_checked.owned)
+            {
+                return Err(Error::CorruptTree);
+            }
+            candidate_checked.owned.extend(scan.pages.iter().copied());
+            candidate_checked
+                .global_pages
+                .extend(scan.pages.iter().copied());
+            candidate_checked.owner_root = Some(root);
+            candidate_checked.owner_scan = Some(scan);
+            validate_space_pair(
+                &candidate_checked.free,
+                &candidate_checked.dead,
+                &candidate_checked.owned,
+                generation,
+                total,
+            )?;
+            payload.extend_from_slice(&OwnerRootAnchor { root, generation }.encode());
+        }
+        let mut next_certificate = None;
+        if indexed {
+            // A proof model of the eventual Accounted allocation authority.
+            // Old head + old fallback were already independently audited;
+            // the staged candidate was just fully verified in the overlay.
+            // Rotate their certified ownership sets and compare against the
+            // full-graph oracle BEFORE F0 can publish a new Free root.
+            let owner_graph = OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
+            let temporary_shadow;
+            let shadow = if let Some(cached) = &self.in_handle_certificate {
+                &cached.ownership
+            } else {
+                temporary_shadow = TwoRootOwners::from_audit(
+                    old.generation,
+                    owner_graph,
+                    owned,
+                    checked.retired_global.clone(),
+                )?;
+                &temporary_shadow
+            };
+            let candidate_graph = OwnerGraph::new(
+                candidate_checked.owned.clone(),
+                candidate_checked.global_pages.clone(),
+            )?;
+            let staged_addrs: BTreeSet<u64> = staged.iter().map(|(address, _)| *address).collect();
+            let transition = shadow.transition(
+                candidate_graph,
+                &staged_addrs,
+                &candidate_checked.free,
+                &candidate_checked.dead,
+                generation,
+                total,
+                INDEX_ARENA_END,
+            )?;
+            if self.publish_f0_owner_receipts {
+                let receipt = PublishedOwnerReceipt::for_transition(
+                    &transition,
+                    id,
+                    crc32c(&next.encode(total)?),
+                    crc32c(&old.encode(total)?),
+                )?;
+                payload.extend_from_slice(&receipt.encode()?);
+            }
+            let expected: BTreeSet<u64> = checked
+                .owned
+                .union(&candidate_checked.owned)
+                .copied()
+                .collect();
+            if transition.next.protected() != expected
+                || !transition.allocated.is_subset(&staged_addrs)
+                || transition
+                    .retired
+                    .iter()
+                    .any(|address| expected.contains(address))
+            {
+                return Err(Error::CorruptTree);
+            }
+            if self.in_handle_certificate.is_some() {
+                // The previous head becomes the new F0 fallback; pages in
+                // the old fallback-only set have just retired. Preserve the
+                // new checked head, never the unverified pre-commit overlay.
+                let mut verified = candidate_checked;
+                verified.retired_global = checked
+                    .global_pages
+                    .difference(&verified.owned)
+                    .copied()
+                    .collect();
+                next_certificate = Some(InHandleCertificate {
+                    manifest: next,
+                    verified,
+                    ownership: transition.next,
+                });
+            }
+        }
         // Record actual overwrites of nonzero, independently unowned pages.
         // Do this only after the entire candidate graph has passed verification.
         let reused = self.volume.inspect(|device| {
@@ -1430,6 +1692,150 @@ impl<D: BlockDevice> UnifiedV10<D> {
         self.volume.commit_root_with_blocks(&staged, &payload)?;
         self.last_reused_blocks = reused;
         self.manifest = next;
+        self.in_handle_certificate = next_certificate;
         Ok(generation)
+    }
+}
+
+impl UnifiedV10<CrashDevice> {
+    /// Experimental fast allocation certification on an exclusive, private
+    /// deterministic memory-backed device only. CrashDevice cannot be
+    /// mutated externally while held by this writer. Every successful staged
+    /// candidate is still verified in full; this bypasses just the repeated
+    /// traversal of the two *old* F0 graphs. FileDevice and ordinary opens
+    /// remain on the strict full-audit path.
+    ///
+    /// Export a canonical ownership sidecar for the exclusive memory-backed
+    /// test writer. A sidecar is never an authorization to skip disk audits:
+    /// this method only serializes the already verified in-handle lease.
+    pub fn export_allocation_checkpoint(&self) -> Result<Vec<u8>> {
+        let lease = self
+            .in_handle_certificate
+            .as_ref()
+            .ok_or(Error::CorruptTree)?;
+        let crc = crate::volume::crc32c(&self.manifest.encode(self.volume.block_count())?);
+        lease
+            .ownership
+            .encode_checkpoint(self.volume.info().volume_id, crc)
+    }
+
+    /// Recover a cached allocation lease, but only AFTER an independent
+    /// complete audit of both on-disk F0 roots. The supplied checkpoint must
+    /// be bytewise equivalent to the graph obtained from that fresh audit.
+    /// A valid CRC or unchanged head generation is never sufficient.
+    pub fn open_with_verified_allocation_checkpoint(
+        device: CrashDevice,
+        checkpoint: &[u8],
+    ) -> Result<Self> {
+        let mut volume = Volume::open(device)?;
+        let (manifest, verified, owners) = audit(&mut volume)?;
+        if manifest.metadata_reserve != INDEX_ARENA_BLOCKS {
+            return Err(Error::CorruptTree);
+        }
+        let graph = OwnerGraph::new(verified.owned.clone(), verified.global_pages.clone())?;
+        let ownership = TwoRootOwners::from_audit(
+            manifest.generation,
+            graph,
+            &owners,
+            verified.retired_global.clone(),
+        )?;
+        let crc = crate::volume::crc32c(&manifest.encode(volume.block_count())?);
+        ownership.verify_checkpoint(
+            checkpoint,
+            volume.info().volume_id,
+            crc,
+            volume.block_count(),
+        )?;
+        Ok(Self {
+            volume,
+            manifest,
+            last_reused_blocks: 0,
+            in_handle_certificate: Some(InHandleCertificate {
+                manifest,
+                verified,
+                ownership,
+            }),
+            publish_f0_owner_receipts: false,
+            publish_owner_tree: false,
+        })
+    }
+    /// Enable bounded F0-atomic owner receipts on a private CrashDevice.
+    /// This remains a tested witness, not an independently trusted on-disk
+    /// allocator: reopening requires the complete two-root reachability audit.
+    pub fn enable_f0_published_allocation_receipts(&mut self) -> Result<()> {
+        self.enable_in_handle_allocation_certificate()?;
+        self.publish_f0_owner_receipts = true;
+        Ok(())
+    }
+
+    /// Validate the latest persisted F0 receipt, then resume its emission.
+    pub fn reopen_with_verified_f0_receipts(device: CrashDevice) -> Result<Self> {
+        let mut writer = Self::open(device)?;
+        let latest = writer.volume.info().generation;
+        let present = writer.volume.candidate_roots()?.iter().any(|(root, raw)| {
+            root.generation == latest
+                && raw
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.len() > super::MANIFEST_BYTES)
+        });
+        if !present {
+            return Err(Error::CorruptTree);
+        }
+        writer.enable_f0_published_allocation_receipts()?;
+        Ok(writer)
+    }
+
+    /// Explicitly enable F0-anchored owner B+tree path-copying on a private
+    /// CrashDevice. Recovery still audits both physical F0 graphs completely.
+    pub fn enable_f0_published_owner_tree(&mut self) -> Result<()> {
+        if self.publish_f0_owner_receipts {
+            return Err(Error::CorruptTree);
+        }
+        self.enable_in_handle_allocation_certificate()?;
+        self.publish_owner_tree = true;
+        Ok(())
+    }
+
+    /// Reject a missing or corrupt owner root before resuming test-only writes.
+    pub fn reopen_with_verified_owner_tree(device: CrashDevice) -> Result<Self> {
+        let mut writer = Self::open(device)?;
+        let latest = writer.volume.info().generation;
+        let has_root = writer.volume.candidate_roots()?.iter().any(|(root, raw)| {
+            root.generation == latest
+                && raw.as_ref().is_some_and(|bytes| {
+                    parse_anchor(bytes, *root, writer.volume.block_count())
+                        .ok()
+                        .flatten()
+                        .is_some()
+                })
+        });
+        if !has_root {
+            return Err(Error::CorruptTree);
+        }
+        writer.enable_f0_published_owner_tree()?;
+        Ok(writer)
+    }
+
+    pub fn enable_in_handle_allocation_certificate(&mut self) -> Result<()> {
+        if self.manifest.metadata_reserve != INDEX_ARENA_BLOCKS {
+            return Err(Error::CorruptTree);
+        }
+        let (manifest, verified, owners) = audit(&mut self.volume)?;
+        if manifest != self.manifest {
+            return Err(Error::CorruptTree);
+        }
+        let graph = OwnerGraph::new(verified.owned.clone(), verified.global_pages.clone())?;
+        let ownership = TwoRootOwners::from_audit(
+            manifest.generation,
+            graph,
+            &owners,
+            verified.retired_global.clone(),
+        )?;
+        self.in_handle_certificate = Some(InHandleCertificate {
+            manifest,
+            verified,
+            ownership,
+        });
+        Ok(())
     }
 }

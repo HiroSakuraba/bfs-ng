@@ -9,6 +9,7 @@ use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
+mod allocation_certificate;
 mod attribute_sections;
 mod checksum_delta;
 mod space_index;
@@ -23,6 +24,7 @@ mod data_writer;
 mod extent_map;
 mod extent_writer;
 mod namespace;
+mod owner_tree;
 mod unified_writer;
 pub use extent_map::{BlockRef, Extent, FileExtents, MAX_FILE_BLOCKS, MAX_FILE_BYTES};
 pub use extent_writer::ExtentDataWriter;
@@ -89,6 +91,7 @@ pub enum TreeId {
     AttributePostings = 6,
     Snapshots = 7,
     Schema = 8,
+    Ownership = 9,
 }
 impl TreeId {
     fn decode(value: u8) -> Result<Self> {
@@ -101,6 +104,7 @@ impl TreeId {
             6 => Self::AttributePostings,
             7 => Self::Snapshots,
             8 => Self::Schema,
+            9 => Self::Ownership,
             _ => return Err(bad()),
         })
     }
@@ -516,6 +520,15 @@ impl Manifest {
         Ok(b)
     }
     pub fn decode(bytes: &[u8], root: RootInfo, total_blocks: u64) -> Result<Self> {
+        if bytes.len() > MANIFEST_BYTES {
+            let extension = &bytes[MANIFEST_BYTES..];
+            if extension.starts_with(&owner_tree::OwnerRootAnchor::MAGIC) {
+                owner_tree::OwnerRootAnchor::decode(extension, root, total_blocks)?;
+            } else {
+                allocation_certificate::PublishedOwnerReceipt::decode(extension)?;
+            }
+        }
+        let bytes = bytes.get(..MANIFEST_BYTES).ok_or_else(bad)?;
         if bytes.len() != MANIFEST_BYTES
             || bytes[..8] != MANIFEST_MAGIC
             || get_u32(bytes, 8) != MANIFEST_VERSION

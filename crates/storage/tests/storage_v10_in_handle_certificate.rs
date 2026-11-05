@@ -1,0 +1,427 @@
+//! F5.3 opt-in, in-handle certified allocator on an exclusive CrashDevice.
+//! This only skips repeated *old* F0 graph reads; every newly staged
+//! generation still passes full independent graph validation.
+use bfs_ng_storage::experimental_v10::{MANIFEST_BYTES, ReadOnlyV10, UnifiedV10};
+use bfs_ng_storage::{
+    AttributeDef, AttributeType, BlockDevice, CrashDevice, Error, Fault, Schema, TextCase, Value,
+};
+
+const VID: u128 = 0xc3f1_3a11_0ca7_2026;
+
+fn mutate(fs: &mut UnifiedV10<CrashDevice>, i: u64, name: &mut &'static str) {
+    if i % 13 == 7 {
+        let target = if *name == "/asset/data" {
+            "/asset/renamed"
+        } else {
+            "/asset/data"
+        };
+        fs.rename(name, target).unwrap();
+        *name = target;
+    } else if i % 11 == 3 {
+        fs.truncate(name, 13).unwrap();
+    } else if i % 5 == 2 {
+        fs.write_at(name, 4100, &i.to_le_bytes()).unwrap();
+    } else {
+        fs.write_at(name, 0, &i.to_le_bytes()).unwrap();
+    }
+}
+
+#[test]
+fn exclusive_in_handle_allocator_matches_strict_mode_and_reduces_disk_walks() {
+    let mut slow = UnifiedV10::format_indexed(CrashDevice::new(768), VID).unwrap();
+    let mut fast = UnifiedV10::format_indexed(CrashDevice::new(768), VID).unwrap();
+    fast.enable_in_handle_allocation_certificate().unwrap();
+
+    let mut slow_name = "/asset/data";
+    let mut fast_name = "/asset/data";
+    for fs in [&mut slow, &mut fast] {
+        fs.mkdir("/asset").unwrap();
+        fs.write_at("/asset/data", 0, b"initial").unwrap();
+        let schema = Schema::new(vec![AttributeDef {
+            id: 1,
+            name: "kind".into(),
+            ty: AttributeType::Text {
+                case: TextCase::AsciiFold,
+                max_bytes: 24,
+            },
+            indexed: true,
+        }])
+        .unwrap();
+        fs.install_schema(&schema).unwrap();
+        fs.set_attributes(
+            "/asset/data",
+            &[("kind".into(), Value::Text("mesh".into()))],
+        )
+        .unwrap();
+    }
+    let inode = slow.stat(slow_name).unwrap().0;
+    let mut history = Vec::new();
+    for i in 0..96_u64 {
+        mutate(&mut slow, i, &mut slow_name);
+        mutate(&mut fast, i, &mut fast_name);
+        assert_eq!(slow_name, fast_name);
+        if [14, 38, 61].contains(&i) {
+            let generation = slow.manifest().generation;
+            assert_eq!(generation, fast.manifest().generation);
+            slow.pin_current().unwrap();
+            fast.pin_current().unwrap();
+            history.push((generation, slow_name.to_owned()));
+        }
+        if i == 52 {
+            for fs in [&mut slow, &mut fast] {
+                fs.set_attributes(slow_name, &[("kind".into(), Value::Text("shader".into()))])
+                    .unwrap();
+            }
+        }
+        if i == 70 {
+            for fs in [&mut slow, &mut fast] {
+                fs.mark_dropping(history[1].0).unwrap();
+            }
+        }
+        if i % 9 == 4 {
+            slow.reclaim_step().unwrap();
+            fast.reclaim_step().unwrap();
+        }
+        assert_eq!(slow.manifest(), fast.manifest(), "step {i}");
+    }
+    let old_device = slow.into_device();
+    let fast_device = fast.into_device();
+    let old_reads = old_device.read_blocks();
+    let fast_reads = fast_device.read_blocks();
+    assert!(
+        fast_reads < old_reads,
+        "old-root cache must reduce physical reads: cached={fast_reads}, full={old_reads}"
+    );
+    // Power-loss reopening always independently audits both F0 manifests.
+    // Compare real persisted contents and all historical snapshots, including
+    // the Dropping descriptor, rather than trusting identical counters alone.
+    let mut slow = UnifiedV10::open(old_device.power_loss()).unwrap();
+    let mut fast = UnifiedV10::open(fast_device.power_loss()).unwrap();
+    assert_eq!(slow.manifest(), fast.manifest());
+    assert_eq!(
+        slow.read_file(slow_name).unwrap(),
+        fast.read_file(fast_name).unwrap()
+    );
+    assert_eq!(
+        slow.stat(slow_name).unwrap().0,
+        fast.stat(fast_name).unwrap().0
+    );
+    assert_eq!(slow.stat(slow_name).unwrap().0, inode);
+    assert_eq!(
+        slow.file_attributes(slow_name).unwrap(),
+        fast.file_attributes(fast_name).unwrap()
+    );
+    for (generation, name) in &history {
+        assert_eq!(
+            slow.read_snapshot_file(*generation, name).unwrap(),
+            fast.read_snapshot_file(*generation, name).unwrap(),
+            "historical snapshot {generation}"
+        );
+    }
+}
+
+#[test]
+fn rejected_edits_cannot_advance_an_in_handle_allocation_certificate() {
+    let mut cached = UnifiedV10::format_indexed(CrashDevice::new(384), VID).unwrap();
+    let mut strict = UnifiedV10::format_indexed(CrashDevice::new(384), VID).unwrap();
+    cached.enable_in_handle_allocation_certificate().unwrap();
+    for fs in [&mut cached, &mut strict] {
+        fs.mkdir("/a").unwrap();
+        fs.write_at("/a/file", 0, b"v1").unwrap();
+    }
+    let generation = cached.manifest().generation;
+    assert!(matches!(
+        cached.rename("/a/file", "/missing/file"),
+        Err(Error::NotFound) | Err(Error::NotDirectory)
+    ));
+    assert_eq!(cached.manifest().generation, generation);
+    // Reusing the cached certificate after a rejected (unpublished) edit
+    // must give the same generation and bytes as the full-audit path.
+    cached.write_at("/a/file", 0, b"v2").unwrap();
+    strict.write_at("/a/file", 0, b"v2").unwrap();
+    assert_eq!(cached.manifest(), strict.manifest());
+    let mut checked = UnifiedV10::open(cached.into_device().power_loss()).unwrap();
+    assert_eq!(checked.read_file("/a/file").unwrap(), b"v2");
+}
+
+#[test]
+fn the_fast_lease_is_not_available_on_an_unindexed_image() {
+    let mut fs = UnifiedV10::format(CrashDevice::new(128), VID).unwrap();
+    assert!(fs.enable_in_handle_allocation_certificate().is_err());
+}
+
+#[test]
+fn in_handle_certificate_crash_cuts_reopen_with_old_or_new_f0_graph() {
+    for operation in 1..=8 {
+        for torn_bytes in [0, 64, 4096] {
+            let mut fs = UnifiedV10::format_indexed(CrashDevice::new(448), VID).unwrap();
+            fs.mkdir("/demo").unwrap();
+            fs.write_at("/demo/file", 0, b"previous").unwrap();
+            let snap = fs.manifest().generation;
+            fs.pin_current().unwrap();
+            for i in 0..12_u64 {
+                fs.write_at("/demo/file", 0, &i.to_le_bytes()).unwrap();
+            }
+            let old_generation = fs.manifest().generation;
+            let previous = fs.read_file("/demo/file").unwrap();
+            let mut disk = fs.into_device().power_loss();
+            disk.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            })
+            .unwrap();
+            let mut writer = UnifiedV10::open(disk).unwrap();
+            writer.enable_in_handle_allocation_certificate().unwrap();
+            assert!(matches!(
+                writer.write_at("/demo/file", 0, b"new-data"),
+                Err(Error::InjectedCrash)
+            ));
+            let recovered = writer.into_device().power_loss();
+            let reader = ReadOnlyV10::open(recovered).unwrap();
+            let root_generation = reader.root_info().generation;
+            assert!(root_generation == old_generation || root_generation == old_generation + 1);
+            if let Ok(mut checked) = UnifiedV10::open(reader.into_device()) {
+                assert_eq!(
+                    checked.read_file("/demo/file").unwrap(),
+                    if root_generation == old_generation {
+                        previous.as_slice()
+                    } else {
+                        b"new-data"
+                    }
+                );
+                assert_eq!(
+                    checked.read_snapshot_file(snap, "/demo/file").unwrap(),
+                    b"previous"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn checkpoint_recovery_requires_a_fresh_two_root_audit_and_exact_match() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(448), VID).unwrap();
+    fs.mkdir("/resources").unwrap();
+    fs.write_at("/resources/mesh", 0, b"old").unwrap();
+    let snapshot = fs.manifest().generation;
+    fs.pin_current().unwrap();
+    fs.enable_in_handle_allocation_certificate().unwrap();
+    for i in 0..24_u64 {
+        fs.write_at("/resources/mesh", 0, &i.to_le_bytes()).unwrap();
+    }
+    let checkpoint = fs.export_allocation_checkpoint().unwrap();
+    let disk = fs.into_device().power_loss();
+    let mut recovered =
+        UnifiedV10::open_with_verified_allocation_checkpoint(disk, &checkpoint).unwrap();
+    assert_eq!(
+        recovered.read_file("/resources/mesh").unwrap(),
+        23_u64.to_le_bytes()
+    );
+    assert_eq!(
+        recovered
+            .read_snapshot_file(snapshot, "/resources/mesh")
+            .unwrap(),
+        b"old"
+    );
+    // A recovered in-handle lease can safely advance by one more F0 commit.
+    recovered
+        .write_at("/resources/mesh", 0, b"new-data")
+        .unwrap();
+    let latest = recovered.manifest().generation;
+    let new_checkpoint = recovered.export_allocation_checkpoint().unwrap();
+    let disk = recovered.into_device().power_loss();
+    // An authentic but stale checkpoint is rejected after F0 advances.
+    assert!(UnifiedV10::open_with_verified_allocation_checkpoint(disk, &checkpoint,).is_err());
+    let disk = UnifiedV10::format_indexed(CrashDevice::new(448), VID)
+        .unwrap()
+        .into_device()
+        .power_loss();
+    // Even matching volume IDs cannot justify an unrelated owner ledger.
+    assert!(UnifiedV10::open_with_verified_allocation_checkpoint(disk, &new_checkpoint,).is_err());
+    assert!(latest > snapshot);
+}
+
+#[test]
+fn corrupt_checkpoint_is_rejected_before_reenabling_the_fast_lease() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(352), VID).unwrap();
+    fs.mkdir("/a").unwrap();
+    fs.enable_in_handle_allocation_certificate().unwrap();
+    let mut checkpoint = fs.export_allocation_checkpoint().unwrap();
+    let disk = fs.into_device().power_loss();
+    checkpoint[64] ^= 1;
+    assert!(UnifiedV10::open_with_verified_allocation_checkpoint(disk, &checkpoint,).is_err());
+}
+
+#[test]
+fn f0_owner_receipts_are_atomic_and_reopen_only_after_full_graph_audit() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(384), VID).unwrap();
+    fs.mkdir("/demo").unwrap();
+    fs.write_at("/demo/file", 0, b"old").unwrap();
+    let pin = fs.manifest().generation;
+    fs.pin_current().unwrap();
+    fs.enable_f0_published_allocation_receipts().unwrap();
+    for i in 0..9_u64 {
+        fs.write_at("/demo/file", 0, &i.to_le_bytes()).unwrap();
+    }
+    let stable = fs.manifest().generation;
+    let disk = fs.into_device().power_loss();
+    let mut reopened = UnifiedV10::reopen_with_verified_f0_receipts(disk).unwrap();
+    assert_eq!(reopened.manifest().generation, stable);
+    assert_eq!(
+        reopened.read_snapshot_file(pin, "/demo/file").unwrap(),
+        b"old"
+    );
+    reopened.write_at("/demo/file", 0, b"after").unwrap();
+    let disk = reopened.into_device().power_loss();
+    let mut again = UnifiedV10::reopen_with_verified_f0_receipts(disk).unwrap();
+    assert_eq!(&again.read_file("/demo/file").unwrap()[..5], b"after");
+}
+
+#[test]
+fn interrupted_f0_owner_receipt_publication_preserves_recovery() {
+    for operation in 1..=6 {
+        let mut fs = UnifiedV10::format_indexed(CrashDevice::new(352), VID).unwrap();
+        fs.mkdir("/a").unwrap();
+        fs.write_at("/a/f", 0, b"old").unwrap();
+        fs.enable_f0_published_allocation_receipts().unwrap();
+        fs.write_at("/a/f", 0, b"stable").unwrap();
+        let old = fs.manifest().generation;
+        let mut disk = fs.into_device().power_loss();
+        disk.inject(Fault {
+            operation,
+            torn_bytes: Some(128),
+        })
+        .unwrap();
+        let mut tx = UnifiedV10::reopen_with_verified_f0_receipts(disk).unwrap();
+        assert!(matches!(
+            tx.write_at("/a/f", 0, b"new"),
+            Err(Error::InjectedCrash)
+        ));
+        let mut recovered = UnifiedV10::open(tx.into_device().power_loss()).unwrap();
+        assert!(
+            recovered.manifest().generation == old || recovered.manifest().generation == old + 1
+        );
+        let contents = recovered.read_file("/a/f").unwrap();
+        assert!(contents.starts_with(b"stable") || contents.starts_with(b"new"));
+    }
+}
+
+#[test]
+fn f0_owner_btree_survives_many_cow_mutations_and_retained_snapshots() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(1536), VID).unwrap();
+    fs.mkdir("/assets").unwrap();
+    fs.write_at("/assets/a", 0, b"initial").unwrap();
+    let snap = fs.manifest().generation;
+    fs.pin_current().unwrap();
+    fs.enable_f0_published_owner_tree().unwrap();
+    for i in 0..48_u64 {
+        if i % 9 == 3 {
+            fs.truncate("/assets/a", 22).unwrap();
+        } else {
+            fs.write_at("/assets/a", (i % 3) * 4096, &i.to_le_bytes())
+                .unwrap();
+        }
+        if i % 7 == 0 {
+            fs.reclaim_step().unwrap();
+        }
+    }
+    let expected = fs.read_file("/assets/a").unwrap();
+    let committed = fs.manifest().generation;
+    let disk = fs.into_device().power_loss();
+    let mut recovered = UnifiedV10::reopen_with_verified_owner_tree(disk).unwrap();
+    assert_eq!(recovered.manifest().generation, committed);
+    assert_eq!(recovered.read_file("/assets/a").unwrap(), expected);
+    assert_eq!(
+        recovered.read_snapshot_file(snap, "/assets/a").unwrap(),
+        b"initial"
+    );
+    recovered.write_at("/assets/a", 0, b"after").unwrap();
+    let mut again = UnifiedV10::open(recovered.into_device().power_loss()).unwrap();
+    assert!(again.read_file("/assets/a").unwrap().starts_with(b"after"));
+}
+
+#[test]
+fn f0_owner_btree_handles_more_than_one_leaf_and_many_payload_blocks() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(4_096), VID).unwrap();
+    fs.mkdir("/large").unwrap();
+    fs.enable_f0_published_owner_tree().unwrap();
+    let payload = vec![0x5au8; 60 * 4096];
+    for i in 0..4 {
+        fs.write_at(&format!("/large/file{i}"), 0, &payload)
+            .unwrap();
+    }
+    let generation = fs.manifest().generation;
+    let mut reopened =
+        UnifiedV10::reopen_with_verified_owner_tree(fs.into_device().power_loss()).unwrap();
+    assert_eq!(reopened.manifest().generation, generation);
+    for i in 0..4 {
+        assert_eq!(
+            reopened.read_file(&format!("/large/file{i}")).unwrap(),
+            payload
+        );
+    }
+    reopened.write_at("/large/file0", 21, b"updated").unwrap();
+    assert_eq!(
+        &reopened.read_file("/large/file0").unwrap()[21..28],
+        b"updated"
+    );
+}
+
+#[test]
+fn f0_owner_btree_keeps_fallback_during_power_loss() {
+    for operation in 1..=6 {
+        let mut fs = UnifiedV10::format_indexed(CrashDevice::new(576), VID).unwrap();
+        fs.mkdir("/demo").unwrap();
+        fs.write_at("/demo/file", 0, b"old").unwrap();
+        fs.enable_f0_published_owner_tree().unwrap();
+        fs.write_at("/demo/file", 0, b"stable").unwrap();
+        let old_generation = fs.manifest().generation;
+        let mut disk = fs.into_device().power_loss();
+        disk.inject(Fault {
+            operation,
+            torn_bytes: Some(96),
+        })
+        .unwrap();
+        let mut tx = UnifiedV10::reopen_with_verified_owner_tree(disk).unwrap();
+        assert!(matches!(
+            tx.write_at("/demo/file", 0, b"new"),
+            Err(Error::InjectedCrash)
+        ));
+        let mut recovered = UnifiedV10::open(tx.into_device().power_loss()).unwrap();
+        assert!(
+            recovered.manifest().generation == old_generation
+                || recovered.manifest().generation == old_generation + 1
+        );
+        let contents = recovered.read_file("/demo/file").unwrap();
+        assert!(contents.starts_with(b"stable") || contents.starts_with(b"new"));
+    }
+}
+
+#[test]
+fn malformed_owner_btree_node_is_rejected_even_when_f0_remains_checksummed() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(512), VID).unwrap();
+    fs.mkdir("/a").unwrap();
+    fs.enable_f0_published_owner_tree().unwrap();
+    fs.write_at("/a/file", 0, b"payload").unwrap();
+    let generation = fs.manifest().generation;
+    let mut disk = fs.into_device().power_loss();
+
+    let mut superblock = [0_u8; 4096];
+    disk.read_block(generation % 2, &mut superblock).unwrap();
+    let payload_address = u64::from_le_bytes(superblock[40..48].try_into().unwrap());
+    let mut root_payload = [0_u8; 4096];
+    disk.read_block(payload_address, &mut root_payload).unwrap();
+    let owner_offset = 16 + MANIFEST_BYTES + 8;
+    let owner_address = u64::from_le_bytes(
+        root_payload[owner_offset..owner_offset + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert!(owner_address >= 69);
+    disk.write_block(owner_address, &[0_u8; 4096]).unwrap();
+    disk.sync().unwrap();
+    assert!(
+        UnifiedV10::open(disk.power_loss()).is_err(),
+        "a valid F0 CRC must not authorize a corrupt owner tree"
+    );
+}
