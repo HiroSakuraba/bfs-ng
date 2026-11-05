@@ -415,7 +415,6 @@ fn persisted_retirement_cursor_prevents_blocked_oldest_entry_starvation() {
     assert_eq!(fourth.dead.len(), 1);
 }
 
-
 #[test]
 fn future_eligible_free_entry_cannot_hide_a_live_f0_owner() {
     // A delayed retirement is *not* a free entry. Even if this entry would
@@ -449,8 +448,22 @@ fn future_eligible_free_entry_cannot_hide_a_live_f0_owner() {
 #[test]
 fn unselected_free_run_with_stale_owner_is_not_silently_accepted() {
     let free = BTreeMap::from([
-        (20, FreeRun { start: 20, blocks: 2, eligible_after: 3 }),
-        (80, FreeRun { start: 80, blocks: 2, eligible_after: 3 }),
+        (
+            20,
+            FreeRun {
+                start: 20,
+                blocks: 2,
+                eligible_after: 3,
+            },
+        ),
+        (
+            80,
+            FreeRun {
+                start: 80,
+                blocks: 2,
+                eligible_after: 3,
+            },
+        ),
     ]);
     let protected = BTreeSet::from([20]);
     assert!(matches!(
@@ -463,61 +476,85 @@ fn unselected_free_run_with_stale_owner_is_not_silently_accepted() {
     ));
 }
 
-
 #[test]
 fn cursor_counts_ineligible_records_and_resumes_without_full_index_sort() {
     let pending = BTreeMap::from([
-        ((2, 20), DeadRun {
-            dead_generation: 2, start: 20, blocks: 1,
-            eligible_after: 100, domain: SpaceDomain::Global,
-        }),
-        ((2, 30), DeadRun {
-            dead_generation: 2, start: 30, blocks: 1,
-            eligible_after: 100, domain: SpaceDomain::Global,
-        }),
-        ((2, 40), DeadRun {
-            dead_generation: 2, start: 40, blocks: 1,
-            eligible_after: 4, domain: SpaceDomain::Snapshot,
-        }),
+        (
+            (2, 20),
+            DeadRun {
+                dead_generation: 2,
+                start: 20,
+                blocks: 1,
+                eligible_after: 100,
+                domain: SpaceDomain::Global,
+            },
+        ),
+        (
+            (2, 30),
+            DeadRun {
+                dead_generation: 2,
+                start: 30,
+                blocks: 1,
+                eligible_after: 100,
+                domain: SpaceDomain::Global,
+            },
+        ),
+        (
+            (2, 40),
+            DeadRun {
+                dead_generation: 2,
+                start: 40,
+                blocks: 1,
+                eligible_after: 4,
+                domain: SpaceDomain::Snapshot,
+            },
+        ),
     ]);
     let owners = BTreeSet::new();
-    let first = retire_step_cursor(
-        &BTreeMap::new(), &pending, &owners, 5, 1, None,
-    ).unwrap();
+    let first = retire_step_cursor(&BTreeMap::new(), &pending, &owners, 5, 1, None).unwrap();
     assert_eq!(first.scanned, 1);
     assert_eq!(first.cursor, Some((2, 20)));
     assert_eq!(first.released, 0);
 
-    let second = retire_step_cursor(
-        &first.free, &first.dead, &owners, 5, 1, first.cursor,
-    ).unwrap();
+    let second = retire_step_cursor(&first.free, &first.dead, &owners, 5, 1, first.cursor).unwrap();
     assert_eq!(second.scanned, 1);
     assert_eq!(second.cursor, Some((2, 30)));
     assert_eq!(second.released, 0);
 
-    let third = retire_step_cursor(
-        &second.free, &second.dead, &owners, 5, 1, second.cursor,
-    ).unwrap();
+    let third =
+        retire_step_cursor(&second.free, &second.dead, &owners, 5, 1, second.cursor).unwrap();
     assert_eq!(third.scanned, 1);
     assert_eq!(third.cursor, Some((2, 40)));
     assert_eq!(third.released, 1);
     assert_eq!(third.free.get(&40).unwrap().eligible_after, 4);
     assert_eq!(third.dead.len(), 2);
 
-    let wrapped = retire_step_cursor(
-        &third.free, &third.dead, &owners, 5, 1, third.cursor,
-    ).unwrap();
+    let wrapped =
+        retire_step_cursor(&third.free, &third.dead, &owners, 5, 1, third.cursor).unwrap();
     assert_eq!(wrapped.scanned, 1);
     assert_eq!(wrapped.cursor, Some((2, 20)));
     assert_eq!(wrapped.released, 0);
 }
 
-
 #[test]
 fn pure_allocator_refuses_overlapping_free_ranges_before_reserving() {
     let free = BTreeMap::from([
-        (30, FreeRun { start: 30, blocks: 6, eligible_after: 3 }),
-        (33, FreeRun { start: 33, blocks: 5, eligible_after: 4 }),
+        (
+            30,
+            FreeRun {
+                start: 30,
+                blocks: 6,
+                eligible_after: 3,
+            },
+        ),
+        (
+            33,
+            FreeRun {
+                start: 33,
+                blocks: 5,
+                eligible_after: 4,
+            },
+        ),
     ]);
     let owners = BTreeSet::new();
     assert!(matches!(
