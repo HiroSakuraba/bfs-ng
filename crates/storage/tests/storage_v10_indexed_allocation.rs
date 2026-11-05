@@ -165,7 +165,6 @@ fn failure_before_f0_publication_never_exposes_mixed_free_and_data_roots() {
     }
 }
 
-
 #[test]
 fn indexed_mode_keeps_inode_keyed_attributes_and_historical_postings() {
     let mut fs = fresh(512);
@@ -174,36 +173,46 @@ fn indexed_mode_keeps_inode_keyed_attributes_and_historical_postings() {
     let schema = Schema::new(vec![AttributeDef {
         id: 1,
         name: "kind".into(),
-        ty: AttributeType::Text { case: TextCase::AsciiFold, max_bytes: 40 },
+        ty: AttributeType::Text {
+            case: TextCase::AsciiFold,
+            max_bytes: 40,
+        },
         indexed: true,
-    }]).unwrap();
+    }])
+    .unwrap();
     fs.install_schema(&schema).unwrap();
-    fs.set_attributes("/assets/shader", &[(
-        "kind".into(), Value::Text("Shader".into()),
-    )]).unwrap();
+    fs.set_attributes(
+        "/assets/shader",
+        &[("kind".into(), Value::Text("Shader".into()))],
+    )
+    .unwrap();
     let before = fs.manifest().generation;
     fs.pin_current().unwrap();
     fs.rename("/assets", "/resources").unwrap();
-    fs.set_attributes("/resources/shader", &[(
-        "kind".into(), Value::Text("Material".into()),
-    )]).unwrap();
+    fs.set_attributes(
+        "/resources/shader",
+        &[("kind".into(), Value::Text("Material".into()))],
+    )
+    .unwrap();
     for n in 0..20 {
-        fs.write_at("/resources/shader", 0, format!("shader-{n:04}").as_bytes()).unwrap();
+        fs.write_at("/resources/shader", 0, format!("shader-{n:04}").as_bytes())
+            .unwrap();
     }
-    let historical = fs.search_snapshot_attributes(
-        before,
-        &[Predicate::eq("kind", Value::Text("shader".into()))],
-        10,
-    ).unwrap();
+    let historical = fs
+        .search_snapshot_attributes(
+            before,
+            &[Predicate::eq("kind", Value::Text("shader".into()))],
+            10,
+        )
+        .unwrap();
     assert_eq!(historical.files.len(), 1);
     assert_eq!(
         fs.read_snapshot_file(before, "/assets/shader").unwrap(),
         b"shader-v1"
     );
-    let now = fs.search_attributes(
-        &[Predicate::eq("kind", Value::Text("material".into()))],
-        10,
-    ).unwrap();
+    let now = fs
+        .search_attributes(&[Predicate::eq("kind", Value::Text("material".into()))], 10)
+        .unwrap();
     assert_eq!(now.files.len(), 1);
     fs = reopen(fs);
     assert_eq!(
@@ -211,11 +220,16 @@ fn indexed_mode_keeps_inode_keyed_attributes_and_historical_postings() {
             before,
             &[Predicate::eq("kind", Value::Text("shader".into()))],
             10,
-        ).unwrap().files.len(),
+        )
+        .unwrap()
+        .files
+        .len(),
         1
     );
-    assert_eq!(fs.file_attributes("/resources/shader").unwrap()
-        .get("kind"), Some(&Value::Text("material".into())));
+    assert_eq!(
+        fs.file_attributes("/resources/shader").unwrap().get("kind"),
+        Some(&Value::Text("material".into()))
+    );
 }
 
 
