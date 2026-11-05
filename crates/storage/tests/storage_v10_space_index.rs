@@ -511,3 +511,21 @@ fn cursor_counts_ineligible_records_and_resumes_without_full_index_sort() {
     assert_eq!(wrapped.cursor, Some((2, 20)));
     assert_eq!(wrapped.released, 0);
 }
+
+
+#[test]
+fn pure_allocator_refuses_overlapping_free_ranges_before_reserving() {
+    let free = BTreeMap::from([
+        (30, FreeRun { start: 30, blocks: 6, eligible_after: 3 }),
+        (33, FreeRun { start: 33, blocks: 5, eligible_after: 4 }),
+    ]);
+    let owners = BTreeSet::new();
+    assert!(matches!(
+        reserve_free(&free, &owners, 6, 1),
+        Err(Error::CorruptTree)
+    ));
+    assert!(matches!(
+        reserve_free(&free, &owners, 6, 0),
+        Err(Error::CorruptTree)
+    ));
+}
