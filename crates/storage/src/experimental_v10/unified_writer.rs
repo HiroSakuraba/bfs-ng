@@ -1172,7 +1172,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             Some(retire_step_cursor(
                 &checked.free,
                 &checked.dead,
-                &owned,
+                owned,
                 old.generation,
                 MAX_RETIRE_STEP,
                 if old.sweep_snapshot == 0 {
@@ -1195,7 +1195,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 .map(|run| u64::from(run.blocks))
                 .sum::<u64>()
                 .min(STAGING_LIMIT as u64) as usize;
-            reserve_free(&step.free, &owned, old.generation, available)?.selected
+            reserve_free(&step.free, owned, old.generation, available)?.selected
         } else {
             (ROOT_PAYLOAD_LAST + 1..total)
                 .rev()
@@ -1333,14 +1333,14 @@ impl<D: BlockDevice> UnifiedV10<D> {
         if let Some(sweep) = retirement {
             // Only actual staged data/normal metadata pages consume free
             // addresses; the Free/Dead index lives in its own reserved arena.
-            let reserved = reserve_free(&sweep.free, &owned, old.generation, used)?;
+            let reserved = reserve_free(&sweep.free, owned, old.generation, used)?;
             if reserved.selected != candidates[..used] {
                 return Err(Error::CorruptTree);
             }
             let free = reserved.remaining;
             let mut dead = sweep.dead;
-            queue_fallback_retirements(&free, &mut dead, &owned, &checked, generation)?;
-            validate_space_pair(&free, &dead, &owned, old.generation, total)?;
+            queue_fallback_retirements(&free, &mut dead, owned, checked, generation)?;
+            validate_space_pair(&free, &dead, owned, old.generation, total)?;
             let free_changes = free_deltas(&checked.free, &free, total)?;
             let dead_changes = dead_deltas(&checked.dead, &dead, total)?;
             // No allocator recursion: no Free/Dead tree page is itself in
@@ -1441,7 +1441,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 return Err(Error::CorruptTree);
             }
             let staged_addrs: BTreeSet<u64> = staged.iter().map(|(addr, _)| *addr).collect();
-            if staged_addrs.len() != staged.len() || !staged_addrs.is_disjoint(&owned) {
+            if staged_addrs.len() != staged.len() || !staged_addrs.is_disjoint(owned) {
                 return Err(Error::CorruptTree);
             }
             Ok(checked)
