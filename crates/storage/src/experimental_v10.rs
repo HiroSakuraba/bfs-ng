@@ -3,14 +3,21 @@
 //! This does not enable a v10 FileSystem writer or change v9's allocator,
 //! reference counts, mount/recovery contract or F0 disk format. In particular,
 //! validating a v10 root or catalog is NOT an ownership/free-space certificate.
-//! v10 data extents, checksum retention and incremental reclamation are later
-//! milestones. Keep all byte encodings explicit and strictly canonical.
+//! General v10 extents, incremental checksum updates, and reclamation are later
+//! milestones; F5.0b adds a restricted one-blob checksum/data experiment. Keep all byte encodings explicit and strictly canonical.
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
+mod checksum_tree;
+mod data_writer;
 mod snapshot_tree;
 mod virgin_writer;
+pub use checksum_tree::{
+    ChecksumScan, MAX_CHECKSUM_BLOCKS, MAX_CHECKSUM_PAGES, StagedChecksums, read_checksum_tree,
+    read_verified_block, stage_checksum_tree,
+};
+pub use data_writer::HeaderlessDataWriter;
 pub use snapshot_tree::{
     CatalogEdit, CatalogScan, MAX_SNAPSHOT_DESCRIPTORS, MAX_SNAPSHOT_TREE_PAGES, StagedCatalog,
     plan_snapshot_edit, read_snapshot_tree,
