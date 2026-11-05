@@ -6,7 +6,7 @@
 //! free-tree allocator, a general v10 filesystem, or support for arbitrary
 //! inode/file-data/checksum/attribute trees. Production allocation is absent.
 use super::{
-    BlockPointer, CatalogEdit, Manifest, Page, SnapshotDescriptor, SnapshotState,
+    CatalogEdit, Manifest, Page, SnapshotDescriptor, SnapshotState,
     TreeId, TreeRoots, read_page, read_snapshot_tree, plan_snapshot_edit,
     MAX_LEVEL,
 };
