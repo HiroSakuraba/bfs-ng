@@ -9,6 +9,12 @@ use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
+mod snapshot_tree;
+pub use snapshot_tree::{
+    CatalogEdit, CatalogScan, MAX_SNAPSHOT_DESCRIPTORS, MAX_SNAPSHOT_TREE_PAGES, StagedCatalog,
+    plan_snapshot_edit, read_snapshot_tree,
+};
+
 pub const MANIFEST_MAGIC: [u8; 8] = *b"BFSNGM10";
 pub const PAGE_MAGIC: [u8; 8] = *b"BFSNGT10";
 pub const MANIFEST_VERSION: u32 = 10;
@@ -658,16 +664,15 @@ impl<D: BlockDevice> ReadOnlyV10<D> {
         self.volume
             .inspect(|device| read_page(device, pointer, tree, info.volume_id, info.generation))
     }
-    /// Returns descriptors only when the catalog fits a checked leaf. This
-    /// intentionally refuses a branch root rather than silently hiding pins.
+    /// Fully traverse the authenticated multilevel snapshot catalog.
+    /// Direct-root open remains lazy; this call does NOT certify reuse.
     pub fn snapshot_descriptors(&mut self) -> Result<Vec<SnapshotDescriptor>> {
-        if self.manifest.roots.snapshots.is_none() {
-            return Ok(Vec::new());
-        }
-        let page = self.read_root_page(TreeId::Snapshots)?;
         let info = self.volume.info();
-        let total = self.volume.block_count();
-        let descriptors = decode_snapshot_leaf(&page, info.generation, total)?;
+        let root = self.manifest.roots.snapshots;
+        let descriptors = self.volume.inspect(|device| {
+            read_snapshot_tree(device, root, info.volume_id, info.generation)
+                .map(|catalog| catalog.descriptors)
+        })?;
         // A snapshot's own roots must authenticate to their recorded births,
         // never to the live manifest's attribute roots.
         for desc in &descriptors {
