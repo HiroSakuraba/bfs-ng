@@ -404,6 +404,8 @@ Allocating pages to record allocations changes the free tree itself. A casual es
 - At 384 blocks, fail only when an explicit and tested metadata reserve or safe-space constraint is reached; never silently reserve 256 blocks.
 - Force worst-case free-tree leaf/root splits, snapshot descriptor updates and checksum edits inside one transaction; compare the arena's budget with measured staging. On insufficient reserve, assert the previous root and both recoverable manifests remain intact.
 
+**Integrated experimental progress:** [F5.3 indexed v10 writer](F5_3_INDEXED_ALLOCATOR.md) publishes Free/DeadList CoW roots and bounded cursor transitions in the *same* F0 generation as file, snapshot, checksum and F4 attribute updates. The writer still runs the independent full two-root graph oracle before every transaction, and only the candidate-address search is index-driven. This does **not** establish the incremental reference-accounting proof required for the future Accounted mode.
+
 ## 9. F5.3 — birth-time reclamation and dead lists
 
 **Safety status:** birth-time reclamation is a proposed optimization, **not an established proof for BFS-NG's tree graph**. Through F5.2, keep the full two-root/snapshot reachability oracle as the allocator's default authority. F5.3 may replace the per-commit full scan only after the ownership model and gates below pass.
