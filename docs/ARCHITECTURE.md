@@ -32,6 +32,7 @@ This is the **current cross-cutting design and status document**. Format-specifi
 | F0.R1 staging correction | Never-published intermediate CoW namespace/reference pages returned to the certified ready pool before the journal is sealed | Separate from published-root retirement: these pages never require an F0 fallback rotation |
 | F3 namespace updater | Path-copy changed nodes; page splits; bounded localized sibling redistribution/merges on affected deletion paths; disk range scans with generation cursors | Transactions still clone/materialize a namespace map; no end-to-end logarithmic bound |
 | F4 durable searchable attributes | Private CoW catalog committed with the F3 root, typed stable-inode attributes and ordered secondary postings; historical snapshot queries | Catalog/postings are bounded and rewritten as a whole on changes; not an incremental on-disk posting tree |
+| F5.0a **isolated format foundation** | Canonical v10 manifest, 24-byte authenticated pointers, generic 4 KiB metadata-page codec, complete 112-byte snapshot descriptors, read-only F0 root verification, and boundary/crash tests | **Not a v10 filesystem writer, allocator, persistent snapshot updater or multilevel snapshot reader**; v9 remains default; see [F5.0a contract](F5_0A_WIRE_FORMAT.md) |
 | Real-world cache workload suite | Deterministic AxiomZig, DVE asset/dependency and AxiomMegaDoc corpus/trace generators, recorded bounded reads and pinned smoke workflows | Model/record traces are **not** traces from a BFS-NG mount or proof of hardware performance |
 
 **Historical milestone docs are not current disk-format contracts.** F2.R1 introduced v5, F2.R2 v6, F2.R3 v7, F2.R4 v8, and F0.R1 advances the **current root manifest to v9**. The current free-run pages still use their checked `BFSFRJ8\0` encoding; current reference B+tree pages still use their v6 leaf/branch encodings. Do not infer page-format version from the manifest version.
@@ -140,11 +141,11 @@ Any future kernel integration must separately measure logical requests, physical
 
 These are **proposals**, not completed milestones or a claim of existing branches.
 
-The proposed [F5 data layer](F5_DATA_LAYER.md) (manifest v10, **not implemented**) groups the remaining P0/P1 work into one public format break. PR #18 established the high-level direction; the subsequent **safety correction** explicitly makes snapshot descriptors include historical attribute/schema roots, separates snapshot-owned and global accounting pages, and requires immutable free-space epochs and independent ownership certification. **The F5.3 birth-time/dead-list sketch is not yet a proved allocator and must not silently replace F2.R4's full oracle.**
+The proposed [F5 data layer](F5_DATA_LAYER.md) (manifest v10, **not yet a working filesystem**) groups the remaining P0/P1 work into one public format break. PR #18 established the high-level direction; the subsequent **safety correction** explicitly makes snapshot descriptors include historical attribute/schema roots, separates snapshot-owned and global accounting pages, and requires immutable free-space epochs and independent ownership certification. **The F5.3 birth-time/dead-list sketch is not yet a proved allocator and must not silently replace F2.R4's full oracle.**
 
 | Priority | Next milestone | F5 | Proof and acceptance gate |
 | --- | --- | --- | --- |
-| P0 | **v10 pointer/snapshot foundation** | F5.0a | `u64` birth and snapshot generations, checked generic CoW pages and block pointers, complete snapshot descriptors containing fs/attribute/schema roots; preserve full two-root reuse audit. Historical F4 snapshot queries survive multiple F0 rotations |
+| P0 | **Finish v10 pointer/snapshot foundation** | F5.0a | Wire codecs, read-only direct-root checks and bounded historical descriptors now exist as an experimental module; remaining: generic multilevel snapshot tree traversal and atomic v10 CoW snapshot updater. Preserve full two-root reuse audit until deeper proof |
 | P0 | **Headerless data and checksum-tree safety** | F5.0b | 4 KiB data blocks with a global physically keyed checksum tree covering **all live and pinned historical data**; detect lost/misdirected writes on verified reads; lazy open is explicitly separate from verified free-space certification |
 | P0 | **Extent map, inline files and byte writes** | F5.1 | Per-inode extents with holes and preallocation, inline small files and `pwrite`/`truncate`/`punch_hole`/`fallocate`. Spill-before-publication orphans remain unavailable after crash until independently proved free |
 | P0 | **Localized durable free-space structure** | F5.2 | CoW extent tree with **absolute immutable eligibility epochs**, derived ready/pending views, deferred state and geometry-aware reserve. Prove a finite nonrecursive metadata-update arena, fail-closed virgin high-water claim and stable free-tree pages across 1,000 unrelated generations |
@@ -192,6 +193,7 @@ A clean test suite establishes the behavior of this **model and test-image proto
 
 ## 10. Primary project design references
 
+- [F5.0a — implemented experimental v10 wire codecs and read-only root verifier](F5_0A_WIRE_FORMAT.md)
 - [F5 — extent data layer, birth-time reclamation and inode namespace (proposed, v10)](F5_DATA_LAYER.md)
 - [F0.R1 — rotating root payload safety and v9 compatibility](F0_R1_ROTATING_ROOTS.md)
 - [F2.R2 — CoW reference B+tree and delayed-free fences](F2_R2_INCREMENTAL_REFERENCES.md)
