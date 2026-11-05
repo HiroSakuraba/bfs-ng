@@ -271,9 +271,11 @@ pub fn plan_snapshot_edit<D: BlockDevice>(
         let CatalogEdit::Pin(desc) = edit else {
             return Err(Error::InvalidSnapshot);
         };
+        let blocks = planner.device.block_count();
+        let value = desc.encode(new_generation, blocks)?.to_vec();
         planner.stage_items(0, vec![Item {
             key: desc.generation.to_be_bytes().to_vec(),
-            value: desc.encode(new_generation, planner.device.block_count())?.to_vec(),
+            value,
         }])?
     };
     let mut level = children[0].pointer.level;
