@@ -1,6 +1,6 @@
 # F5.0a — experimental v10 codec and authenticated root-read foundation
 
-**Implementation status:** isolated **read-only** format code and tests in PR #20. **The default \`FileSystem\` remains v9**, F0 superblocks remain v2, and all actual v9 commits still use F2.R4's two-root certified allocator. This work **does not yet implement a v10 filesystem writer, full tree traversal, user file I/O, allocation, or snapshot mutations.** No production images or migration are supported.
+**Implementation status:** isolated format codecs and direct-root reader from PR #20; PR #21 adds authenticated multilevel snapshot traversal and a **non-publishing CoW staging planner**. **The default \`FileSystem\` remains v9**, F0 superblocks remain v2, and all actual v9 commits still use F2.R4's two-root certified allocator. This work **does not implement a v10 filesystem writer, generic namespace tree traversal, user file I/O, physical allocation certification, or durable snapshot-drop reclamation.** The new staging planner constructs pages but does not write or publish them. No production images or migration are supported.
 
 Entry point: \`crates/storage/src/experimental_v10.rs\`. The public module name deliberately signals that these APIs are not a production filesystem.
 
@@ -86,15 +86,15 @@ The high-water, reserves, counters and sweep fields are checked for geometry but
 
 The snapshot-catalog leaf maps **\`snapshot_generation.to_be_bytes()\`** to the complete descriptor, with exact key/descriptor generation equality. All four tree roots are verified using their own BPs, not the manifest's live attribute roots.
 
-The current prototype reads a snapshot-catalog **single leaf only**; it rejects a multi-level catalog instead of silently omitting pins. A subsequent tranche must implement the complete branch/leaf traversal, snapshot publication, and bounded memory/recursion checks before advertising a working v10 snapshot store.
+The current prototype **reads multilevel snapshot catalogs**, verifies every parent high-key separator against the actual maximum descendant key, checks sibling key intervals, prevents repeated physical page addresses, and enforces a bounded maximum of 8,192 pages / 131,072 descriptors. It verifies historical fs/attribute roots on request. A pure CoW planner can stage pin insertions and pinned-to-dropping transitions from caller-supplied pages, including leaf and root splits; **only the disposable known-blank test harness publishes those pages through F0.** A safe production v10 updater still requires independently certified allocation and journal/dead-list retirement.
 
 ## 2. Read-only F0 integration and safety boundary
 
 \`ReadOnlyV10::open(device)\` invokes F0's existing \`Volume::open_verified\`. For each candidate F0 root it validates the complete v10 manifest and **direct root pages** of its referenced trees. It falls back to an older recoverable F0 candidate if the newer manifest/direct root is invalid. It does **not** validate every namespace child, data block, snapshot item or orphan address on open.
 
-\`ReadOnlyV10::snapshot_descriptors()\` additionally decodes the bounded snapshot leaf and reads each descriptor's historical root pages with its own parent checksum, generation and volume identity. A deep corruption detected during this later operation is a read error; it does **not** secretly roll the volume back.
+\`ReadOnlyV10::snapshot_descriptors()\` additionally traverses **all** bounded snapshot-catalog levels and reads each descriptor's historical root pages with its own parent checksum, generation and volume identity. A deep corruption detected during this later operation is a read error; it does **not** secretly roll the volume back.
 
-**Crucial:** nothing in \`experimental_v10\` returns a certified free-run set, changes a block, publishes a v10 transaction, writes a v10 snapshot catalog, or authorizes allocation. Lazy root validation must **never** be mistaken for F2.R4's full ownership scrub.
+**Crucial:** nothing in \`experimental_v10\` returns a certified free-run set, changes a physical block, publishes a v10 transaction, or authorizes allocation. The pure \`plan_snapshot_edit\` function returns bytes for *caller-verified virgin reservations* without writing them; the caller must separately prove allocation safety and use correct F0 staged-page publication. A dropping pin is **retained**, never actually removed/freed. Lazy root validation must **never** be mistaken for F2.R4's full ownership scrub.
 
 ## 3. Reproducible tests
 
@@ -109,8 +109,18 @@ The current prototype reads a snapshot-catalog **single leaf only**; it rejects 
 
 The full workspace CI, Clippy and rustfmt checks are still required.
 
+## 4. PR #21: authenticated multilevel snapshot catalog and CoW plan
+
+The new `experimental_v10::read_snapshot_tree` reads the whole catalog, not only its root. Each branch's key is the **exact greatest descendant key** in the child, siblings have strictly disjoint sorted intervals, and a physical metadata page cannot occur twice in one catalog. Depth cannot exceed the 16-level v10 codec bound, and reads are bounded by the page/entry budgets. A corrupt sibling, forged separator, duplicate page pointer, malformed descriptor or historical root pointer cannot be silently skipped.
+
+`plan_snapshot_edit(device, previous_root, edit, volume_id, next_generation, previous_high_water, reservations)` returns `StagedCatalog { root, staged_pages, high_water, consumed_reservations }`. It **does not write or sync** those pages. Insertions and the `Pinned → Dropping` transition path-copy the touched leaf and ancestors, splitting packed nodes and creating a new root when necessary. A duplicate snapshot fails rather than altering the pinned descriptor; `Dropping` still retains the full historical pointer set.
+
+**Safety contract:** reservation addresses must be strictly descending below the previously published high-water mark and above F0's reserved blocks 0–4. These checks do *not* establish physical virginity. The external caller must independently certify the addresses and the old catalog before authorizing a publication. No code in this module ever frees a pinned block; completing deletion remains an F5.3 proof obligation. It is not yet a mountable, usable or general-purpose v10 filesystem.
+
+**Tests:** `cargo test -p bfs-ng-storage --test storage_f5_0a_snapshot_tree` exercises 144 snapshots across several leaf/root splits and F0 ring rotations, bounded staged CoW writes, duplicate pin rejection, dropped-state retention, insufficient staging pages, invalid reservation geometry, deep corrupt leaves, intentionally incorrect parent separators and a synthetic 3-level catalog.
+
 ## 4. Deliberately deferred work / next tranche
 
-This is the **F5.0a codec + direct-root validation tranche** only. Complete F5.0a requires generic CoW B+tree traversal/path copying, a durable snapshot-catalog updater and fully specified startup/format gating, all retaining v9's conservative allocator until the later v10 safety proofs. F5.0b adds headerless data and a global checksum tree covering every live and pinned historical data block. F5.2/F5.3 add safe free-run accounting only after a separate adversarial ownership proof.
+This is the **F5.0a codec + direct-root validation tranche** only. Completing F5.0a still requires independently safe durable snapshot-catalog publication, generic CoW B+tree support beyond snapshots and fully specified startup/format gating, all retaining v9's conservative allocator until the later v10 safety proofs. F5.0b adds headerless data and a global checksum tree covering every live and pinned historical data block. F5.2/F5.3 add safe free-run accounting only after a separate adversarial ownership proof.
 
 References: [F5 design and safety corrections](F5_DATA_LAYER.md), [F0 root ring](F0_R1_ROTATING_ROOTS.md), [F2.R4 certified allocation](F2_R4_CERTIFIED_RECLAMATION.md), [architecture](ARCHITECTURE.md).
