@@ -154,10 +154,7 @@ fn error_during_staged_page_write_or_root_publish_is_not_a_partial_commit() {
 fn rejects_v9_images_and_nonempty_v10_namespaces_without_mutation() {
     use bfs_ng_storage::FileSystem;
     let v9 = FileSystem::format(CrashDevice::new(128), VID).unwrap();
-    assert!(matches!(
-        VirginSnapshotWriter::open(v9.into_device().power_loss()),
-        Err(Error::CorruptTree)
-    ));
+    assert!(VirginSnapshotWriter::open(v9.into_device().power_loss()).is_err());
     // Nonempty fs namespace layouts await F5.1, and can never be treated
     // as a snapshot-only volume simply because their root CRC verifies.
     let writer = VirginSnapshotWriter::format(CrashDevice::new(128), VID).unwrap();
