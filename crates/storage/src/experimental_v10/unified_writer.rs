@@ -442,6 +442,7 @@ enum Edit<'a> {
     },
     Pin,
     MarkDropping(u64),
+    Reclaim,
 }
 
 /// One coherent v10 namespace/data/checksum writer for multiple files.
@@ -771,6 +772,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
     pub fn mark_dropping(&mut self, generation: u64) -> Result<u64> {
         self.commit(Edit::MarkDropping(generation))
     }
+    /// Process at most MAX_RETIRE_STEP eligible pending runs, with a cursor
+    /// that is published atomically with the Free/DeadList root updates.
+    /// This call does not finalize pinned or Dropping snapshots.
+    pub fn reclaim_step(&mut self) -> Result<u64> {
+        if self.manifest.metadata_reserve == 0 {
+            return Err(Error::CorruptTree);
+        }
+        self.commit(Edit::Reclaim)
+    }
     fn commit(&mut self, edit: Edit<'_>) -> Result<u64> {
         let (old, checked, owned) = audit(&mut self.volume)?;
         if old != self.manifest {
@@ -957,6 +967,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 desc.state = SnapshotState::Dropping;
                 catalog_edit = Some(CatalogEdit::MarkDropping(snapshot));
             }
+            Edit::Reclaim => {}
+
         }
         next.inode_count = records.len() as u64;
         validate_namespace(&records, next.next_inode, generation, total)?;
@@ -969,11 +981,36 @@ impl<D: BlockDevice> UnifiedV10<D> {
         // a free-list bit. Blocks absent from every recoverable root are
         // eligible even if they contain stale data or crash orphans.
         // Persistent free-tree/epoch accounting is deferred to F5.2/F5.3.
-        let candidates: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..total)
-            .rev()
-            .filter(|block| !owned.contains(block))
-            .take(STAGING_LIMIT)
-            .collect();
+        let indexed = old.metadata_reserve == INDEX_ARENA_BLOCKS;
+        let retirement = if indexed {
+            Some(retire_step_cursor(
+                &checked.free, &checked.dead, &owned, old.generation,
+                MAX_RETIRE_STEP,
+                if old.sweep_snapshot == 0 {
+                    None
+                } else {
+                    Some((old.sweep_snapshot, old.sweep_key))
+                },
+            )?)
+        } else {
+            None
+        };
+        // A persistent ordered run index supplies eligible candidates
+        // without scanning *all physical addresses*. Independent full graph
+        // certification remains active until the F5.3 accounted proof gate.
+        let candidates: Vec<u64> = if let Some(step) = &retirement {
+            let available = step.free.values()
+                .filter(|run| run.eligible_after <= old.generation)
+                .map(|run| u64::from(run.blocks))
+                .sum::<u64>().min(STAGING_LIMIT as u64) as usize;
+            reserve_free(&step.free, &owned, old.generation, available)?.selected
+        } else {
+            (ROOT_PAYLOAD_LAST + 1..total)
+                .rev()
+                .filter(|block| !owned.contains(block))
+                .take(STAGING_LIMIT)
+                .collect()
+        };
         let mut used = 0;
         let mut staged: Vec<(u64, [u8; BLOCK_SIZE])> = Vec::new();
         let mut added_crc = BTreeMap::new();
