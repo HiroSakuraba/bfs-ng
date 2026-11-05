@@ -41,12 +41,19 @@ pub struct SpaceScan {
 }
 impl SpaceScan {
     fn empty() -> Self {
-        Self { free: BTreeMap::new(), dead: BTreeMap::new(), pages: BTreeSet::new() }
+        Self {
+            free: BTreeMap::new(),
+            dead: BTreeMap::new(),
+            pages: BTreeSet::new(),
+        }
     }
 }
 fn range_ok(start: u64, blocks: u32, total: u64) -> bool {
-    start > ROOT_PAYLOAD_LAST && blocks > 0
-        && start.checked_add(u64::from(blocks)).is_some_and(|end| end <= total)
+    start > ROOT_PAYLOAD_LAST
+        && blocks > 0
+        && start
+            .checked_add(u64::from(blocks))
+            .is_some_and(|end| end <= total)
 }
 pub fn free_item(run: FreeRun, total: u64) -> Result<(Vec<u8>, Vec<u8>)> {
     if !range_ok(run.start, run.blocks, total) || run.eligible_after == 0 {
@@ -80,7 +87,9 @@ fn free_decode(key: &[u8], value: &[u8], total: u64) -> Result<FreeRun> {
     let run = FreeRun {
         start: u64::from_be_bytes(key.try_into().map_err(|_| Error::CorruptTree)?),
         blocks: u32::from_le_bytes(value[..4].try_into().map_err(|_| Error::CorruptTree)?),
-        eligible_after: u64::from_le_bytes(value[8..16].try_into().map_err(|_| Error::CorruptTree)?),
+        eligible_after: u64::from_le_bytes(
+            value[8..16].try_into().map_err(|_| Error::CorruptTree)?,
+        ),
     };
     if !range_ok(run.start, run.blocks, total) || run.eligible_after == 0 {
         return Err(Error::CorruptTree);
@@ -100,11 +109,14 @@ fn dead_decode(key: &[u8], value: &[u8], total: u64, generation: u64) -> Result<
         dead_generation: u64::from_be_bytes(key[..8].try_into().map_err(|_| Error::CorruptTree)?),
         start: u64::from_be_bytes(key[8..16].try_into().map_err(|_| Error::CorruptTree)?),
         blocks: u32::from_le_bytes(value[..4].try_into().map_err(|_| Error::CorruptTree)?),
-        eligible_after: u64::from_le_bytes(value[8..16].try_into().map_err(|_| Error::CorruptTree)?),
+        eligible_after: u64::from_le_bytes(
+            value[8..16].try_into().map_err(|_| Error::CorruptTree)?,
+        ),
         domain,
     };
     if !range_ok(run.start, run.blocks, total)
-        || run.dead_generation == 0 || run.dead_generation > generation
+        || run.dead_generation == 0
+        || run.dead_generation > generation
         || run.eligible_after < run.dead_generation.saturating_add(2)
     {
         return Err(Error::CorruptTree);
@@ -140,7 +152,11 @@ impl<D: BlockDevice> Walker<'_, D> {
         }
         let page = read_page(self.device, pointer, self.tree, self.id, self.generation)?;
         if page.items.is_empty() {
-            return if root && page.level == 0 { Ok(None) } else { Err(Error::CorruptTree) };
+            return if root && page.level == 0 {
+                Ok(None)
+            } else {
+                Err(Error::CorruptTree)
+            };
         }
         let mut min = None;
         let mut last: Option<Vec<u8>> = None;
@@ -154,19 +170,31 @@ impl<D: BlockDevice> Walker<'_, D> {
                         let run = free_decode(&item.key, &item.value, self.device.block_count())?;
                         if self.free.len() >= MAX_SPACE_RUNS
                             || self.free.insert(run.start, run).is_some()
-                        { return Err(Error::CorruptTree); }
+                        {
+                            return Err(Error::CorruptTree);
+                        }
                     }
                     TreeId::DeadList => {
                         let run = dead_decode(
-                            &item.key, &item.value, self.device.block_count(), self.generation,
+                            &item.key,
+                            &item.value,
+                            self.device.block_count(),
+                            self.generation,
                         )?;
                         if self.dead.len() >= MAX_SPACE_RUNS
-                            || self.dead.insert((run.dead_generation, run.start), run).is_some()
-                        { return Err(Error::CorruptTree); }
+                            || self
+                                .dead
+                                .insert((run.dead_generation, run.start), run)
+                                .is_some()
+                        {
+                            return Err(Error::CorruptTree);
+                        }
                     }
                     _ => return Err(Error::CorruptTree),
                 }
-                if min.is_none() { min = Some(item.key.clone()); }
+                if min.is_none() {
+                    min = Some(item.key.clone());
+                }
                 last = Some(item.key.clone());
             }
         } else {
@@ -176,35 +204,62 @@ impl<D: BlockDevice> Walker<'_, D> {
                 if max != item.key || last.as_ref().is_some_and(|k| k >= &first) {
                     return Err(Error::CorruptTree);
                 }
-                if min.is_none() { min = Some(first); }
+                if min.is_none() {
+                    min = Some(first);
+                }
                 last = Some(max);
             }
         }
-        Ok(Some((min.ok_or(Error::CorruptTree)?, last.ok_or(Error::CorruptTree)?)))
+        Ok(Some((
+            min.ok_or(Error::CorruptTree)?,
+            last.ok_or(Error::CorruptTree)?,
+        )))
     }
 }
 pub fn read_space_tree<D: BlockDevice>(
-    device: &mut D, tree: TreeId, root: Option<BlockPointer>,
-    id: u128, generation: u64,
+    device: &mut D,
+    tree: TreeId,
+    root: Option<BlockPointer>,
+    id: u128,
+    generation: u64,
 ) -> Result<SpaceScan> {
-    if !matches!(tree, TreeId::Free | TreeId::DeadList)
-        || id == 0 || generation == 0
-    {
+    if !matches!(tree, TreeId::Free | TreeId::DeadList) || id == 0 || generation == 0 {
         return Err(Error::CorruptTree);
     }
-    let Some(pointer) = root else { return Ok(SpaceScan::empty()); };
+    let Some(pointer) = root else {
+        return Ok(SpaceScan::empty());
+    };
     let mut walker = Walker {
-        device, tree, id, generation,
-        pages: BTreeSet::new(), free: BTreeMap::new(), dead: BTreeMap::new(),
+        device,
+        tree,
+        id,
+        generation,
+        pages: BTreeSet::new(),
+        free: BTreeMap::new(),
+        dead: BTreeMap::new(),
     };
     walker.visit(pointer, true)?;
     no_overlaps(
-        walker.free.values().map(|r| (r.start, r.blocks, r.eligible_after)).collect(), true,
+        walker
+            .free
+            .values()
+            .map(|r| (r.start, r.blocks, r.eligible_after))
+            .collect(),
+        true,
     )?;
     no_overlaps(
-        walker.dead.values().map(|r| (r.start, r.blocks, r.eligible_after)).collect(), false,
+        walker
+            .dead
+            .values()
+            .map(|r| (r.start, r.blocks, r.eligible_after))
+            .collect(),
+        false,
     )?;
-    Ok(SpaceScan { free: walker.free, dead: walker.dead, pages: walker.pages })
+    Ok(SpaceScan {
+        free: walker.free,
+        dead: walker.dead,
+        pages: walker.pages,
+    })
 }
 
 pub struct StagedSpace {
@@ -212,7 +267,10 @@ pub struct StagedSpace {
     pub staged_pages: Vec<(u64, [u8; BLOCK_SIZE])>,
     pub consumed_reservations: usize,
 }
-struct Child { max_key: Vec<u8>, pointer: BlockPointer }
+struct Child {
+    max_key: Vec<u8>,
+    pointer: BlockPointer,
+}
 struct Planner<'a, D: BlockDevice> {
     device: &'a mut D,
     tree: TreeId,
@@ -225,8 +283,12 @@ impl<D: BlockDevice> Planner<'_, D> {
     fn page(&mut self, level: u8, items: Vec<Item>) -> Result<Child> {
         let address = *self.slots.get(self.staged.len()).ok_or(Error::NoSpace)?;
         let page = Page {
-            tree: self.tree, level, address, birth: self.generation,
-            volume_id: self.id, items,
+            tree: self.tree,
+            level,
+            address,
+            birth: self.generation,
+            volume_id: self.id,
+            items,
         };
         let data = page.encode()?;
         let pointer = page.pointer()?;
@@ -240,7 +302,9 @@ impl<D: BlockDevice> Planner<'_, D> {
         let mut size = PAGE_HEADER_BYTES;
         for item in items {
             let cost = 8 + item.key.len() + item.value.len();
-            if cost + PAGE_HEADER_BYTES > BLOCK_SIZE { return Err(Error::TooLarge); }
+            if cost + PAGE_HEADER_BYTES > BLOCK_SIZE {
+                return Err(Error::TooLarge);
+            }
             if size + cost > BLOCK_SIZE {
                 out.push(self.page(level, std::mem::take(&mut current))?);
                 size = PAGE_HEADER_BYTES;
@@ -248,17 +312,29 @@ impl<D: BlockDevice> Planner<'_, D> {
             size += cost;
             current.push(item);
         }
-        if !current.is_empty() { out.push(self.page(level, current)?); }
+        if !current.is_empty() {
+            out.push(self.page(level, current)?);
+        }
         Ok(out)
     }
-    fn edit(&mut self, pointer: BlockPointer, changes: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<Vec<Child>> {
+    fn edit(
+        &mut self,
+        pointer: BlockPointer,
+        changes: &[(Vec<u8>, Option<Vec<u8>>)],
+    ) -> Result<Vec<Child>> {
         let page = read_page(
-            self.device, pointer, self.tree, self.id, self.generation - 1,
+            self.device,
+            pointer,
+            self.tree,
+            self.id,
+            self.generation - 1,
         )?;
         if page.level == 0 {
             let mut map = BTreeMap::new();
             for item in page.items {
-                if map.insert(item.key, item.value).is_some() { return Err(Error::CorruptTree); }
+                if map.insert(item.key, item.value).is_some() {
+                    return Err(Error::CorruptTree);
+                }
             }
             for (key, value) in changes {
                 if let Some(value) = value {
@@ -267,9 +343,16 @@ impl<D: BlockDevice> Planner<'_, D> {
                     return Err(Error::CorruptTree);
                 }
             }
-            return self.pack(0, map.into_iter().map(|(key, value)| Item { key, value }).collect());
+            return self.pack(
+                0,
+                map.into_iter()
+                    .map(|(key, value)| Item { key, value })
+                    .collect(),
+            );
         }
-        if page.items.is_empty() { return Err(Error::CorruptTree); }
+        if page.items.is_empty() {
+            return Err(Error::CorruptTree);
+        }
         let mut groups = vec![Vec::new(); page.items.len()];
         for (key, value) in changes {
             let k = match page.items.binary_search_by(|item| item.key.cmp(key)) {
@@ -282,14 +365,21 @@ impl<D: BlockDevice> Planner<'_, D> {
         for (item, deltas) in page.items.into_iter().zip(groups) {
             let old = BlockPointer::decode_required(&item.value)?;
             if deltas.is_empty() {
-                children.push(Child { max_key: item.key, pointer: old });
+                children.push(Child {
+                    max_key: item.key,
+                    pointer: old,
+                });
             } else {
                 children.extend(self.edit(old, &deltas)?);
             }
         }
-        let items = children.into_iter().map(|c| Item {
-            key: c.max_key, value: c.pointer.encode().to_vec(),
-        }).collect();
+        let items = children
+            .into_iter()
+            .map(|c| Item {
+                key: c.max_key,
+                value: c.pointer.encode().to_vec(),
+            })
+            .collect();
         self.pack(page.level, items)
     }
 }
@@ -297,20 +387,33 @@ impl<D: BlockDevice> Planner<'_, D> {
 /// unowned by both F0 candidates, then independently validates the result.
 #[allow(clippy::too_many_arguments)]
 pub fn stage_space_delta<D: BlockDevice>(
-    device: &mut D, tree: TreeId, previous: Option<BlockPointer>,
+    device: &mut D,
+    tree: TreeId,
+    previous: Option<BlockPointer>,
     changes: &BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-    reservations: &[u64], id: u128, generation: u64, high_water: u64,
+    reservations: &[u64],
+    id: u128,
+    generation: u64,
+    high_water: u64,
 ) -> Result<StagedSpace> {
     if !matches!(tree, TreeId::Free | TreeId::DeadList)
-        || id == 0 || generation <= 1
-        || high_water <= ROOT_PAYLOAD_LAST || high_water > device.block_count()
-        || reservations.iter().any(|&n| n <= ROOT_PAYLOAD_LAST || n >= device.block_count())
+        || id == 0
+        || generation <= 1
+        || high_water <= ROOT_PAYLOAD_LAST
+        || high_water > device.block_count()
+        || reservations
+            .iter()
+            .any(|&n| n <= ROOT_PAYLOAD_LAST || n >= device.block_count())
         || reservations.windows(2).any(|w| w[0] <= w[1])
-    { return Err(Error::Geometry); }
+    {
+        return Err(Error::Geometry);
+    }
     for (key, value) in changes {
         if let Some(value) = value {
             match tree {
-                TreeId::Free => { free_decode(key, value, device.block_count())?; }
+                TreeId::Free => {
+                    free_decode(key, value, device.block_count())?;
+                }
                 TreeId::DeadList => {
                     dead_decode(key, value, device.block_count(), generation)?;
                 }
@@ -322,38 +425,56 @@ pub fn stage_space_delta<D: BlockDevice>(
     }
     if changes.is_empty() {
         return Ok(StagedSpace {
-            root: previous, staged_pages: Vec::new(), consumed_reservations: 0,
+            root: previous,
+            staged_pages: Vec::new(),
+            consumed_reservations: 0,
         });
     }
     let mut planner = Planner {
-        device, tree, id, generation, slots: reservations, staged: Vec::new(),
+        device,
+        tree,
+        id,
+        generation,
+        slots: reservations,
+        staged: Vec::new(),
     };
     let mut children = if let Some(old) = previous {
         old.validate(planner.device.block_count(), generation - 1, high_water)?;
-        let pairs = changes.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>();
+        let pairs = changes
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
         planner.edit(old, &pairs)?
     } else {
         let mut items = Vec::new();
         for (key, value) in changes {
             items.push(Item {
-                key: key.clone(), value: value.clone().ok_or(Error::CorruptTree)?,
+                key: key.clone(),
+                value: value.clone().ok_or(Error::CorruptTree)?,
             });
         }
         planner.pack(0, items)?
     };
     if children.is_empty() {
         return Ok(StagedSpace {
-            root: None, consumed_reservations: planner.staged.len(),
+            root: None,
+            consumed_reservations: planner.staged.len(),
             staged_pages: planner.staged,
         });
     }
     let mut level = children[0].pointer.level;
     while children.len() > 1 {
-        if level >= MAX_LEVEL { return Err(Error::TooLarge); }
+        if level >= MAX_LEVEL {
+            return Err(Error::TooLarge);
+        }
         level += 1;
-        let items = children.into_iter().map(|child| Item {
-            key: child.max_key, value: child.pointer.encode().to_vec(),
-        }).collect();
+        let items = children
+            .into_iter()
+            .map(|child| Item {
+                key: child.max_key,
+                value: child.pointer.encode().to_vec(),
+            })
+            .collect();
         children = planner.pack(level, items)?;
     }
     Ok(StagedSpace {
@@ -372,7 +493,9 @@ pub fn validate_space_pair(
     published_generation: u64,
     total: u64,
 ) -> Result<()> {
-    if published_generation == 0 { return Err(Error::CorruptTree); }
+    if published_generation == 0 {
+        return Err(Error::CorruptTree);
+    }
     let mut all = Vec::new();
     for run in free.values() {
         free_item(*run, total).map_err(|_| Error::CorruptTree)?;
@@ -404,20 +527,29 @@ pub fn reserve_free(
     current_generation: u64,
     requested: usize,
 ) -> Result<FreeReservation> {
-    if current_generation == 0 { return Err(Error::Geometry); }
+    if current_generation == 0 {
+        return Err(Error::Geometry);
+    }
     if requested == 0 {
         return Ok(FreeReservation {
-            selected: Vec::new(), remaining: free.clone(),
+            selected: Vec::new(),
+            remaining: free.clone(),
         });
     }
     let mut remaining = free.clone();
     let mut selected = Vec::new();
     for (&start, &run) in free.iter().rev() {
-        if run.eligible_after > current_generation { continue; }
+        if run.eligible_after > current_generation {
+            continue;
+        }
         let mut taken = 0_u32;
         for address in (run.start..run.start + u64::from(run.blocks)).rev() {
-            if selected.len() >= requested { break; }
-            if both_root_owners.contains(&address) { return Err(Error::CorruptTree); }
+            if selected.len() >= requested {
+                break;
+            }
+            if both_root_owners.contains(&address) {
+                return Err(Error::CorruptTree);
+            }
             selected.push(address);
             taken += 1;
         }
@@ -425,13 +557,26 @@ pub fn reserve_free(
             let rest = run.blocks - taken;
             remaining.remove(&start);
             if rest > 0 {
-                remaining.insert(start, FreeRun { blocks: rest, ..run });
+                remaining.insert(
+                    start,
+                    FreeRun {
+                        blocks: rest,
+                        ..run
+                    },
+                );
             }
         }
-        if selected.len() == requested { break; }
+        if selected.len() == requested {
+            break;
+        }
     }
-    if selected.len() != requested { return Err(Error::NoSpace); }
-    Ok(FreeReservation { selected, remaining })
+    if selected.len() != requested {
+        return Err(Error::NoSpace);
+    }
+    Ok(FreeReservation {
+        selected,
+        remaining,
+    })
 }
 
 /// Bounded, deliberately non-authoritative incremental retirement planner.
@@ -480,8 +625,12 @@ pub fn retire_step_cursor(
         ordered.sort_by_key(|(key, _)| (**key <= last, **key));
     }
     for (&key, &item) in ordered {
-        if scanned >= budget { break; }
-        if item.eligible_after > current_generation { continue; }
+        if scanned >= budget {
+            break;
+        }
+        if item.eligible_after > current_generation {
+            continue;
+        }
         scanned += 1;
         cursor = Some(key);
         let end = item.start + u64::from(item.blocks);
@@ -494,10 +643,14 @@ pub fn retire_step_cursor(
         }) {
             return Err(Error::CorruptTree);
         }
-        out_free.insert(item.start, FreeRun {
-            start: item.start, blocks: item.blocks,
-            eligible_after: item.eligible_after,
-        });
+        out_free.insert(
+            item.start,
+            FreeRun {
+                start: item.start,
+                blocks: item.blocks,
+                eligible_after: item.eligible_after,
+            },
+        );
         out_dead.remove(&key);
         released += u64::from(item.blocks);
     }
@@ -508,7 +661,8 @@ pub fn retire_step_cursor(
         if let Some(last) = runs.last_mut() {
             let adjoining = last.start + u64::from(last.blocks) == run.start;
             let total = u64::from(last.blocks) + u64::from(run.blocks);
-            if adjoining && last.eligible_after == run.eligible_after
+            if adjoining
+                && last.eligible_after == run.eligible_after
                 && total <= u64::from(u32::MAX)
             {
                 last.blocks += run.blocks;
@@ -518,5 +672,11 @@ pub fn retire_step_cursor(
         runs.push(run);
     }
     out_free = runs.into_iter().map(|run| (run.start, run)).collect();
-    Ok(RetireStep { free: out_free, dead: out_dead, scanned, released, cursor })
+    Ok(RetireStep {
+        free: out_free,
+        dead: out_dead,
+        scanned,
+        released,
+        cursor,
+    })
 }
