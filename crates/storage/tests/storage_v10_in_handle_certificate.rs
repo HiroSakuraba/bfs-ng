@@ -15,14 +15,14 @@ fn mutate(fs: &mut UnifiedV10<CrashDevice>, i: u64, name: &mut &'static str) {
         } else {
             "/asset/data"
         };
-        fs.rename(name, target).unwrap();
+        fs.rename(*name, target).unwrap();
         *name = target;
     } else if i % 11 == 3 {
-        fs.truncate(name, 13).unwrap();
+        fs.truncate(*name, 13).unwrap();
     } else if i % 5 == 2 {
-        fs.write_at(name, 4100, &i.to_le_bytes()).unwrap();
+        fs.write_at(*name, 4100, &i.to_le_bytes()).unwrap();
     } else {
-        fs.write_at(name, 0, &i.to_le_bytes()).unwrap();
+        fs.write_at(*name, 0, &i.to_le_bytes()).unwrap();
     }
 }
 
