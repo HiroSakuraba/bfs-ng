@@ -418,6 +418,107 @@ fn rename_records(
     }
     Ok(())
 }
+fn free_deltas(
+    before: &BTreeMap<u64, FreeRun>,
+    after: &BTreeMap<u64, FreeRun>,
+    total: u64,
+) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>> {
+    let mut changes = BTreeMap::new();
+    for (&start, &old) in before {
+        if after.get(&start) != Some(&old) {
+            let value = after.get(&start).map(|run| free_item(*run, total))
+                .transpose()?.map(|(_, value)| value);
+            changes.insert(start.to_be_bytes().to_vec(), value);
+        }
+    }
+    for (&start, &new) in after {
+        if !before.contains_key(&start) {
+            let (key, value) = free_item(new, total)?;
+            changes.insert(key, Some(value));
+        }
+    }
+    Ok(changes)
+}
+fn dead_deltas(
+    before: &BTreeMap<(u64, u64), DeadRun>,
+    after: &BTreeMap<(u64, u64), DeadRun>,
+    total: u64,
+) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>> {
+    let mut changes = BTreeMap::new();
+    for (&key, &old) in before {
+        if after.get(&key) != Some(&old) {
+            let (bytes, _) = dead_item(old, total)?;
+            let value = after.get(&key).map(|run| dead_item(*run, total))
+                .transpose()?.map(|(_, value)| value);
+            changes.insert(bytes, value);
+        }
+    }
+    for (&key, &run) in after {
+        if !before.contains_key(&key) {
+            let (bytes, value) = dead_item(run, total)?;
+            changes.insert(bytes, Some(value));
+        }
+    }
+    Ok(changes)
+}
+fn recorded_interval(
+    free: &BTreeMap<u64, FreeRun>,
+    dead: &BTreeMap<(u64, u64), DeadRun>,
+    address: u64,
+) -> bool {
+    if let Some((_, run)) = free.range(..=address).next_back() {
+        if address < run.start + u64::from(run.blocks) { return true; }
+    }
+    dead.values().any(|run| address >= run.start
+        && address < run.start + u64::from(run.blocks))
+}
+/// Record pages retired by rotation of the oldest F0 candidate, but never
+/// release them in the same generation. Global metadata and snapshot-owned
+/// pages have distinct domain labels; independent live/pinned reachability
+/// remains the release authority.
+fn queue_fallback_retirements(
+    free: &BTreeMap<u64, FreeRun>,
+    dead: &mut BTreeMap<(u64, u64), DeadRun>,
+    combined_owners: &BTreeSet<u64>,
+    selected: &Verified,
+    next_generation: u64,
+) -> Result<()> {
+    let eligible = next_generation.checked_add(2)
+        .ok_or(Error::GenerationOverflow)?;
+    let mut grouped: Vec<DeadRun> = Vec::new();
+    for &address in combined_owners.difference(&selected.owned) {
+        if address < INDEX_ARENA_END
+            || recorded_interval(free, dead, address)
+        {
+            continue;
+        }
+        let domain = if selected.retired_global.contains(&address) {
+            SpaceDomain::Global
+        } else {
+            SpaceDomain::Snapshot
+        };
+        if let Some(last) = grouped.last_mut() {
+            if last.domain == domain
+                && last.start + u64::from(last.blocks) == address
+                && last.blocks < u32::MAX
+            {
+                last.blocks += 1;
+                continue;
+            }
+        }
+        grouped.push(DeadRun {
+            dead_generation: next_generation,
+            start: address, blocks: 1, eligible_after: eligible, domain,
+        });
+    }
+    for run in grouped {
+        if dead.insert((run.dead_generation, run.start), run).is_some() {
+            return Err(Error::CorruptTree);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum Edit<'a> {
     Mkdir(&'a str),
