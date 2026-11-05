@@ -519,3 +519,147 @@ mod tests {
         }
     }
 }
+
+
+/// Versioned, bounded owner-checkpoint and allocation/retirement delta
+/// embedded *inside* the checksummed F0 payload. A valid receipt is never
+/// sufficient to bypass independent reachability verification on recovery.
+pub(super) struct PublishedOwnerReceipt {
+    parent_manifest_crc: u32,
+    checkpoint: Vec<u8>,
+    allocated: BTreeSet<u64>,
+    retired: BTreeSet<u64>,
+}
+
+impl PublishedOwnerReceipt {
+    const MAGIC: [u8; 8] = *b"BFSNGAR1";
+    const HEADER: usize = 24;
+
+    pub fn for_transition(
+        transition: &OwnershipTransition,
+        id: u128,
+        new_manifest_crc: u32,
+        parent_manifest_crc: u32,
+    ) -> Result<Self> {
+        Ok(Self {
+            parent_manifest_crc,
+            checkpoint: transition.next.encode_checkpoint(id, new_manifest_crc)?,
+            allocated: transition.allocated.clone(),
+            retired: transition.retired.clone(),
+        })
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let size = Self::HEADER
+            + self.checkpoint.len()
+            + 8 * (self.allocated.len() + self.retired.len())
+            + 4;
+        if size > crate::ROOT_CAPACITY - super::MANIFEST_BYTES {
+            return Err(Error::TooLarge);
+        }
+        let checkpoint_len = u16::try_from(self.checkpoint.len()).map_err(|_| Error::TooLarge)?;
+        let allocated_len = u16::try_from(self.allocated.len()).map_err(|_| Error::TooLarge)?;
+        let retired_len = u16::try_from(self.retired.len()).map_err(|_| Error::TooLarge)?;
+        let mut bytes = vec![0_u8; Self::HEADER];
+        bytes[0..8].copy_from_slice(&Self::MAGIC);
+        bytes[8..12].copy_from_slice(&self.parent_manifest_crc.to_le_bytes());
+        bytes[12..14].copy_from_slice(&checkpoint_len.to_le_bytes());
+        bytes[14..16].copy_from_slice(&allocated_len.to_le_bytes());
+        bytes[16..18].copy_from_slice(&retired_len.to_le_bytes());
+        bytes.extend_from_slice(&self.checkpoint);
+        for address in self.allocated.iter().chain(self.retired.iter()) {
+            bytes.extend_from_slice(&address.to_le_bytes());
+        }
+        let crc = crate::volume::crc32c(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < Self::HEADER + 4
+            || bytes.len() > crate::ROOT_CAPACITY - super::MANIFEST_BYTES
+            || bytes[0..8] != Self::MAGIC
+            || bytes[18..24] != [0; 6]
+        {
+            return Err(Error::CorruptTree);
+        }
+        let checksum = u32::from_le_bytes(
+            bytes[bytes.len() - 4..].try_into().map_err(|_| Error::CorruptTree)?,
+        );
+        if checksum != crate::volume::crc32c(&bytes[..bytes.len() - 4]) {
+            return Err(Error::CorruptTree);
+        }
+        let checkpoint_len =
+            u16::from_le_bytes(bytes[12..14].try_into().map_err(|_| Error::CorruptTree)?) as usize;
+        let allocated_len =
+            u16::from_le_bytes(bytes[14..16].try_into().map_err(|_| Error::CorruptTree)?) as usize;
+        let retired_len =
+            u16::from_le_bytes(bytes[16..18].try_into().map_err(|_| Error::CorruptTree)?) as usize;
+        if bytes.len()
+            != Self::HEADER + checkpoint_len + 8 * (allocated_len + retired_len) + 4
+        {
+            return Err(Error::CorruptTree);
+        }
+        let mut offset = Self::HEADER + checkpoint_len;
+        let mut read_set = |count: usize| -> Result<BTreeSet<u64>> {
+            let mut last = None;
+            let mut addresses = BTreeSet::new();
+            for _ in 0..count {
+                let address = u64::from_le_bytes(
+                    bytes[offset..offset + 8]
+                        .try_into()
+                        .map_err(|_| Error::CorruptTree)?,
+                );
+                if last.is_some_and(|previous| address <= previous) {
+                    return Err(Error::CorruptTree);
+                }
+                last = Some(address);
+                addresses.insert(address);
+                offset += 8;
+            }
+            Ok(addresses)
+        };
+        let receipt = Self {
+            parent_manifest_crc: u32::from_le_bytes(
+                bytes[8..12].try_into().map_err(|_| Error::CorruptTree)?,
+            ),
+            checkpoint: bytes[Self::HEADER..Self::HEADER + checkpoint_len].to_vec(),
+            allocated: read_set(allocated_len)?,
+            retired: read_set(retired_len)?,
+        };
+        if receipt.parent_manifest_crc == 0
+            || receipt.encode().map_err(|_| Error::CorruptTree)? != bytes
+        {
+            return Err(Error::CorruptTree);
+        }
+        Ok(receipt)
+    }
+
+    pub fn verify_audited(
+        &self,
+        owners: &TwoRootOwners,
+        current_manifest: &super::Manifest,
+        parent_manifest: &super::Manifest,
+        id: u128,
+        total: u64,
+    ) -> Result<()> {
+        let latest_crc = crate::volume::crc32c(&current_manifest.encode(total)?);
+        let previous_crc = crate::volume::crc32c(&parent_manifest.encode(total)?);
+        if previous_crc != self.parent_manifest_crc
+            || parent_manifest.generation.checked_add(1) != Some(current_manifest.generation)
+        {
+            return Err(Error::CorruptTree);
+        }
+        owners.verify_checkpoint(&self.checkpoint, id, latest_crc, total)?;
+        let next_union = owners.protected();
+        if !self.allocated.is_subset(&owners.current.pages)
+            || !self.retired.is_disjoint(&next_union)
+            || self.allocated.iter().chain(self.retired.iter()).any(|&a| {
+                a <= crate::volume::ROOT_PAYLOAD_LAST || a >= total
+            })
+        {
+            return Err(Error::CorruptTree);
+        }
+        Ok(())
+    }
+}

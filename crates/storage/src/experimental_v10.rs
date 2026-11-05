@@ -517,6 +517,10 @@ impl Manifest {
         Ok(b)
     }
     pub fn decode(bytes: &[u8], root: RootInfo, total_blocks: u64) -> Result<Self> {
+        if bytes.len() > MANIFEST_BYTES {
+            allocation_certificate::PublishedOwnerReceipt::decode(&bytes[MANIFEST_BYTES..])?;
+        }
+        let bytes = bytes.get(..MANIFEST_BYTES).ok_or_else(bad)?;
         if bytes.len() != MANIFEST_BYTES
             || bytes[..8] != MANIFEST_MAGIC
             || get_u32(bytes, 8) != MANIFEST_VERSION

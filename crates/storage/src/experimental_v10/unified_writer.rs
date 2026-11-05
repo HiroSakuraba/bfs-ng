@@ -10,7 +10,7 @@
 //! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
-use super::allocation_certificate::{OwnerGraph, TwoRootOwners};
+use super::allocation_certificate::{OwnerGraph, PublishedOwnerReceipt, TwoRootOwners};
 use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
@@ -337,6 +337,8 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
     let mut owned = BTreeSet::new();
     let mut previous: Option<(u64, u64)> = None;
     let mut fallback_global = BTreeSet::new();
+    let mut fallback_manifest = None;
+    let mut latest_receipt = None;
     for (root, payload) in volume.candidate_roots()? {
         if root.generation == 0 {
             if payload.is_some() {
@@ -346,6 +348,13 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         }
         let raw = payload.ok_or(Error::CorruptRoot)?;
         let m = Manifest::decode(&raw, root, volume.block_count())?;
+        let receipt = if raw.len() > super::MANIFEST_BYTES {
+            Some(PublishedOwnerReceipt::decode(
+                &raw[super::MANIFEST_BYTES..],
+            )?)
+        } else {
+            None
+        };
         let checked = volume.inspect(|device| verify(device, root, m))?;
         if let Some((generation, watermark)) = previous {
             if root.generation != generation + 1 || m.high_water > watermark {
@@ -355,9 +364,11 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
         previous = Some((root.generation, m.high_water));
         owned.extend(checked.owned.iter().copied());
         if root.generation == latest.generation {
+            latest_receipt = receipt;
             selected = Some((m, checked));
         } else {
             fallback_global = checked.global_pages.clone();
+            fallback_manifest = Some(m);
         }
     }
     let (m, mut checked) = selected.ok_or(Error::CorruptRoot)?;
@@ -373,6 +384,26 @@ fn audit<D: BlockDevice>(volume: &mut Volume<D>) -> Result<(Manifest, Verified, 
             &checked.dead,
             &owned,
             m.generation,
+            volume.block_count(),
+        )?;
+    }
+    if let Some(receipt) = latest_receipt {
+        // Even an F0-atomic receipt is NOT an ownership certificate by
+        // itself. Validate its current and fallback physical sets against
+        // both full, independently traversed on-disk F0 graphs first.
+        let parent = fallback_manifest.ok_or(Error::CorruptTree)?;
+        let head_graph = OwnerGraph::new(checked.owned.clone(), checked.global_pages.clone())?;
+        let owners = TwoRootOwners::from_audit(
+            m.generation,
+            head_graph,
+            &owned,
+            checked.retired_global.clone(),
+        )?;
+        receipt.verify_audited(
+            &owners,
+            &m,
+            &parent,
+            volume.info().volume_id,
             volume.block_count(),
         )?;
     }
@@ -608,6 +639,7 @@ pub struct UnifiedV10<D: BlockDevice> {
     manifest: Manifest,
     last_reused_blocks: usize,
     in_handle_certificate: Option<InHandleCertificate>,
+    publish_f0_owner_receipts: bool,
 }
 impl<D: BlockDevice> UnifiedV10<D> {
     pub fn format(device: D, id: u128) -> Result<Self> {
@@ -691,6 +723,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             manifest,
             last_reused_blocks: 0,
             in_handle_certificate: None,
+            publish_f0_owner_receipts: false,
         })
     }
     pub fn manifest(&self) -> &Manifest {
@@ -1407,7 +1440,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
         } else {
             old.high_water
         };
-        let payload = next.encode(total)?;
+        let mut payload = next.encode(total)?.to_vec();
         let candidate_checked = self.volume.inspect(|device| {
             let mut overlay = Overlay {
                 disk: device,
@@ -1480,6 +1513,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 total,
                 INDEX_ARENA_END,
             )?;
+            if self.publish_f0_owner_receipts {
+                let receipt = PublishedOwnerReceipt::for_transition(
+                    &transition,
+                    id,
+                    crc32c(&next.encode(total)?),
+                    crc32c(&old.encode(total)?),
+                )?;
+                payload.extend_from_slice(&receipt.encode()?);
+            }
             let expected: BTreeSet<u64> = checked
                 .owned
                 .union(&candidate_checked.owned)
@@ -1537,7 +1579,7 @@ impl UnifiedV10<CrashDevice> {
     /// candidate is still verified in full; this bypasses just the repeated
     /// traversal of the two *old* F0 graphs. FileDevice and ordinary opens
     /// remain on the strict full-audit path.
-
+    /// 
     /// Export a canonical ownership sidecar for the exclusive memory-backed
     /// test writer. A sidecar is never an authorization to skip disk audits:
     /// this method only serializes the already verified in-handle lease.
@@ -1585,8 +1627,33 @@ impl UnifiedV10<CrashDevice> {
                 verified,
                 ownership,
             }),
+            publish_f0_owner_receipts: false,
         })
     }
+    /// Enable bounded F0-atomic owner receipts on a private CrashDevice.
+    /// This remains a tested witness, not an independently trusted on-disk
+    /// allocator: reopening requires the complete two-root reachability audit.
+    pub fn enable_f0_published_allocation_receipts(&mut self) -> Result<()> {
+        self.enable_in_handle_allocation_certificate()?;
+        self.publish_f0_owner_receipts = true;
+        Ok(())
+    }
+
+    /// Validate the latest persisted F0 receipt, then resume its emission.
+    pub fn reopen_with_verified_f0_receipts(device: CrashDevice) -> Result<Self> {
+        let mut writer = Self::open(device)?;
+        let latest = writer.volume.info().generation;
+        let present = writer.volume.candidate_roots()?.iter().any(|(root, raw)| {
+            root.generation == latest
+                && raw.as_ref().is_some_and(|bytes| bytes.len() > super::MANIFEST_BYTES)
+        });
+        if !present {
+            return Err(Error::CorruptTree);
+        }
+        writer.enable_f0_published_allocation_receipts()?;
+        Ok(writer)
+    }
+
     pub fn enable_in_handle_allocation_certificate(&mut self) -> Result<()> {
         if self.manifest.metadata_reserve != INDEX_ARENA_BLOCKS {
             return Err(Error::CorruptTree);

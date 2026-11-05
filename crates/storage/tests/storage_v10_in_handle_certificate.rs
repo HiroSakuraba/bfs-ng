@@ -254,3 +254,49 @@ fn corrupt_checkpoint_is_rejected_before_reenabling_the_fast_lease() {
         &checkpoint,
     ).is_err());
 }
+
+#[test]
+fn f0_owner_receipts_are_atomic_and_reopen_only_after_full_graph_audit() {
+    let mut fs = UnifiedV10::format_indexed(CrashDevice::new(384), VID).unwrap();
+    fs.mkdir("/demo").unwrap();
+    fs.write_at("/demo/file", 0, b"old").unwrap();
+    let pin = fs.manifest().generation;
+    fs.pin_current().unwrap();
+    fs.enable_f0_published_allocation_receipts().unwrap();
+    for i in 0..9_u64 {
+        fs.write_at("/demo/file", 0, &i.to_le_bytes()).unwrap();
+    }
+    let stable = fs.manifest().generation;
+    let disk = fs.into_device().power_loss();
+    let mut reopened = UnifiedV10::reopen_with_verified_f0_receipts(disk).unwrap();
+    assert_eq!(reopened.manifest().generation, stable);
+    assert_eq!(reopened.read_snapshot_file(pin, "/demo/file").unwrap(), b"old");
+    reopened.write_at("/demo/file", 0, b"after").unwrap();
+    let disk = reopened.into_device().power_loss();
+    let mut again = UnifiedV10::reopen_with_verified_f0_receipts(disk).unwrap();
+    assert_eq!(&again.read_file("/demo/file").unwrap()[..5], b"after");
+}
+
+#[test]
+fn interrupted_f0_owner_receipt_publication_preserves_recovery() {
+    for operation in 1..=6 {
+        let mut fs = UnifiedV10::format_indexed(CrashDevice::new(352), VID).unwrap();
+        fs.mkdir("/a").unwrap();
+        fs.write_at("/a/f", 0, b"old").unwrap();
+        fs.enable_f0_published_allocation_receipts().unwrap();
+        fs.write_at("/a/f", 0, b"stable").unwrap();
+        let old = fs.manifest().generation;
+        let mut disk = fs.into_device().power_loss();
+        disk.inject(Fault { operation, torn_bytes: Some(128) }).unwrap();
+        let mut tx = UnifiedV10::reopen_with_verified_f0_receipts(disk).unwrap();
+        assert!(matches!(
+            tx.write_at("/a/f", 0, b"new"),
+            Err(Error::InjectedCrash)
+        ));
+        let mut recovered = UnifiedV10::open(tx.into_device().power_loss()).unwrap();
+        assert!(recovered.manifest().generation == old
+            || recovered.manifest().generation == old + 1);
+        let contents = recovered.read_file("/a/f").unwrap();
+        assert!(contents.starts_with(b"stable") || contents.starts_with(b"new"));
+    }
+}

@@ -48,6 +48,12 @@ A canonical `BFSNGAC1` ownership-checkpoint sidecar serializes the latest audite
 
 This is an encoding and recovery-validation prototype, not an atomically F0-published persistent ledger: there is no on-disk checkpoint root, no durable kill-event log, no safe `FileDevice` fast path, and no elimination of the required re-audit after a crash. A future format revision must persist both the owner's graph identity and atomic delta history, and must prove restart and partial-publication safety before considering a faster reopen.
 
+## F0-published owner/delta receipt — bounded opt-in
+
+The `CrashDevice`-only `enable_f0_published_allocation_receipts()` opt-in appends a versioned `BFSNGAR1` owner receipt to the 292-byte v10 manifest in the same root payload. The record contains a canonical four-set owner checkpoint, parent-manifest CRC, and ordered physical allocation and retirement deltas. CoW data, root payload and F0 slot share the usual durable publication barriers. `reopen_with_verified_f0_receipts()` checks the entire current and fallback graph against the receipt **before** re-enabling cached allocation; a root CRC or receipt alone is not authorization. Incorrect, out-of-range, oversized or damaged receipts fail closed; the fixed F0 payload cap causes `TooLarge` rather than silently truncating.
+
+This is an explicit experimental extension to v10 root-payload length, not a new production format: older strict decoders reject the extension. It does not provide a persistent Merkle-verified ownership tree, a complete durable kill-event log, or fast reopening without independent traversal. Normal `FileDevice` writes remain on the full audit. Moving beyond the bounded prototype requires an on-disk CoW ledger root and a separately tested, versioned format migration.
+
 ## Validation and remaining work
 
 **Post-#33 boundary hardening (experimental):** The DeadList codec and bounded in-memory retirement planner reject death generations that cannot represent a full two-generation absolute eligibility fence (checked addition, never saturation). A separate deterministic small-state oracle exhausts cursor positions, scan budgets, owner masks and eligibility generations. A staged-tree test also asserts that insufficient index-page reservations return `NoSpace` without touching device blocks. These checks constrain the existing implementation; they **do not** establish full F5.3 Accounted ownership correctness, unlock the 64-page reserve, or eliminate the complete two-F0-root graph audit.
