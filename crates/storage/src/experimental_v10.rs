@@ -14,7 +14,7 @@ mod checksum_delta;
 mod space_index;
 pub use space_index::{DeadRun, FreeRun, MAX_RETIRE_STEP, MAX_SPACE_PAGES, MAX_SPACE_RUNS,
     RetireStep, SpaceDomain, SpaceScan, StagedSpace, dead_item, free_item,
-    FreeReservation, read_space_tree, reserve_free, retire_step,
+    FreeReservation, read_space_tree, reserve_free, retire_step, retire_step_cursor,
     stage_space_delta, validate_space_pair};
 mod checksum_tree;
 pub use checksum_delta::stage_checksum_delta;
