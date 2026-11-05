@@ -1579,16 +1579,19 @@ impl UnifiedV10<CrashDevice> {
     /// candidate is still verified in full; this bypasses just the repeated
     /// traversal of the two *old* F0 graphs. FileDevice and ordinary opens
     /// remain on the strict full-audit path.
-    /// 
+    ///
     /// Export a canonical ownership sidecar for the exclusive memory-backed
     /// test writer. A sidecar is never an authorization to skip disk audits:
     /// this method only serializes the already verified in-handle lease.
     pub fn export_allocation_checkpoint(&self) -> Result<Vec<u8>> {
-        let lease = self.in_handle_certificate.as_ref().ok_or(Error::CorruptTree)?;
-        let crc = crate::volume::crc32c(
-            &self.manifest.encode(self.volume.block_count())?,
-        );
-        lease.ownership.encode_checkpoint(self.volume.info().volume_id, crc)
+        let lease = self
+            .in_handle_certificate
+            .as_ref()
+            .ok_or(Error::CorruptTree)?;
+        let crc = crate::volume::crc32c(&self.manifest.encode(self.volume.block_count())?);
+        lease
+            .ownership
+            .encode_checkpoint(self.volume.info().volume_id, crc)
     }
 
     /// Recover a cached allocation lease, but only AFTER an independent
@@ -1645,7 +1648,9 @@ impl UnifiedV10<CrashDevice> {
         let latest = writer.volume.info().generation;
         let present = writer.volume.candidate_roots()?.iter().any(|(root, raw)| {
             root.generation == latest
-                && raw.as_ref().is_some_and(|bytes| bytes.len() > super::MANIFEST_BYTES)
+                && raw
+                    .as_ref()
+                    .is_some_and(|bytes| bytes.len() > super::MANIFEST_BYTES)
         });
         if !present {
             return Err(Error::CorruptTree);
