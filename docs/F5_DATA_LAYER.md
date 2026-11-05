@@ -1,6 +1,6 @@
 # F5 — extent data layer, birth-time reclamation and inode namespace (proposed)
 
-**Status:** design proposal, **safety-corrected 2026-11-04**. **Nothing in F5 is implemented.** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
+**Status:** design proposal, **safety-corrected 2026-11-04**. **Only the isolated F5.0a read-only wire codecs and direct-root inspector are implemented (experimental, [wire specification](F5_0A_WIRE_FORMAT.md)); the v10 filesystem writer, persistent snapshot updater, v10 allocator, and F5.0b onward are NOT implemented.** Target format: F0 superblock **v2** (unchanged) and root manifest **v10**. Disposable single-writer test images only; v9 images are rejected, not migrated. Source code and tests remain the authority once any part of F5 lands.
 
 **Baseline:** `main` after F0.R1 (manifest v9), as described in [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -93,7 +93,7 @@ Every stored generation (birth generations in pointers and extents, snapshot gen
 
 ### 6.2 Generic CoW B+tree page
 
-All F5 trees (fs tree, checksum tree, free-space tree, dead-list tree, attribute trees) share one page format. Pages are 4,096 bytes.
+All F5 trees (fs tree, checksum tree, free-space tree, dead-list tree, attribute trees) share one page format. Pages are 4,096 bytes. The first F5.0a implementation adds tree IDs **7 = snapshot catalog** and **8 = attribute schema**, alongside IDs 1–6, and supports canonical empty leaf roots. The codec and its exact offsets are described in [F5.0a](F5_0A_WIRE_FORMAT.md).
 
 | Offset | Width | Field |
 | ---: | ---: | --- |
@@ -196,7 +196,7 @@ struct SnapshotDescriptorV10 {
 }
 ```
 
-The actual binary codec must specify field offsets, length, zero padding and flag values before F5.0a is implemented. `F5.0a` writes and verifies these complete descriptors even while F5.5 is not active; absent attribute roots are zero and a v9-style catalog inside the fs tree is still reachable through `fs_root`.
+The isolated [F5.0a wire codec](F5_0A_WIRE_FORMAT.md) now specifies the snapshot descriptor as exactly **112 bytes**: generation[0..8], fs BP[8..32], attribute rows BP[32..56], postings BP[56..80], schema BP[80..104], state u32[104..108] (`Pinned=1`, `Dropping=2`), reserved zero[108..112]. It implements encode/decode and a **read-only bounded leaf-catalog** verifier; it does not yet write durable snapshots or replace v9's catalog. Absent attribute roots must be all zero and never fall back to current live roots.
 
 **Snapshot pin invariant:** capture the currently committed namespace root, attribute row/posting roots and schema root as one logical snapshot at the pin transaction's F0 publication. All later historical attribute lookups use the descriptor's roots, never the live manifest's attribute roots. The descriptor's filesystem root and retained schema must agree on inode identities and attribute normalization. Any validation failure is a historical-snapshot read error or reuse quarantine, not a reason to guess current rows.
 

@@ -5,6 +5,10 @@ mod device;
 mod fs;
 mod volume;
 
+/// Isolated F5.0a v10 codecs and read-only root inspection. This module does
+/// not enable a v10 writer or relax v9's F2.R4 allocation certification.
+pub mod experimental_v10;
+
 pub use bfs_ng_attribute_index::{
     AttributeDef, AttributeType, FileId, Predicate, QueryResult, Schema, TextCase, Value,
 };
