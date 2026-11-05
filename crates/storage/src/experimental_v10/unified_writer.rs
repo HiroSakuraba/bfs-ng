@@ -1459,7 +1459,12 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 &cached.ownership
             } else {
                 temporary_shadow =
-                    TwoRootOwners::from_audit(owner_graph, owned, checked.retired_global.clone())?;
+                    TwoRootOwners::from_audit(
+                        old.generation,
+                        owner_graph,
+                        owned,
+                        checked.retired_global.clone(),
+                    )?;
                 &temporary_shadow
             };
             let candidate_graph = OwnerGraph::new(
@@ -1543,7 +1548,12 @@ impl UnifiedV10<CrashDevice> {
         }
         let graph = OwnerGraph::new(verified.owned.clone(), verified.global_pages.clone())?;
         let ownership =
-            TwoRootOwners::from_audit(graph, &owners, verified.retired_global.clone())?;
+            TwoRootOwners::from_audit(
+                manifest.generation,
+                graph,
+                &owners,
+                verified.retired_global.clone(),
+            )?;
         self.in_handle_certificate = Some(InHandleCertificate {
             manifest,
             verified,

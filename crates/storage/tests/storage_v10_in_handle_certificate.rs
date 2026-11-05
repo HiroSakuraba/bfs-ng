@@ -15,14 +15,14 @@ fn mutate(fs: &mut UnifiedV10<CrashDevice>, i: u64, name: &mut &'static str) {
         } else {
             "/asset/data"
         };
-        fs.rename(*name, target).unwrap();
+        fs.rename(name, target).unwrap();
         *name = target;
     } else if i % 11 == 3 {
-        fs.truncate(*name, 13).unwrap();
+        fs.truncate(name, 13).unwrap();
     } else if i % 5 == 2 {
-        fs.write_at(*name, 4100, &i.to_le_bytes()).unwrap();
+        fs.write_at(name, 4100, &i.to_le_bytes()).unwrap();
     } else {
-        fs.write_at(*name, 0, &i.to_le_bytes()).unwrap();
+        fs.write_at(name, 0, &i.to_le_bytes()).unwrap();
     }
 }
 
@@ -115,6 +115,30 @@ fn exclusive_in_handle_allocator_matches_strict_mode_and_reduces_disk_walks() {
             "historical snapshot {generation}"
         );
     }
+}
+
+#[test]
+fn rejected_edits_cannot_advance_an_in_handle_allocation_certificate() {
+    let mut cached = UnifiedV10::format_indexed(CrashDevice::new(384), VID).unwrap();
+    let mut strict = UnifiedV10::format_indexed(CrashDevice::new(384), VID).unwrap();
+    cached.enable_in_handle_allocation_certificate().unwrap();
+    for fs in [&mut cached, &mut strict] {
+        fs.mkdir("/a").unwrap();
+        fs.write_at("/a/file", 0, b"v1").unwrap();
+    }
+    let generation = cached.manifest().generation;
+    assert!(matches!(
+        cached.rename("/a/file", "/missing/file"),
+        Err(Error::NotFound) | Err(Error::NotDirectory)
+    ));
+    assert_eq!(cached.manifest().generation, generation);
+    // Reusing the cached certificate after a rejected (unpublished) edit
+    // must give the same generation and bytes as the full-audit path.
+    cached.write_at("/a/file", 0, b"v2").unwrap();
+    strict.write_at("/a/file", 0, b"v2").unwrap();
+    assert_eq!(cached.manifest(), strict.manifest());
+    let mut checked = UnifiedV10::open(cached.into_device().power_loss()).unwrap();
+    assert_eq!(checked.read_file("/a/file").unwrap(), b"v2");
 }
 
 #[test]

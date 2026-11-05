@@ -28,6 +28,7 @@ impl OwnerGraph {
 /// The fallback-only projection is enough: pages also present in the
 /// current graph remain protected when the F0 pair rotates.
 pub(super) struct TwoRootOwners {
+    head_generation: u64,
     current: OwnerGraph,
     fallback_only: OwnerGraph,
 }
@@ -41,11 +42,12 @@ pub(super) struct OwnershipTransition {
 impl TwoRootOwners {
     /// One-time seed from the authoritative full audit at open/format.
     pub fn from_audit(
+        head_generation: u64,
         current: OwnerGraph,
         both_root_owners: &BTreeSet<u64>,
         fallback_global_only: BTreeSet<u64>,
     ) -> Result<Self> {
-        if !current.pages.is_subset(both_root_owners) {
+        if head_generation == 0 || !current.pages.is_subset(both_root_owners) {
             return Err(Error::CorruptTree);
         }
         let fallback_pages = both_root_owners
@@ -54,6 +56,7 @@ impl TwoRootOwners {
             .collect();
         let fallback_only = OwnerGraph::new(fallback_pages, fallback_global_only)?;
         Ok(Self {
+            head_generation,
             current,
             fallback_only,
         })
@@ -84,11 +87,21 @@ impl TwoRootOwners {
         total_blocks: u64,
         arena_end: u64,
     ) -> Result<OwnershipTransition> {
-        if new_generation == 0 || arena_end > total_blocks {
-            return Err(Error::Geometry);
+        if new_generation
+            != self
+                .head_generation
+                .checked_add(1)
+                .ok_or(Error::GenerationOverflow)?
+            || arena_end > total_blocks
+        {
+            return Err(Error::CorruptTree);
         }
         let before = self.protected();
-        if !staged.is_disjoint(&before) || staged.iter().any(|&address| address >= total_blocks) {
+        if !staged.is_disjoint(&before)
+            || staged
+                .iter()
+                .any(|&address| address <= crate::volume::ROOT_PAYLOAD_LAST || address >= total_blocks)
+        {
             return Err(Error::CorruptTree);
         }
         let allocated: BTreeSet<u64> = candidate.pages.difference(&before).copied().collect();
@@ -121,31 +134,39 @@ impl TwoRootOwners {
             .copied()
             .collect();
         let next = Self {
+            head_generation: new_generation,
             current: candidate,
             fallback_only: OwnerGraph::new(prior_current_only, prior_global_only)?,
         };
         let after = next.protected();
         let retired: BTreeSet<u64> = before.difference(&after).copied().collect();
 
+        // First prove that the entire Free/Dead map has valid disjoint runs
+        // and that Free contains no owner in the next two-root union.
+        // This makes a single physical-start lookup sound for Dead witnesses.
+        validate_space_pair(free, dead, &after, new_generation, total_blocks)?;
+        let pending_by_start: BTreeMap<u64, &DeadRun> =
+            dead.values().map(|run| (run.start, run)).collect();
         // A forgotten kill leaks space; a false Free kill destroys data.
-        // Compare every disappearing data-region address to the exact,
-        // published DeadList. The arena is deliberately out of the index.
+        // Require a persisted DeadList witness for each disappearing block.
+        // The 64-block nonrecursive allocator arena has its own lifetime.
         for &address in &retired {
             if address < arena_end {
                 continue;
             }
-            let global = self.fallback_only.global.contains(&address);
-            if !dead.values().any(|run| {
-                run.start <= address
-                    && address < run.start + u64::from(run.blocks)
-                    && (run.domain == super::space_index::SpaceDomain::Global) == global
-            }) {
+            let run = pending_by_start
+                .range(..=address)
+                .next_back()
+                .map(|(_, run)| *run)
+                .ok_or(Error::CorruptTree)?;
+            let expected_global = self.fallback_only.global.contains(&address);
+            if address >= run.start + u64::from(run.blocks)
+                || run.dead_generation > new_generation
+                || (run.domain == super::space_index::SpaceDomain::Global) != expected_global
+            {
                 return Err(Error::CorruptTree);
             }
         }
-        // The new Free tree must not alias any new-current or retained-old
-        // current owner. Epochs are not authority to release an owned block.
-        validate_space_pair(free, dead, &after, new_generation, total_blocks)?;
         Ok(OwnershipTransition {
             next,
             retired,
@@ -170,6 +191,7 @@ mod tests {
     #[test]
     fn rotates_current_to_fallback_without_losing_snapshot_owners() {
         let old = TwoRootOwners::from_audit(
+            5,
             graph(&[80, 81, 82], &[]),
             &BTreeSet::from([80, 81, 82, 90]),
             BTreeSet::new(),
@@ -204,6 +226,7 @@ mod tests {
     #[test]
     fn rejects_unstaged_new_page_and_missing_retirement() {
         let old = TwoRootOwners::from_audit(
+            5,
             graph(&[80], &[]),
             &BTreeSet::from([80, 90]),
             BTreeSet::new(),
@@ -239,7 +262,12 @@ mod tests {
     #[test]
     fn refuses_global_role_swap_and_free_claim_on_retained_f0_owner() {
         let old =
-            TwoRootOwners::from_audit(graph(&[80], &[80]), &BTreeSet::from([80]), BTreeSet::new())
+            TwoRootOwners::from_audit(
+                5,
+                graph(&[80], &[80]),
+                &BTreeSet::from([80]),
+                BTreeSet::new(),
+            )
                 .unwrap();
         assert!(
             old.transition(
@@ -276,13 +304,48 @@ mod tests {
     }
 
     #[test]
+    fn stale_or_skipped_f0_generation_refuses_the_certificate() {
+        let old = TwoRootOwners::from_audit(
+            5,
+            graph(&[80], &[]),
+            &BTreeSet::from([80]),
+            BTreeSet::new(),
+        )
+        .unwrap();
+        for incorrect_generation in [5, 7] {
+            assert!(old
+                .transition(
+                    graph(&[80], &[]),
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    incorrect_generation,
+                    128,
+                    69,
+                )
+                .is_err());
+        }
+        assert!(old
+            .transition(
+                graph(&[80], &[]),
+                &BTreeSet::from([4]),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                6,
+                128,
+                69,
+            )
+            .is_err());
+    }
+
+    #[test]
     fn rotation_union_equals_full_reference_for_many_generations() {
         let mut previous = graph(&[80, 81, 90], &[]);
         let mut latest = graph(&[80, 81, 100], &[]);
         for i in 0..128_u64 {
             let old_union: BTreeSet<u64> = previous.pages.union(&latest.pages).copied().collect();
             let ledger =
-                TwoRootOwners::from_audit(latest.clone(), &old_union, BTreeSet::new()).unwrap();
+                TwoRootOwners::from_audit(i + 9, latest.clone(), &old_union, BTreeSet::new()).unwrap();
             let next_address = 200 + i;
             let mut next = latest.clone();
             next.pages.insert(next_address);
