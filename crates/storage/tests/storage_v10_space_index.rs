@@ -414,3 +414,51 @@ fn persisted_retirement_cursor_prevents_blocked_oldest_entry_starvation() {
     assert_eq!(fourth.cursor, Some((2, 50)));
     assert_eq!(fourth.dead.len(), 1);
 }
+
+
+#[test]
+fn future_eligible_free_entry_cannot_hide_a_live_f0_owner() {
+    // A delayed retirement is *not* a free entry. Even if this entry would
+    // become eligible many generations later, it must not overlap a block
+    // currently owned by either recoverable F0 root or a pinned snapshot.
+    let free = BTreeMap::from([(
+        60,
+        FreeRun {
+            start: 60,
+            blocks: 4,
+            eligible_after: 1000,
+        },
+    )]);
+    let protected = BTreeSet::from([62]);
+    assert!(matches!(
+        validate_space_pair(&free, &BTreeMap::new(), &protected, 10, 128),
+        Err(Error::CorruptTree)
+    ));
+    // Reservation validation must fail closed even for no-op requests
+    // or early generations that would otherwise skip the deferred run.
+    assert!(matches!(
+        reserve_free(&free, &protected, 10, 0),
+        Err(Error::CorruptTree)
+    ));
+    assert!(matches!(
+        reserve_free(&free, &protected, 10, 1),
+        Err(Error::CorruptTree)
+    ));
+}
+
+#[test]
+fn unselected_free_run_with_stale_owner_is_not_silently_accepted() {
+    let free = BTreeMap::from([
+        (20, FreeRun { start: 20, blocks: 2, eligible_after: 3 }),
+        (80, FreeRun { start: 80, blocks: 2, eligible_after: 3 }),
+    ]);
+    let protected = BTreeSet::from([20]);
+    assert!(matches!(
+        reserve_free(&free, &protected, 5, 1),
+        Err(Error::CorruptTree)
+    ));
+    assert!(matches!(
+        validate_space_pair(&free, &BTreeMap::new(), &protected, 5, 128),
+        Err(Error::CorruptTree)
+    ));
+}
