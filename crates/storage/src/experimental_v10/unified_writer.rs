@@ -10,6 +10,7 @@
 //! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
 //! conservative recycling, but no incremental free-space index, F4 attribute
 //! index, or hard links are enabled yet.
+use super::attribute_sections::{AttributeRoots, read_attribute_roots, stage_attribute_roots};
 use super::checksum_delta::stage_checksum_delta_reusing;
 use super::namespace::stage_namespace_tree_reusing;
 use super::snapshot_tree::plan_snapshot_edit_reusing;
@@ -19,6 +20,8 @@ use super::{
     read_namespace_tree, read_page, read_snapshot_tree, read_verified_block, validate_namespace,
     validate_namespace_path,
 };
+use crate::fs::Catalog;
+use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,13 +34,37 @@ struct Reachability {
     owned_metadata: BTreeSet<u64>,
     data_births: BTreeMap<u64, u64>,
     tail_restrictions: BTreeMap<u64, Vec<usize>>,
+    catalog: Option<Catalog>,
 }
+/// All-or-none historical F4 roots. A live and a pinned snapshot use their
+/// own row/posting/schema triplets; never inherit the current generation's.
+fn attribute_roots(
+    rows: Option<BlockPointer>,
+    postings: Option<BlockPointer>,
+    schema: Option<BlockPointer>,
+) -> Result<Option<AttributeRoots>> {
+    match (rows, postings, schema) {
+        (None, None, None) => Ok(None),
+        (Some(rows), Some(postings), Some(schema)) => Ok(Some(AttributeRoots {
+            rows, postings, schema,
+        })),
+        _ => Err(Error::CorruptTree),
+    }
+}
+fn validate_attributes(
+    catalog: &Catalog,
+    records: &BTreeMap<String, NamespaceRecord>,
+) -> Result<()> {
+    let regular_files: BTreeSet<u64> = records.values()
+        .filter(|record| !record.directory)
+        .map(|record| record.inode)
+        .collect();
+    catalog.validate_inode_ids(&regular_files)
+}
+
 fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reachability> {
     if m.roots.free.is_some()
         || m.roots.dead_list.is_some()
-        || m.roots.attribute_rows.is_some()
-        || m.roots.attribute_postings.is_some()
-        || m.roots.schema.is_some()
         || m.sweep_snapshot != 0
         || m.sweep_key != 0
         || m.metadata_reserve != 0
@@ -54,15 +81,14 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     // stable inode. The first v10 profile has no reflinks or hard links.
     let mut all_files: BTreeMap<u64, (BlockPointer, u64)> = BTreeMap::new();
     let mut records = None;
+    let mut namespace_versions = BTreeMap::new();
     let current_root = m.roots.fs;
     all_ns_roots.insert(current_root.address, current_root);
     for desc in &snapshots.descriptors {
-        if desc.attribute_rows_root.is_some()
-            || desc.attribute_postings_root.is_some()
-            || desc.attribute_schema_root.is_some()
-        {
-            return Err(Error::CorruptTree);
-        }
+        attribute_roots(
+            desc.attribute_rows_root, desc.attribute_postings_root,
+            desc.attribute_schema_root,
+        )?;
         match all_ns_roots.insert(desc.fs_root.address, desc.fs_root) {
             Some(previous) if previous != desc.fs_root => return Err(Error::CorruptTree),
             _ => {}
@@ -73,6 +99,7 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
     for root in all_ns_roots.values() {
         let scan = read_namespace_tree(device, *root, id, m.generation, m.next_inode)?;
         all_ns_pages.extend(scan.metadata_pages);
+        namespace_versions.insert(root.address, scan.records.clone());
         if *root == current_root {
             records = Some(scan.records.clone());
         }
@@ -87,6 +114,47 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
             }
         }
     }
+    // Every historical descriptor owns its own attribute/index/schema
+    // generation. Identical physical pages can be shared by snapshots, but
+    // role aliases or overlaps with namespace/snapshot metadata are invalid.
+    let mut all_attribute_pages = BTreeSet::new();
+    let mut live_catalog = None;
+    let mut attribute_versions = Vec::new();
+    attribute_versions.push((
+        current_root.address,
+        attribute_roots(
+            m.roots.attribute_rows, m.roots.attribute_postings, m.roots.schema,
+        )?,
+        true,
+    ));
+    for desc in &snapshots.descriptors {
+        attribute_versions.push((
+            desc.fs_root.address,
+            attribute_roots(
+                desc.attribute_rows_root,
+                desc.attribute_postings_root,
+                desc.attribute_schema_root,
+            )?,
+            false,
+        ));
+    }
+    for (namespace_address, roots, is_live) in attribute_versions {
+        let checked = read_attribute_roots(device, roots, id, m.generation)?;
+        if let Some(attributes) = checked {
+            let names = namespace_versions.get(&namespace_address).ok_or(Error::CorruptTree)?;
+            validate_attributes(&attributes.catalog, names)?;
+            all_attribute_pages.extend(attributes.pages);
+            if is_live {
+                live_catalog = Some(attributes.catalog);
+            }
+        }
+    }
+    if !all_ns_pages.is_disjoint(&all_attribute_pages)
+        || !snapshots.owned_pages.is_disjoint(&all_attribute_pages)
+    {
+        return Err(Error::CorruptTree);
+    }
+    all_ns_pages.extend(all_attribute_pages);
     let live_records = records.ok_or(Error::CorruptTree)?;
     if live_records.len() as u64 != m.inode_count {
         return Err(Error::CorruptTree);
@@ -133,6 +201,7 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         owned_metadata: all_ns_pages,
         data_births,
         tail_restrictions: tails,
+        catalog: live_catalog,
     })
 }
 struct Verified {
