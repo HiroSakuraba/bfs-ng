@@ -140,15 +140,21 @@ Any future kernel integration must separately measure logical requests, physical
 
 These are **proposals**, not completed milestones or a claim of existing branches.
 
-| Priority | Next milestone | Proof and acceptance gate |
-| --- | --- | --- |
-| P0 | **Fully incremental physical reference accounting** | Apply verified namespace/snapshot delta changes to durable counts without a full `count_roots` walk on every commit; compare against an independent two-root full-scan oracle under random edits, snapshot pins/drops, page sharing and fault injection |
-| P0 | **Localized durable free-space structure** | Replace the rewritten sorted-run chain with a page-local CoW free-range tree/bitmap, preserve ready/pending/deferred epochs and the cursor atomically, bound metadata write amplification, and retain fail-closed recovery |
-| P0 | **Safe orphan reconciliation / crash-resumable scrub** | Independently verify live and both fallback ownership before admitting crash-unpublished pages; persist bounded checkpoint progress without allowing incomplete marks to free live blocks |
-| P1 | **Storage end-to-end benchmarks** | Measure real commit write amplification, latency and recovery scan cost under AxiomZig/DVE/MegaDoc-like operations on disposable BFS-NG image files, and compare to pre-change baselines |
-| P1 | **Incremental typed posting index** | Path-copy only affected attribute rows/postings under the same F0 root; independently recompute correctness, implement deterministic snapshot-consistent range cursors |
-| P1 | **Integrate C5 cache with storage** | Prove allocation-generation identity across reuse, invalidation and snapshot retention, impose accounted byte budget, then benchmark against no-cache |
-| P2 | **Usable mount and production hardening** | Specify Linux/Windows semantics, locking and multi-process exclusion, fsync boundaries, migration, device fault testing, online scrub, data/metadata repair policy, permissions and access controls |
+The proposed [F5 data layer](F5_DATA_LAYER.md) (manifest v10, not implemented) groups most P0/P1 storage items into one format break, because the v9 file-data layer (whole-file values of at most 256 KiB, one contiguous run per file, a 32-byte header in every data block, and `u32` birth generations) cannot carry them. The F5 column shows where each item lands.
+
+| Priority | Next milestone | F5 | Proof and acceptance gate |
+| --- | --- | --- | --- |
+| P0 | **Format v10 foundation** | F5.0 | `u64` generations everywhere; one generic CoW B+tree page format with parent-held block pointers (address, birth, CRC32C); headerless data blocks with a per-4 KiB checksum tree; lazy verification at open. Commits continue past generation `2^32`; single-byte, lost-write and misdirected-write corruption is detected on read; open reads O(tree height) pages |
+| P0 | **Extent map, inline files and byte-addressed writes** | F5.1 | Per-inode extents with holes and preallocation, inline files up to 2,048 bytes, `pwrite`/`truncate`/`punch_hole`/`fallocate`, bounded transaction memory via spill. Random operation sequences match a sparse-file reference model after every commit and every injected crash point |
+| P0 | **Localized durable free-space structure** | F5.2 | Replace the rewritten sorted-run chain with an extent-keyed CoW free tree carrying ready/pending/deferred epochs; split allocations across runs instead of failing on fragmentation; metadata reserve so deletes succeed on a full volume; retain fail-closed recovery via the never-written high-water region |
+| P0 | **Fully incremental physical reference accounting** | F5.3 | Birth-time freeing plus per-snapshot dead lists replace the per-commit `count_roots` walk; `count_roots` remains the independent two-root oracle, compared after every commit in tests under random edits, snapshot pins/drops (including middle snapshots) and fault injection |
+| P0 | **Safe orphan reconciliation / crash-resumable scrub** | enabled by F5.0 | Independently verify live and both fallback ownership before admitting crash-unpublished pages; persist bounded checkpoint progress without allowing incomplete marks to free live blocks. F5's self-identifying metadata page header (own address, volume id) is what lets a scan recognize orphans |
+| P1 | **Inode table and directory entries** | F5.4 | Replace full-path keys with `(parent inode, name)` entries and an inode table; O(height) directory rename, hard links, short keys and higher fanout; behavior matches a namespace reference model |
+| P1 | **Storage end-to-end benchmarks** | §15 of F5 | Measure real commit write amplification, latency and recovery scan cost under AxiomZig/DVE/MegaDoc-like operations on disposable BFS-NG image files, and compare to pre-change baselines |
+| P1 | **Incremental typed posting index** | F5.5 | Path-copy only affected attribute rows/postings in their own CoW trees under the same F0 root, removing the 256 KiB catalog file; independently recompute correctness, implement deterministic snapshot-consistent range cursors |
+| P1 | **Integrate C5 cache with storage** | — | Prove allocation-generation identity across reuse, invalidation and snapshot retention, impose accounted byte budget, then benchmark against no-cache |
+| P2 | **Optional shared extents (clone)** | F5.6 | Small share table plus a per-extent `MAY_BE_SHARED` flag; off by default until the oracle covers clone, overwrite-of-clone, snapshot-of-clone and drop-of-clone-source under fault injection |
+| P2 | **Usable mount and production hardening** | — | Specify Linux/Windows semantics, locking and multi-process exclusion, fsync boundaries, migration, device fault testing, online scrub, data/metadata repair policy, permissions and access controls |
 
 **Non-goals at current maturity:** raw-disk use, production fault tolerance, repair of hostile checksummed data, cryptographic integrity, live multi-writer coordination, transparent in-place upgrades, or asserting hardware persistence from `CrashDevice` alone.
 
@@ -184,6 +190,7 @@ A clean test suite establishes the behavior of this **model and test-image proto
 
 ## 10. Primary project design references
 
+- [F5 — extent data layer, birth-time reclamation and inode namespace (proposed, v10)](F5_DATA_LAYER.md)
 - [F0.R1 — rotating root payload safety and v9 compatibility](F0_R1_ROTATING_ROOTS.md)
 - [F2.R2 — CoW reference B+tree and delayed-free fences](F2_R2_INCREMENTAL_REFERENCES.md)
 - [F2.R3 — durable retirement journal (historical v7)](F2_R3_RECLAMATION_JOURNAL.md)
