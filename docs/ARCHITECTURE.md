@@ -199,6 +199,7 @@ A clean test suite establishes the behavior of this **model and test-image proto
 
 ## 10. Primary project design references
 
+- [F5 progress review, 2026-11-05 — status, commit-I/O measurements and next gates](REVIEW_F5_PROGRESS_2026-11-05.md)
 - [F5.0a — experimental v10 wire codecs and authenticated reader](F5_0A_WIRE_FORMAT.md)
 - [F5.0a — strict snapshot-only virgin writer and two-root audit](F5_0A_VIRGIN_WRITER.md)
 - [F5.0b — experimental headerless data and checksum-tree retention](F5_0B_CHECKSUM_DATA.md)
