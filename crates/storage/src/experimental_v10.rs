@@ -10,6 +10,8 @@ use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
 use std::collections::BTreeSet;
 
 mod snapshot_tree;
+mod virgin_writer;
+pub use virgin_writer::VirginSnapshotWriter;
 pub use snapshot_tree::{
     CatalogEdit, CatalogScan, MAX_SNAPSHOT_DESCRIPTORS, MAX_SNAPSHOT_TREE_PAGES, StagedCatalog,
     plan_snapshot_edit, read_snapshot_tree,
