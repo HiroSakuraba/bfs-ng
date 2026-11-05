@@ -1,4 +1,4 @@
-use bfs_ng_storage::experimental_v10::{ReadOnlyV10, UnifiedV10, SnapshotState};
+use bfs_ng_storage::experimental_v10::{ReadOnlyV10, SnapshotState, UnifiedV10};
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault};
 
 const VID: u128 = 0xc5af_1912_5503_8372;
@@ -22,7 +22,10 @@ fn hundreds_of_overwrites_recycle_unowned_metadata_without_running_out() {
         let payload = i.to_le_bytes();
         fs.write_at("/data/file", 0, &payload).unwrap();
         assert_eq!(fs.read_file("/data/file").unwrap(), payload);
-        assert_eq!(fs.read_snapshot_file(snapshot, "/data/file").unwrap(), b"initial");
+        assert_eq!(
+            fs.read_snapshot_file(snapshot, "/data/file").unwrap(),
+            b"initial"
+        );
         reused += fs.last_reused_blocks();
         if i % 30 == 0 {
             fs = reopen(fs);
@@ -32,7 +35,10 @@ fn hundreds_of_overwrites_recycle_unowned_metadata_without_running_out() {
     assert!(reused > 100, "expected substantial certified block reuse");
     fs = reopen(fs);
     assert_eq!(fs.manifest().generation, 304);
-    assert_eq!(fs.read_snapshot_file(snapshot, "/data/file").unwrap(), b"initial");
+    assert_eq!(
+        fs.read_snapshot_file(snapshot, "/data/file").unwrap(),
+        b"initial"
+    );
 }
 
 #[test]
@@ -65,17 +71,27 @@ fn pinned_snapshots_survive_many_reuses_even_when_live_directory_moves() {
     fs.pin_current().unwrap();
     fs.rename("/dve", "/game").unwrap();
     for i in 0..140 {
-        fs.write_at("/game/scene", 0, format!("scene-{i:04}").as_bytes()).unwrap();
+        fs.write_at("/game/scene", 0, format!("scene-{i:04}").as_bytes())
+            .unwrap();
         if i % 14 == 0 {
             fs = reopen(fs);
-            assert_eq!(fs.read_snapshot_file(snap, "/dve/scene").unwrap(), b"old-scene");
+            assert_eq!(
+                fs.read_snapshot_file(snap, "/dve/scene").unwrap(),
+                b"old-scene"
+            );
         }
     }
     assert!(matches!(fs.read_file("/dve/scene"), Err(Error::NotFound)));
-    assert_eq!(fs.read_snapshot_file(snap, "/dve/scene").unwrap(), b"old-scene");
+    assert_eq!(
+        fs.read_snapshot_file(snap, "/dve/scene").unwrap(),
+        b"old-scene"
+    );
     fs.mark_dropping(snap).unwrap();
     assert_eq!(fs.snapshots().unwrap()[0].state, SnapshotState::Dropping);
-    assert_eq!(fs.read_snapshot_file(snap, "/dve/scene").unwrap(), b"old-scene");
+    assert_eq!(
+        fs.read_snapshot_file(snap, "/dve/scene").unwrap(),
+        b"old-scene"
+    );
 }
 
 #[test]
@@ -90,13 +106,14 @@ fn many_pins_exhaust_volume_without_damaging_previous_generation() {
         let before = fs.manifest().generation;
         let data = format!("v{i}");
         match fs.write_at("/data/v", 0, data.as_bytes()) {
-            Ok(_) => {
-                match fs.pin_current() {
-                    Ok(_) => {}
-                    Err(Error::NoSpace) => { ran_out = true; break; }
-                    Err(other) => panic!("unexpected pin error: {other}"),
+            Ok(_) => match fs.pin_current() {
+                Ok(_) => {}
+                Err(Error::NoSpace) => {
+                    ran_out = true;
+                    break;
                 }
-            }
+                Err(other) => panic!("unexpected pin error: {other}"),
+            },
             Err(Error::NoSpace) => {
                 assert_eq!(fs.manifest().generation, before);
                 ran_out = true;
@@ -105,7 +122,10 @@ fn many_pins_exhaust_volume_without_damaging_previous_generation() {
             Err(other) => panic!("unexpected write error: {other}"),
         }
     }
-    assert!(ran_out, "pinned histories must eventually exhaust tiny image");
+    assert!(
+        ran_out,
+        "pinned histories must eventually exhaust tiny image"
+    );
     fs = reopen(fs);
     assert_eq!(fs.read_snapshot_file(first, "/data/v").unwrap(), b"v0");
 }
@@ -118,7 +138,8 @@ fn crash_cuts_during_recycled_writes_cannot_damage_f0_fallback_roots() {
             fs.mkdir("/assets").unwrap();
             fs.write_at("/assets/material", 0, b"old").unwrap();
             for i in 0..25 {
-                fs.write_at("/assets/material", 0, format!("step-{i}").as_bytes()).unwrap();
+                fs.write_at("/assets/material", 0, format!("step-{i}").as_bytes())
+                    .unwrap();
             }
             let old_gen = fs.manifest().generation;
             let original = fs.read_file("/assets/material").unwrap();
@@ -127,7 +148,11 @@ fn crash_cuts_during_recycled_writes_cannot_damage_f0_fallback_roots() {
             let mut overwritten = original.clone();
             overwritten[..b"latest".len()].copy_from_slice(b"latest");
             let mut disk = fs.into_device().power_loss();
-            disk.inject(Fault { operation, torn_bytes: Some(torn_bytes) }).unwrap();
+            disk.inject(Fault {
+                operation,
+                torn_bytes: Some(torn_bytes),
+            })
+            .unwrap();
             let mut attempting = UnifiedV10::open(disk).unwrap();
             assert!(matches!(
                 attempting.write_at("/assets/material", 0, b"latest"),
@@ -140,7 +165,11 @@ fn crash_cuts_during_recycled_writes_cannot_damage_f0_fallback_roots() {
             if let Ok(mut checked) = UnifiedV10::open(reader.into_device()) {
                 assert_eq!(
                     checked.read_file("/assets/material").unwrap(),
-                    if observed == old_gen { original.as_slice() } else { overwritten.as_slice() },
+                    if observed == old_gen {
+                        original.as_slice()
+                    } else {
+                        overwritten.as_slice()
+                    },
                 );
             }
         }
