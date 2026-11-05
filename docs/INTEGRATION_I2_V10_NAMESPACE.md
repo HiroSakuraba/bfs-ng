@@ -41,6 +41,8 @@ Not yet integrated: **F4 typed searchable attribute rows/postings/schema**. The 
 
 Practical storage limitations: each file remains **256 KiB**, namespace CoW updates still rebuild the entire namespace B+tree, no arbitrary-size streaming/multilevel per-file extent tree, no hard links/symlinks/rename replacement, no reusable allocation, no online fsck, no mount and no hardware power-cut certification. The default v9 engine now allows 4 MiB whole-extent rewrites and reliable F4 attribute indexes; it is not silently replaced.
 
+**Subsequent conservative reuse:** [I3](INTEGRATION_I3_CERTIFIED_REUSE.md) permits recycling independently unowned physical pages only after strict full verification of both F0 candidates. It does not claim a localized free-range tree or dead-list retirement.
+
 ## 4. Tests and follow-up gates
 
 \`cargo test -p bfs-ng-storage --test storage_v10_unified_namespace\` covers:

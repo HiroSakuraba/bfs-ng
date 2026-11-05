@@ -7,13 +7,17 @@
 //! Unlike the earlier one-file writers, its Fs root is a namespace tree
 //! whose file records reference separate v10 extent roots. All live/pinned
 //! data and metadata are independently verified across *both* recoverable
-//! F0 candidates before the next virgin-only allocation. No block recycling,
-//! F4 attribute index or hard links are enabled yet.
+//! F0 candidates before any allocation. Certified full two-F0-graph scans now allow
+//! conservative recycling, but no incremental free-space index, F4 attribute
+//! index, or hard links are enabled yet.
+use super::checksum_delta::stage_checksum_delta_reusing;
+use super::namespace::stage_namespace_tree_reusing;
+use super::snapshot_tree::plan_snapshot_edit_reusing;
 use super::{
     BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
-    Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, plan_snapshot_edit,
-    read_checksum_tree, read_namespace_tree, read_page, read_snapshot_tree, read_verified_block,
-    stage_checksum_delta, stage_namespace_tree, validate_namespace, validate_namespace_path,
+    Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, read_checksum_tree,
+    read_namespace_tree, read_page, read_snapshot_tree, read_verified_block, validate_namespace,
+    validate_namespace_path,
 };
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result, Volume};
@@ -301,6 +305,7 @@ enum Edit<'a> {
 pub struct UnifiedV10<D: BlockDevice> {
     volume: Volume<D>,
     manifest: Manifest,
+    last_reused_blocks: usize,
 }
 impl<D: BlockDevice> UnifiedV10<D> {
     pub fn format(device: D, id: u128) -> Result<Self> {
@@ -310,10 +315,20 @@ impl<D: BlockDevice> UnifiedV10<D> {
     pub fn open(device: D) -> Result<Self> {
         let mut volume = Volume::open(device)?;
         let (manifest, _, _) = audit(&mut volume)?;
-        Ok(Self { volume, manifest })
+        Ok(Self {
+            volume,
+            manifest,
+            last_reused_blocks: 0,
+        })
     }
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+    /// Nonzero **unowned** physical blocks overwritten by the last successful
+    /// transaction after a complete both-F0-root ownership audit. This is a
+    /// diagnostic, not an incremental allocator certificate.
+    pub fn last_reused_blocks(&self) -> usize {
+        self.last_reused_blocks
     }
     pub fn into_device(self) -> D {
         self.volume.into_device()
@@ -643,20 +658,17 @@ impl<D: BlockDevice> UnifiedV10<D> {
         }
         next.inode_count = records.len() as u64;
         validate_namespace(&records, next.next_inode, generation, total)?;
-        let mut candidates = Vec::new();
-        let mut cursor = old.high_water;
-        while cursor > ROOT_PAYLOAD_LAST + 1 && candidates.len() < STAGING_LIMIT {
-            cursor -= 1;
-            if owned.contains(&cursor) {
-                return Err(Error::CorruptTree);
-            }
-            let mut bytes = [0; BLOCK_SIZE];
-            self.volume
-                .inspect(|device| device.read_block(cursor, &mut bytes))?;
-            if bytes.iter().all(|&byte| byte == 0) {
-                candidates.push(cursor);
-            }
-        }
+        // Strict reusable-address certificate for this one transaction:
+        // the independently reconstructed *union* of both F0 candidate
+        // graphs is the authority, NOT a high-water guess, a self CRC, or
+        // a free-list bit. Blocks absent from every recoverable root are
+        // eligible even if they contain stale data or crash orphans.
+        // Persistent free-tree/epoch accounting is deferred to F5.2/F5.3.
+        let candidates: Vec<u64> = (ROOT_PAYLOAD_LAST + 1..total)
+            .rev()
+            .filter(|block| !owned.contains(block))
+            .take(STAGING_LIMIT)
+            .collect();
         let mut used = 0;
         let mut staged: Vec<(u64, [u8; BLOCK_SIZE])> = Vec::new();
         let mut added_crc = BTreeMap::new();
@@ -695,7 +707,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             records.insert(path, NamespaceRecord::file(inode, file_root));
         }
         if namespace_changed {
-            let ns = stage_namespace_tree(
+            let ns = stage_namespace_tree_reusing(
                 &records,
                 &candidates[used..],
                 id,
@@ -710,7 +722,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
         }
         if let Some(edit) = catalog_edit {
             let cat = self.volume.inspect(|device| {
-                plan_snapshot_edit(
+                plan_snapshot_edit_reusing(
                     device,
                     old.roots.snapshots,
                     edit,
@@ -758,7 +770,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
         }
         if !delta.is_empty() {
             let cs = self.volume.inspect(|device| {
-                stage_checksum_delta(
+                stage_checksum_delta_reusing(
                     device,
                     old.roots.checksum,
                     &delta,
@@ -775,7 +787,9 @@ impl<D: BlockDevice> UnifiedV10<D> {
         if used == 0 {
             return Err(Error::CorruptTree);
         }
-        next.high_water = candidates[used - 1];
+        // A reclaimed page above the virgin frontier must never advance it.
+        // Newly used virgin pages below it still lower the frontier.
+        next.high_water = old.high_water.min(candidates[used - 1]);
         let payload = next.encode(total)?;
         self.volume.inspect(|device| {
             let mut overlay = Overlay {
@@ -797,7 +811,19 @@ impl<D: BlockDevice> UnifiedV10<D> {
             }
             Ok(())
         })?;
+        // Record actual overwrites of nonzero, independently unowned pages.
+        // Do this only after the entire candidate graph has passed verification.
+        let reused = self.volume.inspect(|device| {
+            let mut count = 0;
+            for &address in &candidates[..used] {
+                let mut bytes = [0; BLOCK_SIZE];
+                device.read_block(address, &mut bytes)?;
+                count += usize::from(bytes.iter().any(|&byte| byte != 0));
+            }
+            Ok(count)
+        })?;
         self.volume.commit_root_with_blocks(&staged, &payload)?;
+        self.last_reused_blocks = reused;
         self.manifest = next;
         Ok(generation)
     }

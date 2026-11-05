@@ -319,6 +319,8 @@ Unaligned writes read-modify-write only the first and last 4 KiB blocks of the r
 
 ---
 
+**Conservative F5.2 progress:** [I3](INTEGRATION_I3_CERTIFIED_REUSE.md) now recycles physical pages only after independent **full two-F0-root ownership certification**. Small v10 images can survive repeated overwrites, but this is *not* a localized CoW free-range tree or incremental birth/dead-list algorithm. All performance and final F5.2/F5.3 proof gates below remain open.
+
 ## 8. F5.2 — extent free-space tree
 
 ### 8.1 Stable eligibility epochs

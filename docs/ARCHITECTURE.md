@@ -36,6 +36,7 @@ This is the **current cross-cutting design and status document**. Format-specifi
 | F5.0b **one-blob data/checksum experiment** | Headerless physical 4 KiB data blocks, checked checksum B+tree with exact live/pinned snapshot coverage, staged CoW checksum commits, and historical reads | **One blob of <=4 KiB only**; checksum tree rebuilds in full; no general inode/extents or reuse. [F5.0b](F5_0B_CHECKSUM_DATA.md) |
 | F5.1 **bounded sparse extent prototype** | Single-file 64-block sparse CoW extent map with byte-addressed partial writes, truncate, historical snapshots and incremental checksum path copying | No general inode layout, inline data, punch/preallocate or streaming; only virgin blocks, no reuse. [F5.1](F5_1_EXTENTS.md) |
 | Integration I2 — **coherent v10 multi-file image** | Nested directories and stable file inodes reference separate immutable extent roots; one F0 manifest atomically publishes live/pinned namespace, checksum tree and snapshot metadata | Experimental 256 KiB-per-file bounds, full namespace-tree rebuild and two-root scrub per write; F4 attr index, streaming, safe reuse and mount remain. [I2](INTEGRATION_I2_V10_NAMESPACE.md) |
+| Integration I3 — strict full-scan v10 reuse | Independently audit both F0 candidates, live/pinned extents and physical checksums; recycle only blocks absent from all recoverable root graphs, preserving the monotonic virgin boundary | **Conservative full-volume scan on each commit**; no durable CoW free-range tree, F5.3 dead-list or hardware cut proof. [I3](INTEGRATION_I3_CERTIFIED_REUSE.md) |
 | Integration I1 (v9 compatibility) | Atomic directory/file renames preserve inode identities and F4 postings; byte-range read/write/truncate, 4 MiB maximum file | v9 partial writes are whole-file rewrites; **v10 inode/namespace/attributes are NOT integrated**. [Contract](INTEGRATION_I1_NAMESPACE_IO.md) |
 | Real-world cache workload suite | Deterministic AxiomZig, DVE asset/dependency and AxiomMegaDoc corpus/trace generators, recorded bounded reads and pinned smoke workflows | Model/record traces are **not** traces from a BFS-NG mount or proof of hardware performance |
 
@@ -202,6 +203,7 @@ A clean test suite establishes the behavior of this **model and test-image proto
 - [F5.0b — experimental headerless data and checksum-tree retention](F5_0B_CHECKSUM_DATA.md)
 - [F5.1 — bounded sparse extents and incremental checksum CoW](F5_1_EXTENTS.md)
 - [Integration I2 — coherent v10 multi-file namespace and checksum publication](INTEGRATION_I2_V10_NAMESPACE.md)
+- [Integration I3 — full-scan two-root certified physical reuse](INTEGRATION_I3_CERTIFIED_REUSE.md)
 - [Integration I1 — stable inode rename and bounded v9 partial I/O](INTEGRATION_I1_NAMESPACE_IO.md)
 - [F5 — extent data layer, birth-time reclamation and inode namespace (proposed, v10)](F5_DATA_LAYER.md)
 - [F0.R1 — rotating root payload safety and v9 compatibility](F0_R1_ROTATING_ROOTS.md)
