@@ -1,7 +1,6 @@
 use bfs_ng_storage::experimental_v10::{
-    BlockPointer, CatalogEdit, Item, Manifest, Page, ReadOnlyV10,
-    SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
-    plan_snapshot_edit, read_page, read_snapshot_tree,
+    plan_snapshot_edit, read_page, read_snapshot_tree, BlockPointer, CatalogEdit, Item, Manifest,
+    Page, ReadOnlyV10, SnapshotDescriptor, SnapshotState, TreeId, TreeRoots,
 };
 use bfs_ng_storage::{BLOCK_SIZE, BlockDevice, CrashDevice, Error, Fault, Result, Volume};
 
@@ -15,28 +14,52 @@ fn fs_page(address: u64) -> Page {
         birth: 1,
         address,
         volume_id: VID,
-        items: vec![Item { key: b"inode".to_vec(), value: b"fixed".to_vec() }],
+        items: vec![Item {
+            key: b"inode".to_vec(),
+            value: b"fixed".to_vec(),
+        }],
     }
 }
 fn descriptor(generation: u64, fs: BlockPointer) -> SnapshotDescriptor {
     SnapshotDescriptor {
-        generation, fs_root: fs,
-        attribute_rows_root: None, attribute_postings_root: None,
-        attribute_schema_root: None, state: SnapshotState::Pinned,
+        generation,
+        fs_root: fs,
+        attribute_rows_root: None,
+        attribute_postings_root: None,
+        attribute_schema_root: None,
+        state: SnapshotState::Pinned,
     }
 }
 fn roots(fs: BlockPointer, snaps: Option<BlockPointer>) -> TreeRoots {
     TreeRoots {
-        fs, snapshots: snaps,
-        checksum: None, free: None, dead_list: None,
-        attribute_rows: None, attribute_postings: None, schema: None,
+        fs,
+        snapshots: snaps,
+        checksum: None,
+        free: None,
+        dead_list: None,
+        attribute_rows: None,
+        attribute_postings: None,
+        schema: None,
     }
 }
-fn manifest(generation: u64, high_water: u64, fs: BlockPointer, snaps: Option<BlockPointer>) -> Manifest {
+fn manifest(
+    generation: u64,
+    high_water: u64,
+    fs: BlockPointer,
+    snaps: Option<BlockPointer>,
+) -> Manifest {
     Manifest {
-        generation, high_water, next_inode: 2, roots: roots(fs, snaps),
-        sweep_snapshot: 0, sweep_key: 0, metadata_reserve: 0,
-        inode_count: 1, used_blocks: 1, free_blocks: 0, pending_blocks: 0,
+        generation,
+        high_water,
+        next_inode: 2,
+        roots: roots(fs, snaps),
+        sweep_snapshot: 0,
+        sweep_key: 0,
+        metadata_reserve: 0,
+        inode_count: 1,
+        used_blocks: 1,
+        free_blocks: 0,
+        pending_blocks: 0,
     }
 }
 fn initial() -> (Volume<CrashDevice>, Manifest, BlockPointer) {
@@ -61,11 +84,17 @@ fn stage_commit(
     reservations: usize,
 ) -> Result<(Volume<CrashDevice>, Manifest, usize)> {
     let mut disk = volume.into_device().power_loss();
-    let addrs: Vec<u64> =
-        (1..=reservations as u64).map(|n| old.high_water - n).collect();
+    let addrs: Vec<u64> = (1..=reservations as u64)
+        .map(|n| old.high_water - n)
+        .collect();
     let staged = plan_snapshot_edit(
-        &mut disk, old.roots.snapshots, edit, VID, old.generation + 1,
-        old.high_water, &addrs,
+        &mut disk,
+        old.roots.snapshots,
+        edit,
+        VID,
+        old.generation + 1,
+        old.high_water,
+        &addrs,
     )?;
     let used = staged.consumed_reservations;
     for (address, bytes) in staged.staged_pages {
@@ -74,7 +103,10 @@ fn stage_commit(
     disk.sync()?;
     let mut next = Volume::open(disk.power_loss())?;
     let manifest = manifest(
-        old.generation + 1, staged.high_water, old.roots.fs, Some(staged.root),
+        old.generation + 1,
+        staged.high_water,
+        old.roots.fs,
+        Some(staged.root),
     );
     next.commit_root(&manifest.encode(BLOCKS)?)?;
     Ok((next, manifest, used))
@@ -89,13 +121,17 @@ fn many_pins_cross_leaf_splits_and_survive_repeated_f0_rotations() {
     // Every commit stages only its changed leaf and ancestor paths.
     for g in 2..=145_u64 {
         let mut disk = volume.into_device().power_loss();
-        let addrs: Vec<u64> =
-            (1..=5).map(|n| current.high_water - n).collect();
+        let addrs: Vec<u64> = (1..=5).map(|n| current.high_water - n).collect();
         let plan = plan_snapshot_edit(
-            &mut disk, current.roots.snapshots,
+            &mut disk,
+            current.roots.snapshots,
             CatalogEdit::Pin(descriptor(g - 1, fs)),
-            VID, g, current.high_water, &addrs,
-        ).unwrap();
+            VID,
+            g,
+            current.high_water,
+            &addrs,
+        )
+        .unwrap();
         assert!(plan.staged_pages.len() <= 3, "unexpected full-tree rebuild");
         max_copied = max_copied.max(plan.staged_pages.len());
         for (addr, bytes) in plan.staged_pages {
@@ -104,7 +140,9 @@ fn many_pins_cross_leaf_splits_and_survive_repeated_f0_rotations() {
         disk.sync().unwrap();
         volume = Volume::open(disk.power_loss()).unwrap();
         current = manifest(g, plan.high_water, fs, Some(plan.root));
-        volume.commit_root(&current.encode(BLOCKS).unwrap()).unwrap();
+        volume
+            .commit_root(&current.encode(BLOCKS).unwrap())
+            .unwrap();
         if plan.root.level == 1 {
             saw_branch = true;
         }
@@ -129,9 +167,13 @@ fn many_pins_cross_leaf_splits_and_survive_repeated_f0_rotations() {
 
     // An already pinned snapshot cannot silently change historical roots.
     let duplicate = plan_snapshot_edit(
-        &mut disk, current.roots.snapshots,
-        CatalogEdit::Pin(descriptor(1, fs)), VID, 146,
-        current.high_water, &[current.high_water - 1, current.high_water - 2],
+        &mut disk,
+        current.roots.snapshots,
+        CatalogEdit::Pin(descriptor(1, fs)),
+        VID,
+        146,
+        current.high_water,
+        &[current.high_water - 1, current.high_water - 2],
     );
     assert!(matches!(duplicate, Err(Error::AlreadyExists)));
 }
@@ -139,13 +181,10 @@ fn many_pins_cross_leaf_splits_and_survive_repeated_f0_rotations() {
 #[test]
 fn mark_dropping_keeps_historical_root_and_does_not_reclaim_anything() {
     let (volume, original, fs) = initial();
-    let (volume, m2, count) = stage_commit(
-        volume, &original, CatalogEdit::Pin(descriptor(1, fs)), 6,
-    ).unwrap();
+    let (volume, m2, count) =
+        stage_commit(volume, &original, CatalogEdit::Pin(descriptor(1, fs)), 6).unwrap();
     assert_eq!(count, 1);
-    let (volume, m3, copied) = stage_commit(
-        volume, &m2, CatalogEdit::MarkDropping(1), 6,
-    ).unwrap();
+    let (volume, m3, copied) = stage_commit(volume, &m2, CatalogEdit::MarkDropping(1), 6).unwrap();
     assert_eq!(copied, 1);
     let mut view = ReadOnlyV10::open(volume.into_device().power_loss()).unwrap();
     let pin = view.snapshot_descriptors().unwrap();
@@ -154,9 +193,13 @@ fn mark_dropping_keeps_historical_root_and_does_not_reclaim_anything() {
     assert_eq!(pin[0].fs_root, fs);
     assert!(matches!(
         plan_snapshot_edit(
-            &mut view.into_device(), m3.roots.snapshots,
-            CatalogEdit::MarkDropping(1), VID, 4,
-            m3.high_water, &[m3.high_water - 1],
+            &mut view.into_device(),
+            m3.roots.snapshots,
+            CatalogEdit::MarkDropping(1),
+            VID,
+            4,
+            m3.high_water,
+            &[m3.high_water - 1],
         ),
         Err(Error::InvalidSnapshot)
     ));
@@ -166,18 +209,21 @@ fn mark_dropping_keeps_historical_root_and_does_not_reclaim_anything() {
 fn insufficient_private_arena_does_not_write_or_mutate_old_tree() {
     let (mut volume, mut m, fs) = initial();
     for g in 2..=33_u64 {
-        let (next, mm, _) = stage_commit(
-            volume, &m, CatalogEdit::Pin(descriptor(g - 1, fs)), 5,
-        ).unwrap();
+        let (next, mm, _) =
+            stage_commit(volume, &m, CatalogEdit::Pin(descriptor(g - 1, fs)), 5).unwrap();
         volume = next;
         m = mm;
     }
     // A split requires 2 new leaves and a branch root. One reservation fails.
     let mut disk = volume.into_device().power_loss();
     let err = plan_snapshot_edit(
-        &mut disk, m.roots.snapshots,
-        CatalogEdit::Pin(descriptor(33, fs)), VID, 34,
-        m.high_water, &[m.high_water - 1],
+        &mut disk,
+        m.roots.snapshots,
+        CatalogEdit::Pin(descriptor(33, fs)),
+        VID,
+        34,
+        m.high_water,
+        &[m.high_water - 1],
     );
     assert!(matches!(err, Err(Error::NoSpace)));
     let view = ReadOnlyV10::open(disk.power_loss()).unwrap();
@@ -189,9 +235,8 @@ fn insufficient_private_arena_does_not_write_or_mutate_old_tree() {
 fn forged_deep_leaf_or_parent_separator_fails_full_scan_but_not_lazy_open() {
     let (mut volume, mut m, fs) = initial();
     for g in 2..=65_u64 {
-        let (next, mm, _) = stage_commit(
-            volume, &m, CatalogEdit::Pin(descriptor(g - 1, fs)), 5,
-        ).unwrap();
+        let (next, mm, _) =
+            stage_commit(volume, &m, CatalogEdit::Pin(descriptor(g - 1, fs)), 5).unwrap();
         volume = next;
         m = mm;
     }
@@ -214,14 +259,22 @@ fn adversarial_internal_tree_with_incorrect_high_key_is_rejected() {
     let (volume, m, fs) = initial();
     let mut disk = volume.into_device().power_loss();
     let first = Page {
-        tree: TreeId::Snapshots, level: 0, birth: 2, address: 2035, volume_id: VID,
+        tree: TreeId::Snapshots,
+        level: 0,
+        birth: 2,
+        address: 2035,
+        volume_id: VID,
         items: vec![Item {
             key: 1_u64.to_be_bytes().to_vec(),
             value: descriptor(1, fs).encode(2, BLOCKS).unwrap().to_vec(),
         }],
     };
     let second = Page {
-        tree: TreeId::Snapshots, level: 0, birth: 2, address: 2034, volume_id: VID,
+        tree: TreeId::Snapshots,
+        level: 0,
+        birth: 2,
+        address: 2034,
+        volume_id: VID,
         items: vec![Item {
             key: 2_u64.to_be_bytes().to_vec(),
             value: descriptor(2, fs).encode(3, BLOCKS).unwrap().to_vec(),
@@ -234,7 +287,11 @@ fn adversarial_internal_tree_with_incorrect_high_key_is_rejected() {
     first.birth = 3;
     second.birth = 3;
     let branch = Page {
-        tree: TreeId::Snapshots, level: 1, birth: 3, address: 2033, volume_id: VID,
+        tree: TreeId::Snapshots,
+        level: 1,
+        birth: 3,
+        address: 2033,
+        volume_id: VID,
         items: vec![
             Item {
                 key: 1_u64.to_be_bytes().to_vec(),
@@ -249,7 +306,8 @@ fn adversarial_internal_tree_with_incorrect_high_key_is_rejected() {
         ],
     };
     for page in [&first, &second, &branch] {
-        disk.write_block(page.address, &page.encode().unwrap()).unwrap();
+        disk.write_block(page.address, &page.encode().unwrap())
+            .unwrap();
     }
     disk.sync().unwrap();
     assert!(read_snapshot_tree(&mut disk, Some(branch.pointer().unwrap()), VID, 3).is_err());
@@ -262,14 +320,22 @@ fn caller_reservations_must_be_below_watermark_and_strictly_decreasing() {
     let (volume, m, fs) = initial();
     let mut disk = volume.into_device().power_loss();
     for invalid in [
-        vec![], vec![m.high_water], vec![4], vec![m.high_water - 1, m.high_water - 1],
+        vec![],
+        vec![m.high_water],
+        vec![4],
+        vec![m.high_water - 1, m.high_water - 1],
         vec![m.high_water - 2, m.high_water - 1],
         vec![BLOCKS + 1],
     ] {
         assert!(matches!(
             plan_snapshot_edit(
-                &mut disk, None, CatalogEdit::Pin(descriptor(1, fs)),
-                VID, 2, m.high_water, &invalid,
+                &mut disk,
+                None,
+                CatalogEdit::Pin(descriptor(1, fs)),
+                VID,
+                2,
+                m.high_water,
+                &invalid,
             ),
             Err(Error::Geometry)
         ));
@@ -285,7 +351,10 @@ fn nested_two_level_branch_snapshot_tree_is_checked() {
     let mut leaves = Vec::new();
     for g in [1_u64, 2, 3, 4] {
         let p = Page {
-            tree: TreeId::Snapshots, level: 0, birth: 5, address: 2020 - g,
+            tree: TreeId::Snapshots,
+            level: 0,
+            birth: 5,
+            address: 2020 - g,
             volume_id: VID,
             items: vec![Item {
                 key: g.to_be_bytes().to_vec(),
@@ -297,31 +366,49 @@ fn nested_two_level_branch_snapshot_tree_is_checked() {
     let mut branches = Vec::new();
     for (i, chunk) in leaves.chunks(2).enumerate() {
         let p = Page {
-            tree: TreeId::Snapshots, level: 1, birth: 5,
+            tree: TreeId::Snapshots,
+            level: 1,
+            birth: 5,
             address: 2010 - i as u64,
             volume_id: VID,
-            items: chunk.iter().map(|child| Item {
-                key: child.items.last().unwrap().key.clone(),
-                value: child.pointer().unwrap().encode().to_vec(),
-            }).collect(),
+            items: chunk
+                .iter()
+                .map(|child| Item {
+                    key: child.items.last().unwrap().key.clone(),
+                    value: child.pointer().unwrap().encode().to_vec(),
+                })
+                .collect(),
         };
         branches.push(p);
     }
     let root = Page {
-        tree: TreeId::Snapshots, level: 2, birth: 5,
-        address: 2000, volume_id: VID,
-        items: branches.iter().map(|child| Item {
-            key: child.items.last().unwrap().key.clone(),
-            value: child.pointer().unwrap().encode().to_vec(),
-        }).collect(),
+        tree: TreeId::Snapshots,
+        level: 2,
+        birth: 5,
+        address: 2000,
+        volume_id: VID,
+        items: branches
+            .iter()
+            .map(|child| Item {
+                key: child.items.last().unwrap().key.clone(),
+                value: child.pointer().unwrap().encode().to_vec(),
+            })
+            .collect(),
     };
     for page in leaves.iter().chain(&branches).chain(std::iter::once(&root)) {
-        disk.write_block(page.address, &page.encode().unwrap()).unwrap();
+        disk.write_block(page.address, &page.encode().unwrap())
+            .unwrap();
     }
     disk.sync().unwrap();
     let scan = read_snapshot_tree(&mut disk, Some(root.pointer().unwrap()), VID, 5).unwrap();
     assert_eq!(scan.pages_read, 7);
-    assert_eq!(scan.descriptors.iter().map(|d| d.generation).collect::<Vec<_>>(), [1, 2, 3, 4]);
+    assert_eq!(
+        scan.descriptors
+            .iter()
+            .map(|d| d.generation)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 4]
+    );
     assert_eq!(m.generation, 1);
 }
 
