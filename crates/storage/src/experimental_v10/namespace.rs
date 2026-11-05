@@ -25,10 +25,18 @@ pub struct NamespaceRecord {
 }
 impl NamespaceRecord {
     pub fn directory(inode: u64) -> Self {
-        Self { inode, directory: true, file_root: None }
+        Self {
+            inode,
+            directory: true,
+            file_root: None,
+        }
     }
     pub fn file(inode: u64, file_root: Option<BlockPointer>) -> Self {
-        Self { inode, directory: false, file_root }
+        Self {
+            inode,
+            directory: false,
+            file_root,
+        }
     }
     fn encode(self) -> [u8; RECORD_BYTES] {
         let mut bytes = [0; RECORD_BYTES];
@@ -63,7 +71,11 @@ impl NamespaceRecord {
                 return Err(Error::CorruptTree);
             }
         }
-        Ok(Self { inode, directory, file_root })
+        Ok(Self {
+            inode,
+            directory,
+            file_root,
+        })
     }
 }
 
@@ -77,7 +89,10 @@ pub fn validate_namespace_path(path: &str) -> Result<()> {
         || path.contains('\0')
         || path.contains('\\')
         || path == "/.bfs_f4_attrs"
-        || path.split('/').skip(1).any(|part| part.is_empty() || part == "." || part == "..")
+        || path
+            .split('/')
+            .skip(1)
+            .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return Err(Error::InvalidPath);
     }
@@ -130,7 +145,13 @@ impl<D: BlockDevice> Walker<'_, D> {
         if self.pages.len() >= MAX_NAMESPACE_PAGES || !self.pages.insert(ptr.address) {
             return Err(Error::CorruptTree);
         }
-        let page = read_page(self.device, ptr, TreeId::Fs, self.volume_id, self.generation)?;
+        let page = read_page(
+            self.device,
+            ptr,
+            TreeId::Fs,
+            self.volume_id,
+            self.generation,
+        )?;
         if page.items.is_empty() {
             return if is_root && page.level == 0 {
                 Ok(None)
@@ -143,7 +164,9 @@ impl<D: BlockDevice> Walker<'_, D> {
                 let path = std::str::from_utf8(&item.key).map_err(|_| Error::CorruptTree)?;
                 validate_namespace_path(path).map_err(|_| Error::CorruptTree)?;
                 let record = NamespaceRecord::decode(
-                    &item.value, self.generation, self.device.block_count(),
+                    &item.value,
+                    self.generation,
+                    self.device.block_count(),
                 )?;
                 if self.records.len() >= MAX_NAMESPACE_RECORDS
                     || self.records.insert(path.to_owned(), record).is_some()
@@ -164,7 +187,9 @@ impl<D: BlockDevice> Walker<'_, D> {
             if max != item.key || prior_max.as_ref().is_some_and(|last| last >= &min) {
                 return Err(Error::CorruptTree);
             }
-            if first.is_none() { first = Some(min); }
+            if first.is_none() {
+                first = Some(min);
+            }
             prior_max = Some(max);
         }
         Ok(Some((
@@ -184,13 +209,22 @@ pub fn read_namespace_tree<D: BlockDevice>(
         return Err(Error::CorruptTree);
     }
     let mut walker = Walker {
-        device, volume_id, generation,
-        pages: BTreeSet::new(), records: BTreeMap::new(),
+        device,
+        volume_id,
+        generation,
+        pages: BTreeSet::new(),
+        records: BTreeMap::new(),
     };
     walker.visit(root, true)?;
-    validate_namespace(&walker.records, next_inode, generation, walker.device.block_count())?;
+    validate_namespace(
+        &walker.records,
+        next_inode,
+        generation,
+        walker.device.block_count(),
+    )?;
     Ok(NamespaceScan {
-        records: walker.records, metadata_pages: walker.pages,
+        records: walker.records,
+        metadata_pages: walker.pages,
     })
 }
 
@@ -211,14 +245,24 @@ struct Builder<'a> {
 }
 impl Builder<'_> {
     fn write(&mut self, level: u8, items: Vec<Item>) -> Result<Child> {
-        let address = *self.reservations.get(self.pages.len()).ok_or(Error::NoSpace)?;
+        let address = *self
+            .reservations
+            .get(self.pages.len())
+            .ok_or(Error::NoSpace)?;
         let page = Page {
-            tree: TreeId::Fs, level, birth: self.generation,
-            address, volume_id: self.volume_id, items,
+            tree: TreeId::Fs,
+            level,
+            birth: self.generation,
+            address,
+            volume_id: self.volume_id,
+            items,
         };
         let bytes = page.encode()?;
         let pointer = page.pointer()?;
-        let max_key = page.items.last().map_or(Vec::new(), |item| item.key.clone());
+        let max_key = page
+            .items
+            .last()
+            .map_or(Vec::new(), |item| item.key.clone());
         self.pages.push((address, bytes));
         Ok(Child { max_key, pointer })
     }
@@ -260,19 +304,29 @@ pub fn stage_namespace_tree(
     total_blocks: u64,
 ) -> Result<StagedNamespace> {
     validate_namespace(records, next_inode, generation, total_blocks)?;
-    if volume_id == 0 || old_high_water > total_blocks
+    if volume_id == 0
+        || old_high_water > total_blocks
         || old_high_water <= ROOT_PAYLOAD_LAST
-        || reservations.iter().any(|&block| block <= ROOT_PAYLOAD_LAST || block >= old_high_water)
+        || reservations
+            .iter()
+            .any(|&block| block <= ROOT_PAYLOAD_LAST || block >= old_high_water)
         || reservations.windows(2).any(|pair| pair[0] <= pair[1])
     {
         return Err(Error::Geometry);
     }
     let mut builder = Builder {
-        volume_id, generation, reservations, pages: Vec::new(),
+        volume_id,
+        generation,
+        reservations,
+        pages: Vec::new(),
     };
-    let items = records.iter().map(|(path, entry)| Item {
-        key: path.as_bytes().to_vec(), value: entry.encode().to_vec(),
-    }).collect();
+    let items = records
+        .iter()
+        .map(|(path, entry)| Item {
+            key: path.as_bytes().to_vec(),
+            value: entry.encode().to_vec(),
+        })
+        .collect();
     let mut children = builder.pack(0, items)?;
     let mut level = 0;
     while children.len() > 1 {
@@ -280,9 +334,13 @@ pub fn stage_namespace_tree(
             return Err(Error::TooLarge);
         }
         level += 1;
-        let items = children.into_iter().map(|child| Item {
-            key: child.max_key, value: child.pointer.encode().to_vec(),
-        }).collect();
+        let items = children
+            .into_iter()
+            .map(|child| Item {
+                key: child.max_key,
+                value: child.pointer.encode().to_vec(),
+            })
+            .collect();
         children = builder.pack(level, items)?;
     }
     Ok(StagedNamespace {
