@@ -208,11 +208,12 @@ impl<D: BlockDevice> VirginSnapshotWriter<D> {
 
     pub fn snapshots(&mut self) -> Result<Vec<SnapshotDescriptor>> {
         let current = self.manifest;
+        let volume_id = self.volume_id();
         self.volume.inspect(|device| {
             read_snapshot_tree(
-                device, current.roots.snapshots,
-                self.volume_id(), current.generation,
-            ).map(|result| result.descriptors)
+                device, current.roots.snapshots, volume_id, current.generation,
+            )
+            .map(|result| result.descriptors)
         })
     }
 
