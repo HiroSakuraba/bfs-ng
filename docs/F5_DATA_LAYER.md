@@ -317,74 +317,86 @@ Unaligned writes read-modify-write only the first and last 4 KiB blocks of the r
 
 ## 8. F5.2 — extent free-space tree
 
-### 8.1 Free tree
+### 8.1 Stable eligibility epochs
+
+The free-space index is a sorted CoW tree keyed by physical run start. **Durable eligibility is absolute**, never re-encoded relative to the latest F0 generation:
 
 ```text
 key   = start: u64 BE
-value = blocks: u64, eligible_generation: u64
+value = blocks: u64, state: u8, reserved: 7 bytes (zero),
+        eligible_after_generation: u64
 ```
 
-`eligible_generation` keeps the F2.R4 meaning:
+`state = EPOCH` identifies an independently proven, released run. `state = DEFERRED` indicates a retirement candidate still awaiting proof/bounded sweep; it is **never** available for allocation irrespective of the generation. Other states are invalid in v10. A run must be disjoint from all live data/metadata and all root/snapshot ownership before it enters `EPOCH`; a fallback-owned block may be checkpointed as a release candidate with a future epoch but must not be treated as allocatable until that root rotates out.
 
-| Value | Class |
-| --- | --- |
-| current generation | **ready** |
-| current generation + 1 | **pending** (owned by the fallback root until the next rotation) |
-| 0 | **deferred** (released, awaiting bounded processing, §9.5) |
+**Precisely define eligibility:** let `g` be the currently selected, fully published F0 generation at the **start** of the next transaction. An `EPOCH` run is available for reservation only if `eligible_after_generation <= g`, the current handle is ownership-certified in `Full` mode (or the explicitly gated F5.3 `Accounted` mode), and the run is not claimed by that transaction. This distinguishes being *marked* ready in the newly published manifest from being safely allocatable while preparing it.
 
-Adjacent free extents merge only when they have the same class.
+Example: a previously published block becomes fallback-only when g20 publishes. If g21 will rotate out its last F0 owner, store `eligible_after_generation = 21`. It is **not** allocatable while preparing g21 from g20, but it becomes eligible while preparing g22 from published g21. Its tree record needs no restamp in generations 22, 23, ...
 
-**Why carry the epochs into the tree:** the two-root reuse argument from F2.R3/R4 and F0.R1 is the strongest part of the current design. F5 changes how free space is indexed, not when it may be reused.
+`ready` and `pending` are **derived views** of EPOCH records with `eligible_after_generation <= g` and `> g`, respectively. Deferred is an explicit state, not an invented generation 0. Neighbouring EPOCH runs may coalesce only if their proof/retirement state and eligibility are compatible; retain separate records when a merge would hide a stricter eligibility boundary. A new node's birth generation remains independent of its free-run eligibility epoch.
+
+**Never-published staged allocations:** addresses allocated from certified ready/virgin space but discarded before *any* F0 publication can be returned to the same transaction's private pool without a fallback delay. Do not confuse pages written before sync but never root-published with blocks reachable from a successfully published prior root.
+
+**Why:** the v9 journal was rewritten every generation, so generation-relative encoding cost little extra. F5's locally updated CoW free tree must leave unrelated extents untouched through thousands of commits. An epoch recorded as "current generation" would demand a whole-tree restamp and defeat F5.2.
 
 ### 8.2 In-memory size index
 
-At certification, the allocator reads the free tree (O(free extents), not O(all metadata)) and builds an in-memory index of ready extents by size class (powers of two). It is derived state, never written to disk.
+After ownership certification, derive a size-class lookup index over only the **currently eligible, EPOCH** extents. Maintain this derived state incrementally within the single-writer handle after each published generation, including runs that become eligible by epoch maturation. If rebuilding it needs O(free extents) reads after an open, measure that cost separately from lazy read-open time; it is part of allocator certification, not the mount latency claim.
 
-**Why one durable tree plus a derived index (rejected: XFS-style two durable trees):** two durable trees double the CoW path copies per allocation and create a new cross-tree consistency invariant to prove. The size index is cheap to rebuild and cannot disagree with anything on disk. Revisit if open-time rebuild cost is measured to matter.
+**Why one durable tree plus a derived index:** two independently updated durable size/address trees create an additional atomicity invariant; the derived index can always be reconstructed from the single checked free tree. Revisit only after measurement.
 
-**Why not bitmaps:** a bitmap cannot carry a per-run eligibility epoch without one generation per bit, and finding a large run means scanning.
+### 8.3 Conservatively virgin region
 
-### 8.3 Never-written region
+The descending high-water mark remains the boundary for candidate virgin addresses. Its **safety meaning is stronger than "not in the free tree"**: those blocks must be absent from every recoverable F0 candidate and from committed snapshot/accounting metadata. Where a newer damaged root or interrupted staging makes the boundary ambiguous, a failed/opened older handle must not assume all addresses below its own historical cursor were physically unwritten.
 
-The v9 descending virgin cursor is kept as the **high-water mark**. Blocks below it that have never been written are not in the free tree; the allocator takes them by moving the mark down.
-
-**Why keep it:** it is the fail-closed escape hatch. When ownership cannot be verified, v9 still allows commits from space nothing has ever referenced. Folding that space into the free tree would make every allocation depend on the free tree being readable.
+In `reuse_blocked` mode, allocate only if this virgin claim is demonstrated by the published geometry/high-water invariants for the surviving candidate(s) and the crash model. Never treat physical pages left by uncommitted writes as recoverable user data. Reserve F0 blocks 0–4 regardless of generation.
 
 ### 8.4 Allocation policy
 
-For each run of `n` blocks requested at commit:
+Allocate requested data using adjacent ready extents, best-fit eligible extents, then split the request across multiple ready extents, followed by the proven virgin region. Physical locality is a **preference**, not a correctness requirement. Metadata pages generally prefer short runs; data benefits from long runs.
 
-1. **Goal:** if the inode has a neighbouring extent, look for a ready extent starting at its physical end, then nearby in the free tree.
-2. **Best fit:** smallest size class with an extent of at least `n` blocks.
-3. **Split:** take the largest available extents until `n` blocks are covered; the file gets several extents.
-4. **High-water:** take fresh blocks below the high-water mark.
-5. Otherwise `NoSpace`.
+All candidates must pass the same epoch/certification checks and must be removed from the transaction's private availability set *before* staging writes. Two extents must never overlap, including partially consumed runs. If no legal run or safe metadata budget remains, return `NoSpace` without publishing the new root.
 
-Metadata pages prefer small extents (filling holes); data prefers large ones.
+**Why:** fragmentation should reduce throughput, not force `NoSpace` when total safe data and metadata capacity is sufficient.
 
-**Why step 3 exists:** it is the direct fix for row 3 of §2. A file may span many extents; fragmentation degrades performance, not correctness.
+### 8.5 Geometry-aware metadata reserve
 
-**Why separate preferences for metadata and data:** keeps large runs available for data and stops scattered 4 KiB metadata pages from fragmenting them. btrfs gets the same effect with separate block groups; a preference is enough at this scale.
+A fixed `max(256 blocks, 1% of image)` consumes most of a 384-block research image, while a constant 256 blocks does not prove that a worst-case delete will succeed on a much larger image.
 
-### 8.5 Metadata reserve
+**Design target, not a proven final constant:**
 
-`metadata_reserve = max(256 blocks, 1% of image)`, fixed at format. Ordinary writes may not allocate into the reserve. Deletes, truncates, snapshot drops and the commit's own tree updates may.
+```text
+usable_blocks = total_blocks - 5       // F0 slots and rotating payloads
+reserve_target = clamp(ceil(usable_blocks / 1000), 16, 4096)
+reserve = min(reserve_target, floor(usable_blocks / 10))
+```
 
-**Why:** in a CoW filesystem, freeing space costs space (every delete path-copies pages). Without a reserve, a full volume can reach a state where nothing can be deleted. btrfs spent years on this class of ENOSPC bug.
+Only a separately proved *minimum legal recovery/delete metadata budget* can authorize a formatted F5 filesystem. If geometry yields a smaller reserve, **reject formatting or reduce supported operations with an explicit contract**; never silently promise that every delete will succeed. A reserve is measured in available **physical space**, not a second tree of blocks that are secretly shared with ready files. Ordinary data allocations cannot consume it; metadata-only progress (delete/truncate/snapshot drop and the corresponding CoW updates) may consume it under documented budgets.
 
-### 8.6 Updating the free tree without recursion
+**Why:** a percentage cap accommodates small disposable images and a maximum avoids an arbitrarily huge reserved percentage in a TiB-scale image. The formula is provisional; prove the per-operation bound first and benchmark actual peak page demand.
 
-Allocating blocks changes the free tree, and changing the free tree allocates blocks. F5 breaks the loop at commit:
+### 8.6 Free-tree self-allocation and bounded staging
 
-1. Collect the commit's allocations and releases as an in-memory delta.
-2. Estimate the pages the free tree, checksum tree and dead-list tree updates will need (`changed leaves × (height + 1) × 2`, plus margin) and reserve that many blocks from ready space up front.
-3. Apply the delta and path-copy the trees, allocating their pages only from that reservation.
-4. Return unused reservation blocks to ready (they were never published).
-5. Old pages replaced in step 3 are released by the normal kill rule in this same commit (§9.2).
+Allocating pages to record allocations changes the free tree itself. A casual estimate such as `changed_leaves * (height + 1) * 2` is **not an established upper bound**: leaf splits, cascading separator changes, dead-list/checksum/snapshot updates, and retired accounting-tree pages can create new keys and additional CoW paths.
 
-**Why:** the v9 journal dodges this by being rewritten in full each commit. An incremental tree cannot. A fixed up-front reservation is simple to prove terminating; ZFS's log-structured space maps are the main alternative and are worth benchmarking if free-tree write amplification turns out high.
+**Proposed non-recursive, all-or-nothing transaction:**
 
----
+1. Compute a *candidate* transaction delta and a conservative upper bound on required metadata nodes using the actual tree-height, occupancy and mutation count, including maximum cascading splits and all checksum/dead-list/snapshot changes. Report that budget before any state is committed.
+2. Reserve an exclusive **private metadata arena** from already certified ready space or the proven virgin cursor, debiting the metadata reserve exactly once. No free-tree path-copy routine may recursively allocate from its own newly generated release records.
+3. Stage the data updates and all tree changes using only the private arena. Track every block allocated and every superseded unpublished intermediate separately from blocks retired from earlier F0 manifests.
+4. Compute the final free-tree delta **once**, including consumption of reserved arena pages, used pages, and returned unused pages, then stage its final CoW root. This step must have an accounted, acyclic upper bound; if the budget is exceeded, discard this entire candidate and retry with a larger upfront reserve *before publication*.
+5. Run the independent full-graph ownership/free-set oracle and metadata page-budget assertions in the research mode. No `ready` run may include a staged, live, fallback, snapshot or accounting block. Write immutable pages, sync, publish the new F0 payload, sync, publish the superblock, sync. Only after the final barrier does the handle replace its certificate and private arena.
+
+**Stop condition:** no upper bound, no implementation approval. An exhausted arena is a recoverable `NoSpace` / retry with no published partial result, not permission for the free tree to allocate additional pages from uncertified space.
+
+**Why:** CoW-space accounting has a dependency cycle; it must be broken by an independent reservation strategy, not a heuristic page count. The v9 full-run rewrite remains a sound fallback until the bounded algorithm is separately tested.
+
+### 8.7 F5.2 acceptance examples
+
+- Keep an unchanged EPOCH free-run record across at least **1,000 successful generations**; verify the same physical free-tree leaf is shared rather than restamped simply because `g` changed.
+- Place a delayed F0-fallback-only run at `eligible_after_generation = 21`; prove it cannot be allocated by the g20→21 transaction and can be allocated when starting from published g21.
+- At 384 blocks, fail only when an explicit and tested metadata reserve or safe-space constraint is reached; never silently reserve 256 blocks.
+- Force worst-case free-tree leaf/root splits, snapshot descriptor updates and checksum edits inside one transaction; compare the arena's budget with measured staging. On insufficient reserve, assert the previous root and both recoverable manifests remain intact.
 
 ## 9. F5.3 — birth-time reclamation and dead lists
 
