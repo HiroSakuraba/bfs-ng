@@ -70,6 +70,114 @@ impl TwoRootOwners {
             .collect()
     }
 
+
+    /// Canonical, bounded external checkpoint of the independently audited
+    /// current and fallback-only owner sets. It is a *hint*, never disk
+    /// authority: recovery must reconstruct both F0 graphs and compare the
+    /// checkpoint exactly before any cached allocation can be enabled.
+    pub(super) fn encode_checkpoint(
+        &self,
+        volume_id: u128,
+        manifest_crc: u32,
+    ) -> Result<Vec<u8>> {
+        const MAGIC: &[u8; 8] = b"BFSNGAC1";
+        const MAX_ENTRIES: usize = 1_048_576;
+        let sets = [
+            &self.current.pages,
+            &self.current.global,
+            &self.fallback_only.pages,
+            &self.fallback_only.global,
+        ];
+        let entries: usize = sets.iter().map(|s| s.len()).sum();
+        if entries > MAX_ENTRIES || volume_id == 0 || self.head_generation == 0 {
+            return Err(Error::TooLarge);
+        }
+        let mut bytes = vec![0_u8; 64];
+        bytes[0..8].copy_from_slice(MAGIC);
+        bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[16..32].copy_from_slice(&volume_id.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.head_generation.to_le_bytes());
+        bytes[40..44].copy_from_slice(&manifest_crc.to_le_bytes());
+        for (index, set) in sets.iter().enumerate() {
+            let len = u32::try_from(set.len()).map_err(|_| Error::TooLarge)?;
+            bytes[48 + index * 4..52 + index * 4].copy_from_slice(&len.to_le_bytes());
+            for address in set.iter() {
+                bytes.extend_from_slice(&address.to_le_bytes());
+            }
+        }
+        let crc = crate::volume::crc32c(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        Ok(bytes)
+    }
+
+    /// Parse a sidecar checkpoint using a canonical, role-aware codec and
+    /// compare it to an *independently re-audited* owner graph. Even a valid
+    /// CRC and matching F0 generation alone are insufficient for reuse.
+    pub(super) fn verify_checkpoint(
+        &self,
+        bytes: &[u8],
+        volume_id: u128,
+        manifest_crc: u32,
+        total_blocks: u64,
+    ) -> Result<()> {
+        const MAX_ENTRIES: usize = 1_048_576;
+        if bytes.len() < 68
+            || &bytes[0..8] != b"BFSNGAC1"
+            || bytes[8..12] != 1_u32.to_le_bytes()
+            || bytes[12..16] != [0; 4]
+            || bytes[16..32] != volume_id.to_le_bytes()
+            || bytes[32..40] != self.head_generation.to_le_bytes()
+            || bytes[40..44] != manifest_crc.to_le_bytes()
+            || bytes[44..48] != [0; 4]
+        {
+            return Err(Error::CorruptTree);
+        }
+        let mut lengths = [0_usize; 4];
+        for (index, len) in lengths.iter_mut().enumerate() {
+            let at = 48 + index * 4;
+            *len = u32::from_le_bytes(
+                bytes[at..at + 4].try_into().map_err(|_| Error::CorruptTree)?,
+            ) as usize;
+        }
+        let count: usize = lengths.iter().copied().sum();
+        if count > MAX_ENTRIES
+            || bytes.len() != 64 + count * 8 + 4
+            || bytes[bytes.len() - 4..]
+                != crate::volume::crc32c(&bytes[..bytes.len() - 4]).to_le_bytes()
+        {
+            return Err(Error::CorruptTree);
+        }
+        let expected = [
+            &self.current.pages,
+            &self.current.global,
+            &self.fallback_only.pages,
+            &self.fallback_only.global,
+        ];
+        let mut offset = 64;
+        for (length, expected_set) in lengths.iter().zip(expected) {
+            let mut previous = None;
+            let mut decoded = BTreeSet::new();
+            for _ in 0..*length {
+                let address = u64::from_le_bytes(
+                    bytes[offset..offset + 8].try_into().map_err(|_| Error::CorruptTree)?,
+                );
+                if address <= crate::volume::ROOT_PAYLOAD_LAST
+                    || address >= total_blocks
+                    || previous.is_some_and(|last| address <= last)
+                {
+                    return Err(Error::CorruptTree);
+                }
+                decoded.insert(address);
+                previous = Some(address);
+                offset += 8;
+            }
+            if &decoded != expected_set {
+                return Err(Error::CorruptTree);
+            }
+        }
+        Ok(())
+    }
+
     /// Reuse certificate checked before the real F0 publication. The caller
     /// supplies the entire staged address set AND a graph independently
     /// verified against the staged overlay. A newly reachable address must
@@ -98,9 +206,9 @@ impl TwoRootOwners {
         }
         let before = self.protected();
         if !staged.is_disjoint(&before)
-            || staged
-                .iter()
-                .any(|&address| address <= crate::volume::ROOT_PAYLOAD_LAST || address >= total_blocks)
+            || staged.iter().any(|&address| {
+                address <= crate::volume::ROOT_PAYLOAD_LAST || address >= total_blocks
+            })
         {
             return Err(Error::CorruptTree);
         }
@@ -261,14 +369,13 @@ mod tests {
 
     #[test]
     fn refuses_global_role_swap_and_free_claim_on_retained_f0_owner() {
-        let old =
-            TwoRootOwners::from_audit(
-                5,
-                graph(&[80], &[80]),
-                &BTreeSet::from([80]),
-                BTreeSet::new(),
-            )
-                .unwrap();
+        let old = TwoRootOwners::from_audit(
+            5,
+            graph(&[80], &[80]),
+            &BTreeSet::from([80]),
+            BTreeSet::new(),
+        )
+        .unwrap();
         assert!(
             old.transition(
                 graph(&[80], &[]),
@@ -304,17 +411,40 @@ mod tests {
     }
 
     #[test]
-    fn stale_or_skipped_f0_generation_refuses_the_certificate() {
-        let old = TwoRootOwners::from_audit(
+    fn checkpoint_roundtrips_but_rejects_wrong_volume_crc_and_owner_graph() {
+        let owner = TwoRootOwners::from_audit(
             5,
-            graph(&[80], &[]),
-            &BTreeSet::from([80]),
-            BTreeSet::new(),
+            graph(&[80, 81], &[81]),
+            &BTreeSet::from([80, 81, 90]),
+            BTreeSet::from([90]),
         )
         .unwrap();
+        let bytes = owner.encode_checkpoint(55, 0x1234).unwrap();
+        owner.verify_checkpoint(&bytes, 55, 0x1234, 128).unwrap();
+        assert!(owner.verify_checkpoint(&bytes, 56, 0x1234, 128).is_err());
+        assert!(owner.verify_checkpoint(&bytes, 55, 0x4567, 128).is_err());
+        assert!(owner.verify_checkpoint(&bytes, 55, 0x1234, 90).is_err());
+        let mut corrupted = bytes.clone();
+        corrupted[64] ^= 1;
+        assert!(owner.verify_checkpoint(&corrupted, 55, 0x1234, 128).is_err());
+        let different = TwoRootOwners::from_audit(
+            5,
+            graph(&[80, 81], &[81]),
+            &BTreeSet::from([80, 81, 91]),
+            BTreeSet::from([91]),
+        )
+        .unwrap();
+        assert!(different.verify_checkpoint(&bytes, 55, 0x1234, 128).is_err());
+    }
+
+    #[test]
+    fn stale_or_skipped_f0_generation_refuses_the_certificate() {
+        let old =
+            TwoRootOwners::from_audit(5, graph(&[80], &[]), &BTreeSet::from([80]), BTreeSet::new())
+                .unwrap();
         for incorrect_generation in [5, 7] {
-            assert!(old
-                .transition(
+            assert!(
+                old.transition(
                     graph(&[80], &[]),
                     &BTreeSet::new(),
                     &BTreeMap::new(),
@@ -323,10 +453,11 @@ mod tests {
                     128,
                     69,
                 )
-                .is_err());
+                .is_err()
+            );
         }
-        assert!(old
-            .transition(
+        assert!(
+            old.transition(
                 graph(&[80], &[]),
                 &BTreeSet::from([4]),
                 &BTreeMap::new(),
@@ -335,7 +466,8 @@ mod tests {
                 128,
                 69,
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -345,7 +477,8 @@ mod tests {
         for i in 0..128_u64 {
             let old_union: BTreeSet<u64> = previous.pages.union(&latest.pages).copied().collect();
             let ledger =
-                TwoRootOwners::from_audit(i + 9, latest.clone(), &old_union, BTreeSet::new()).unwrap();
+                TwoRootOwners::from_audit(i + 9, latest.clone(), &old_union, BTreeSet::new())
+                    .unwrap();
             let next_address = 200 + i;
             let mut next = latest.clone();
             next.pages.insert(next_address);

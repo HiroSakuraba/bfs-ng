@@ -1458,13 +1458,12 @@ impl<D: BlockDevice> UnifiedV10<D> {
             let shadow = if let Some(cached) = &self.in_handle_certificate {
                 &cached.ownership
             } else {
-                temporary_shadow =
-                    TwoRootOwners::from_audit(
-                        old.generation,
-                        owner_graph,
-                        owned,
-                        checked.retired_global.clone(),
-                    )?;
+                temporary_shadow = TwoRootOwners::from_audit(
+                    old.generation,
+                    owner_graph,
+                    owned,
+                    checked.retired_global.clone(),
+                )?;
                 &temporary_shadow
             };
             let candidate_graph = OwnerGraph::new(
@@ -1538,6 +1537,56 @@ impl UnifiedV10<CrashDevice> {
     /// candidate is still verified in full; this bypasses just the repeated
     /// traversal of the two *old* F0 graphs. FileDevice and ordinary opens
     /// remain on the strict full-audit path.
+
+    /// Export a canonical ownership sidecar for the exclusive memory-backed
+    /// test writer. A sidecar is never an authorization to skip disk audits:
+    /// this method only serializes the already verified in-handle lease.
+    pub fn export_allocation_checkpoint(&self) -> Result<Vec<u8>> {
+        let lease = self.in_handle_certificate.as_ref().ok_or(Error::CorruptTree)?;
+        let crc = crate::volume::crc32c(
+            &self.manifest.encode(self.volume.block_count())?,
+        );
+        lease.ownership.encode_checkpoint(self.volume.info().volume_id, crc)
+    }
+
+    /// Recover a cached allocation lease, but only AFTER an independent
+    /// complete audit of both on-disk F0 roots. The supplied checkpoint must
+    /// be bytewise equivalent to the graph obtained from that fresh audit.
+    /// A valid CRC or unchanged head generation is never sufficient.
+    pub fn open_with_verified_allocation_checkpoint(
+        device: CrashDevice,
+        checkpoint: &[u8],
+    ) -> Result<Self> {
+        let mut volume = Volume::open(device)?;
+        let (manifest, verified, owners) = audit(&mut volume)?;
+        if manifest.metadata_reserve != INDEX_ARENA_BLOCKS {
+            return Err(Error::CorruptTree);
+        }
+        let graph = OwnerGraph::new(verified.owned.clone(), verified.global_pages.clone())?;
+        let ownership = TwoRootOwners::from_audit(
+            manifest.generation,
+            graph,
+            &owners,
+            verified.retired_global.clone(),
+        )?;
+        let crc = crate::volume::crc32c(&manifest.encode(volume.block_count())?);
+        ownership.verify_checkpoint(
+            checkpoint,
+            volume.info().volume_id,
+            crc,
+            volume.block_count(),
+        )?;
+        Ok(Self {
+            volume,
+            manifest,
+            last_reused_blocks: 0,
+            in_handle_certificate: Some(InHandleCertificate {
+                manifest,
+                verified,
+                ownership,
+            }),
+        })
+    }
     pub fn enable_in_handle_allocation_certificate(&mut self) -> Result<()> {
         if self.manifest.metadata_reserve != INDEX_ARENA_BLOCKS {
             return Err(Error::CorruptTree);
@@ -1547,13 +1596,12 @@ impl UnifiedV10<CrashDevice> {
             return Err(Error::CorruptTree);
         }
         let graph = OwnerGraph::new(verified.owned.clone(), verified.global_pages.clone())?;
-        let ownership =
-            TwoRootOwners::from_audit(
-                manifest.generation,
-                graph,
-                &owners,
-                verified.retired_global.clone(),
-            )?;
+        let ownership = TwoRootOwners::from_audit(
+            manifest.generation,
+            graph,
+            &owners,
+            verified.retired_global.clone(),
+        )?;
         self.in_handle_certificate = Some(InHandleCertificate {
             manifest,
             verified,
