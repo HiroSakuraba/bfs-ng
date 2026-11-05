@@ -186,9 +186,11 @@ fn stage_checksum_delta_with_mode<D: BlockDevice>(
         || new_generation <= 1
         || high_water <= ROOT_PAYLOAD_LAST
         || high_water > device.block_count()
-        || reservations
-            .iter()
-            .any(|&n| n <= ROOT_PAYLOAD_LAST || n >= device.block_count() || (!audited_reuse && n >= high_water))
+        || reservations.iter().any(|&n| {
+            n <= ROOT_PAYLOAD_LAST
+                || n >= device.block_count()
+                || (!audited_reuse && n >= high_water)
+        })
         || reservations.windows(2).any(|w| w[0] <= w[1])
         || changes
             .keys()
@@ -269,8 +271,14 @@ pub fn stage_checksum_delta<D: BlockDevice>(
     high_water: u64,
 ) -> Result<StagedChecksums> {
     stage_checksum_delta_with_mode(
-        device, old_root, changes, reservations, volume_id,
-        new_generation, high_water, false,
+        device,
+        old_root,
+        changes,
+        reservations,
+        volume_id,
+        new_generation,
+        high_water,
+        false,
     )
 }
 
@@ -286,7 +294,13 @@ pub(super) fn stage_checksum_delta_reusing<D: BlockDevice>(
     high_water: u64,
 ) -> Result<StagedChecksums> {
     stage_checksum_delta_with_mode(
-        device, old_root, changes, reservations, volume_id,
-        new_generation, high_water, true,
+        device,
+        old_root,
+        changes,
+        reservations,
+        volume_id,
+        new_generation,
+        high_water,
+        true,
     )
 }
