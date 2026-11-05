@@ -67,7 +67,7 @@ The roadmap targets three tiers, in order.
 
 **Exit gate**
 
-- `stat`, a 4 KiB `read_at` and `list_dir` of a 100-entry directory each read **at most 3× the tree height plus the data blocks** at 10, 1,000 and 10,000 files.
+- `stat`, a 4 KiB `read_at` and `list_dir` of a 100-entry directory each read **at most 3× the tree height plus the data blocks** at 10, 300 and 2,000 files. (2,000 stays inside today's 2,048-entry namespace cap; R2 repeats this gate at 100,000 files once the cap is gone.)
 - Open on a writable handle still performs exactly one full audit (asserted by a counter). A read-only open performs none.
 - Single-byte corruption, lost-write and misdirected-write cases from F5.0b are still detected on read.
 
@@ -88,7 +88,7 @@ The roadmap targets three tiers, in order.
 
 **Exit gate**
 
-- With the certificate on a locked `FileDevice`: block reads per one-byte overwrite at 10,000 files are **within 2× of the value at 10 files**. `v10_commit_io` becomes a CI check for this.
+- With the certificate on a locked `FileDevice`: block reads per one-byte overwrite at 2,000 files are **within 2× of the value at 10 files** (inside the current 2,048-entry cap; R2 repeats the gate at 100,000 files). `v10_commit_io` becomes a CI check for this.
 - PR #34's cached-versus-full differential workload passes on `FileDevice`.
 - A second process trying to open the same image for writing fails cleanly.
 - A transaction of N edits publishes exactly one generation; crash injection at every write and sync shows all-or-nothing.
@@ -114,7 +114,7 @@ The roadmap targets three tiers, in order.
 **Exit gate**
 
 - Write and read back a **1 GiB** file with random 4 KiB overwrites, matching a sparse-file reference model across injected crashes; transaction memory stays under a fixed budget.
-- **100,000 files** in one directory tree; R0 and R1 gates still hold at that size.
+- **100,000 files** in one directory tree; the R0 read gate and the R1 commit gate are re-run at this size and still hold (compared with their 10-file values).
 - Renaming a directory with 10,000 descendants writes O(height) pages.
 - Fragmentation test (F5 §15): fill with small files, delete every other one, then write a file larger than any free run. It must succeed.
 
