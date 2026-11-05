@@ -280,7 +280,9 @@ impl FsTransaction {
         let moved: Vec<(String, String)> = self
             .records
             .keys()
-            .filter(|path| path.as_str() == source || (entry.directory && path.starts_with(&prefix)))
+            .filter(|path| {
+                path.as_str() == source || (entry.directory && path.starts_with(&prefix))
+            })
             .map(|path| {
                 let suffix = path.strip_prefix(source).ok_or(Error::CorruptTree)?;
                 let renamed = format!("{destination}{suffix}");
@@ -1660,7 +1662,9 @@ impl<D: BlockDevice> FileSystem<D> {
     /// Offset beyond EOF returns an empty result.
     pub fn read_at(&mut self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
         let bytes = self.read_file(path)?;
-        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
         let end = start.saturating_add(length).min(bytes.len());
         Ok(bytes[start..end].to_vec())
     }
@@ -1673,7 +1677,9 @@ impl<D: BlockDevice> FileSystem<D> {
     /// between the prior EOF and offset are explicitly zero-filled.
     pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<u64> {
         validate_user_path(path)?;
-        let end = offset.checked_add(data.len() as u64).ok_or(Error::TooLarge)?;
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(Error::TooLarge)?;
         if end > MAX_DATA as u64 {
             return Err(Error::TooLarge);
         }
