@@ -14,6 +14,9 @@ fn indexed(blocks: usize) -> UnifiedV10<CrashDevice> {
 }
 
 fn model_write(target: &mut Vec<u8>, offset: usize, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
     if target.len() < offset + bytes.len() {
         target.resize(offset + bytes.len(), 0);
     }
