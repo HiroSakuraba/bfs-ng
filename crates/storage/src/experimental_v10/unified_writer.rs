@@ -659,10 +659,14 @@ fn queue_fallback_retirements(
 #[derive(Clone, Copy)]
 enum Edit<'a> {
     Mkdir(&'a str),
-    Write {
+    WriteRanges {
+        path: &'a str,
+        ranges: &'a [(u64, &'a [u8])],
+    },
+    PunchHole {
         path: &'a str,
         offset: u64,
-        bytes: &'a [u8],
+        length: u64,
     },
     Truncate {
         path: &'a str,
@@ -1013,12 +1017,45 @@ impl<D: BlockDevice> UnifiedV10<D> {
         if bytes.is_empty() {
             return Ok(self.manifest.generation);
         }
-        self.commit(Edit::Write {
+        self.write_ranges(path, &[(offset, bytes)])
+    }
+
+    /// Atomically apply ordered, possibly overlapping byte-range writes to
+    /// one inode. The last overlapping range wins, and all ranges share one
+    /// CoW extent/checksum/namespace/F0 publication. This is intentionally
+    /// narrower than a general multi-inode transaction.
+    pub fn write_ranges(&mut self, path: &str, ranges: &[(u64, &[u8])]) -> Result<u64> {
+        let mut any = false;
+        for &(offset, bytes) in ranges {
+            let end = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or(Error::TooLarge)?;
+            if end > MAX_FILE_BYTES {
+                return Err(Error::TooLarge);
+            }
+            any |= !bytes.is_empty();
+        }
+        if !any {
+            return Ok(self.manifest.generation);
+        }
+        self.commit(Edit::WriteRanges { path, ranges })
+    }
+
+    /// Deallocate fully covered logical blocks and zero partial edge ranges
+    /// without changing file size. Historical snapshots keep their original
+    /// physical blocks until the two-F0/snapshot retirement proof releases them.
+    pub fn punch_hole(&mut self, path: &str, offset: u64, length: u64) -> Result<u64> {
+        offset.checked_add(length).ok_or(Error::TooLarge)?;
+        if length == 0 {
+            return Ok(self.manifest.generation);
+        }
+        self.commit(Edit::PunchHole {
             path,
             offset,
-            bytes,
+            length,
         })
     }
+
     pub fn truncate(&mut self, path: &str, size: u64) -> Result<u64> {
         if size > MAX_FILE_BYTES {
             return Err(Error::TooLarge);
@@ -1096,11 +1133,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 records.insert(path.to_owned(), NamespaceRecord::directory(inode));
                 namespace_changed = true;
             }
-            Edit::Write {
-                path,
-                offset,
-                bytes,
-            } => {
+            Edit::WriteRanges { path, ranges } => {
                 parent_is_directory(&records, path)?;
                 let entry = if let Some(entry) = records.get(path) {
                     if entry.directory {
@@ -1120,28 +1153,93 @@ impl<D: BlockDevice> UnifiedV10<D> {
                         Ok(FileExtents::default())
                     }
                 })?;
-                file.size = file.size.max(offset + bytes.len() as u64);
-                let mut copied = 0;
-                while copied < bytes.len() {
-                    let pos = offset + copied as u64;
-                    let logical = pos / BLOCK_SIZE as u64;
-                    let within = (pos % BLOCK_SIZE as u64) as usize;
-                    let count = (BLOCK_SIZE - within).min(bytes.len() - copied);
-                    if let std::collections::btree_map::Entry::Vacant(slot) = dirty.entry(logical) {
-                        let prior = if let Some(reference) = file.blocks.get(&logical) {
-                            self.volume.inspect(|device| {
-                                read_verified_block(device, reference.physical, &checked.checksums)
-                            })?
-                        } else {
-                            [0_u8; BLOCK_SIZE]
-                        };
-                        slot.insert(prior);
+                for &(offset, bytes) in ranges {
+                    file.size = file.size.max(offset + bytes.len() as u64);
+                    let mut copied = 0;
+                    while copied < bytes.len() {
+                        let pos = offset + copied as u64;
+                        let logical = pos / BLOCK_SIZE as u64;
+                        let within = (pos % BLOCK_SIZE as u64) as usize;
+                        let count = (BLOCK_SIZE - within).min(bytes.len() - copied);
+                        if let std::collections::btree_map::Entry::Vacant(slot) = dirty.entry(logical)
+                        {
+                            let prior = if let Some(reference) = file.blocks.get(&logical) {
+                                self.volume.inspect(|device| {
+                                    read_verified_block(
+                                        device,
+                                        reference.physical,
+                                        &checked.checksums,
+                                    )
+                                })?
+                            } else {
+                                [0_u8; BLOCK_SIZE]
+                            };
+                            slot.insert(prior);
+                        }
+                        dirty.get_mut(&logical).ok_or(Error::CorruptTree)?
+                            [within..within + count]
+                            .copy_from_slice(&bytes[copied..copied + count]);
+                        copied += count;
                     }
-                    dirty.get_mut(&logical).ok_or(Error::CorruptTree)?[within..within + count]
-                        .copy_from_slice(&bytes[copied..copied + count]);
-                    copied += count;
                 }
                 records.insert(path.to_owned(), entry);
+                new_file = Some((path.to_owned(), file));
+                namespace_changed = true;
+            }
+            Edit::PunchHole {
+                path,
+                offset,
+                length,
+            } => {
+                validate_namespace_path(path)?;
+                let entry = *records.get(path).ok_or(Error::NotFound)?;
+                if entry.directory {
+                    return Err(Error::IsDirectory);
+                }
+                let mut file = self.volume.inspect(|device| {
+                    if let Some(root) = entry.file_root {
+                        let page = read_page(device, root, TreeId::Fs, id, old.generation)?;
+                        FileExtents::decode(&page, device.block_count())
+                    } else {
+                        Ok(FileExtents::default())
+                    }
+                })?;
+                let end = file.size.min(offset + length);
+                if end <= offset {
+                    return Ok(old.generation);
+                }
+                let mut changed = false;
+                let first = offset / BLOCK_SIZE as u64;
+                let last = (end - 1) / BLOCK_SIZE as u64;
+                for logical in first..=last {
+                    let Some(reference) = file.blocks.get(&logical).copied() else {
+                        continue;
+                    };
+                    let block_start = logical * BLOCK_SIZE as u64;
+                    let left = offset.saturating_sub(block_start) as usize;
+                    let right = (end - block_start).min(BLOCK_SIZE as u64) as usize;
+                    if left == 0 && right == BLOCK_SIZE {
+                        file.blocks.remove(&logical);
+                        changed = true;
+                        continue;
+                    }
+                    let mut content = self.volume.inspect(|device| {
+                        read_verified_block(device, reference.physical, &checked.checksums)
+                    })?;
+                    if content[left..right].iter().all(|&byte| byte == 0) {
+                        continue;
+                    }
+                    content[left..right].fill(0);
+                    if content.iter().all(|&byte| byte == 0) {
+                        file.blocks.remove(&logical);
+                    } else {
+                        dirty.insert(logical, content);
+                    }
+                    changed = true;
+                }
+                if !changed {
+                    return Ok(old.generation);
+                }
                 new_file = Some((path.to_owned(), file));
                 namespace_changed = true;
             }
@@ -1837,5 +1935,240 @@ impl UnifiedV10<CrashDevice> {
             ownership,
         });
         Ok(())
+    }
+}
+
+
+/// An immutable, independently audited v10 read view.
+///
+/// Opening audits both recoverable F0 graphs exactly once, then retains the
+/// selected root's verified namespace, checksums, snapshots and attribute
+/// catalog in memory. Subsequent lookups never authorize allocation or reuse,
+/// and block data and referenced metadata still receive checksum validation
+/// when read. Caller MUST prevent other processes/handles from mutating the
+/// underlying image while this view is live: no OS-level shared/exclusive
+/// file lock is supplied by this experimental API.
+pub struct VerifiedReadView<D: BlockDevice> {
+    volume: Volume<D>,
+    manifest: Manifest,
+    checked: Verified,
+}
+
+impl<D: BlockDevice> VerifiedReadView<D> {
+    pub fn open(device: D) -> Result<Self> {
+        let mut volume = Volume::open(device)?;
+        let (manifest, checked, _) = audit(&mut volume)?;
+        Ok(Self {
+            volume,
+            manifest,
+            checked,
+        })
+    }
+
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    pub fn into_device(self) -> D {
+        self.volume.into_device()
+    }
+
+    /// In-memory namespace lookup (zero physical tree reads after open).
+    pub fn list_dir(&self, path: &str) -> Result<Vec<String>> {
+        if path != "/" {
+            validate_namespace_path(path)?;
+            if !self
+                .checked
+                .reach
+                .records
+                .get(path)
+                .is_some_and(|record| record.directory)
+            {
+                return Err(Error::NotDirectory);
+            }
+        }
+        let prefix = if path == "/" {
+            "/".to_owned()
+        } else {
+            format!("{path}/")
+        };
+        Ok(self
+            .checked
+            .reach
+            .records
+            .keys()
+            .filter(|name| name.starts_with(&prefix))
+            .filter(|name| !name[prefix.len()..].contains('/'))
+            .cloned()
+            .collect())
+    }
+
+    /// Validated inode lookup. File size is decoded through its authenticated
+    /// extent root rather than trusting an unverified in-memory hint.
+    pub fn stat(&mut self, path: &str) -> Result<(u64, bool, u64)> {
+        validate_namespace_path(path)?;
+        let record = *self.checked.reach.records.get(path).ok_or(Error::NotFound)?;
+        if record.directory {
+            return Ok((record.inode, true, 0));
+        }
+        let id = self.volume.info().volume_id;
+        let size = self.volume.inspect(|disk| {
+            if let Some(root) = record.file_root {
+                let page = read_page(disk, root, TreeId::Fs, id, self.manifest.generation)?;
+                Ok(FileExtents::decode(&page, disk.block_count())?.size)
+            } else {
+                Ok(0)
+            }
+        })?;
+        Ok((record.inode, false, size))
+    }
+
+    fn read(
+        &mut self,
+        path: &str,
+        snapshot: Option<u64>,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>> {
+        validate_namespace_path(path)?;
+        let id = self.volume.info().volume_id;
+        let manifest = self.manifest;
+        let checked = &self.checked;
+        self.volume.inspect(|disk| {
+            let record = if let Some(generation) = snapshot {
+                let desc = checked
+                    .reach
+                    .snapshots
+                    .iter()
+                    .find(|desc| desc.generation == generation)
+                    .ok_or(Error::InvalidSnapshot)?;
+                read_namespace_tree(
+                    disk,
+                    desc.fs_root,
+                    id,
+                    manifest.generation,
+                    manifest.next_inode,
+                )?
+                .records
+                .get(path)
+                .copied()
+                .ok_or(Error::NotFound)?
+            } else {
+                *checked.reach.records.get(path).ok_or(Error::NotFound)?
+            };
+            if record.directory {
+                return Err(Error::IsDirectory);
+            }
+            let file = if let Some(root) = record.file_root {
+                let page = read_page(disk, root, TreeId::Fs, id, manifest.generation)?;
+                FileExtents::decode(&page, disk.block_count())?
+            } else {
+                FileExtents::default()
+            };
+            if offset >= file.size || length == 0 {
+                return Ok(Vec::new());
+            }
+            let count = (file.size - offset).min(length as u64) as usize;
+            let mut output = vec![0_u8; count];
+            let mut copied = 0;
+            while copied < count {
+                let pos = offset + copied as u64;
+                let logical = pos / BLOCK_SIZE as u64;
+                let within = (pos % BLOCK_SIZE as u64) as usize;
+                let take = (BLOCK_SIZE - within).min(count - copied);
+                if let Some(reference) = file.blocks.get(&logical) {
+                    let block = read_verified_block(disk, reference.physical, &checked.checksums)?;
+                    output[copied..copied + take].copy_from_slice(&block[within..within + take]);
+                }
+                copied += take;
+            }
+            Ok(output)
+        })
+    }
+
+    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
+        self.read(path, None, 0, MAX_FILE_BYTES as usize)
+    }
+
+    pub fn read_at(&mut self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+        self.read(path, None, offset, length)
+    }
+
+    pub fn read_snapshot_file(&mut self, generation: u64, path: &str) -> Result<Vec<u8>> {
+        self.read(path, Some(generation), 0, MAX_FILE_BYTES as usize)
+    }
+
+    pub fn snapshots(&self) -> Vec<SnapshotDescriptor> {
+        self.checked.reach.snapshots.clone()
+    }
+
+    pub fn file_attributes(&self, path: &str) -> Result<BTreeMap<String, Value>> {
+        validate_namespace_path(path)?;
+        let record = self.checked.reach.records.get(path).ok_or(Error::NotFound)?;
+        if record.directory {
+            return Err(Error::IsDirectory);
+        }
+        Ok(self
+            .checked
+            .reach
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.get(record.inode))
+            .unwrap_or_default())
+    }
+
+    pub fn search_attributes(
+        &self,
+        predicates: &[Predicate],
+        limit: usize,
+    ) -> Result<QueryResult> {
+        let catalog = self
+            .checked
+            .reach
+            .catalog
+            .as_ref()
+            .ok_or(Error::Attribute("no schema installed".into()))?;
+        catalog.query(
+            self.volume.info().volume_id,
+            self.manifest.generation,
+            predicates,
+            limit,
+        )
+    }
+
+    pub fn search_snapshot_attributes(
+        &mut self,
+        generation: u64,
+        predicates: &[Predicate],
+        limit: usize,
+    ) -> Result<QueryResult> {
+        let snapshot = self
+            .checked
+            .reach
+            .snapshots
+            .iter()
+            .find(|desc| desc.generation == generation)
+            .ok_or(Error::InvalidSnapshot)?;
+        let roots = attribute_roots(
+            snapshot.attribute_rows_root,
+            snapshot.attribute_postings_root,
+            snapshot.attribute_schema_root,
+        )?;
+        let id = self.volume.info().volume_id;
+        let historical = self.volume.inspect(|disk| {
+            read_attribute_roots(disk, roots, id, self.manifest.generation)
+        })?;
+        let catalog = historical
+            .ok_or(Error::Attribute("snapshot has no schema".into()))?
+            .catalog;
+        catalog.query(id, generation, predicates, limit)
+    }
+}
+
+impl VerifiedReadView<CrashDevice> {
+    /// Physical read counter, excluding any later allocation permissions:
+    /// used only in deterministic R0 read-amplification benchmarks.
+    pub fn physical_read_count(&mut self) -> Result<u64> {
+        self.volume.inspect(|disk| Ok(disk.read_blocks()))
     }
 }

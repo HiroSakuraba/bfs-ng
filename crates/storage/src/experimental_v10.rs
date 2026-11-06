@@ -32,7 +32,7 @@ pub use namespace::{
     MAX_NAMESPACE_PAGES, MAX_NAMESPACE_RECORDS, NamespaceRecord, NamespaceScan,
     read_namespace_tree, stage_namespace_tree, validate_namespace, validate_namespace_path,
 };
-pub use unified_writer::UnifiedV10;
+pub use unified_writer::{UnifiedV10, VerifiedReadView};
 mod snapshot_tree;
 mod virgin_writer;
 pub use checksum_tree::{
