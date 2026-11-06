@@ -1154,6 +1154,11 @@ impl<D: BlockDevice> UnifiedV10<D> {
                     }
                 })?;
                 for &(offset, bytes) in ranges {
+                    // An empty segment cannot enlarge the logical file, even
+                    // when another segment in the same batch is nonempty.
+                    if bytes.is_empty() {
+                        continue;
+                    }
                     file.size = file.size.max(offset + bytes.len() as u64);
                     let mut copied = 0;
                     while copied < bytes.len() {
@@ -1161,7 +1166,8 @@ impl<D: BlockDevice> UnifiedV10<D> {
                         let logical = pos / BLOCK_SIZE as u64;
                         let within = (pos % BLOCK_SIZE as u64) as usize;
                         let count = (BLOCK_SIZE - within).min(bytes.len() - copied);
-                        if let std::collections::btree_map::Entry::Vacant(slot) = dirty.entry(logical)
+                        if let std::collections::btree_map::Entry::Vacant(slot) =
+                            dirty.entry(logical)
                         {
                             let prior = if let Some(reference) = file.blocks.get(&logical) {
                                 self.volume.inspect(|device| {
@@ -1176,8 +1182,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                             };
                             slot.insert(prior);
                         }
-                        dirty.get_mut(&logical).ok_or(Error::CorruptTree)?
-                            [within..within + count]
+                        dirty.get_mut(&logical).ok_or(Error::CorruptTree)?[within..within + count]
                             .copy_from_slice(&bytes[copied..copied + count]);
                         copied += count;
                     }
@@ -1938,7 +1943,6 @@ impl UnifiedV10<CrashDevice> {
     }
 }
 
-
 /// An immutable, independently audited v10 read view.
 ///
 /// Opening audits both recoverable F0 graphs exactly once, then retains the
@@ -2007,7 +2011,12 @@ impl<D: BlockDevice> VerifiedReadView<D> {
     /// extent root rather than trusting an unverified in-memory hint.
     pub fn stat(&mut self, path: &str) -> Result<(u64, bool, u64)> {
         validate_namespace_path(path)?;
-        let record = *self.checked.reach.records.get(path).ok_or(Error::NotFound)?;
+        let record = *self
+            .checked
+            .reach
+            .records
+            .get(path)
+            .ok_or(Error::NotFound)?;
         if record.directory {
             return Ok((record.inode, true, 0));
         }
@@ -2104,7 +2113,12 @@ impl<D: BlockDevice> VerifiedReadView<D> {
 
     pub fn file_attributes(&self, path: &str) -> Result<BTreeMap<String, Value>> {
         validate_namespace_path(path)?;
-        let record = self.checked.reach.records.get(path).ok_or(Error::NotFound)?;
+        let record = self
+            .checked
+            .reach
+            .records
+            .get(path)
+            .ok_or(Error::NotFound)?;
         if record.directory {
             return Err(Error::IsDirectory);
         }
@@ -2117,11 +2131,7 @@ impl<D: BlockDevice> VerifiedReadView<D> {
             .unwrap_or_default())
     }
 
-    pub fn search_attributes(
-        &self,
-        predicates: &[Predicate],
-        limit: usize,
-    ) -> Result<QueryResult> {
+    pub fn search_attributes(&self, predicates: &[Predicate], limit: usize) -> Result<QueryResult> {
         let catalog = self
             .checked
             .reach
@@ -2155,9 +2165,9 @@ impl<D: BlockDevice> VerifiedReadView<D> {
             snapshot.attribute_schema_root,
         )?;
         let id = self.volume.info().volume_id;
-        let historical = self.volume.inspect(|disk| {
-            read_attribute_roots(disk, roots, id, self.manifest.generation)
-        })?;
+        let historical = self
+            .volume
+            .inspect(|disk| read_attribute_roots(disk, roots, id, self.manifest.generation))?;
         let catalog = historical
             .ok_or(Error::Attribute("snapshot has no schema".into()))?
             .catalog;

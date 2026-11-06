@@ -35,6 +35,7 @@ fn ordered_multi_range_write_is_one_atomic_f0_generation() {
         (4096, b"last"),
         (8193, b"!"),
         (0, b"FINAL"),
+        (bfs_ng_storage::experimental_v10::MAX_FILE_BYTES, b""),
     ];
     let published = fs.write_ranges("/assets/mesh", ranges).unwrap();
     assert_eq!(published, before + 1);
@@ -158,7 +159,10 @@ fn cached_read_view_stops_per_lookup_full_audits_and_matches_strict_writer() {
         view.search_attributes(
             &[Predicate::eq("asset.kind", Value::Text("mesh".into()))],
             10
-        ).unwrap().files.len(),
+        )
+        .unwrap()
+        .files
+        .len(),
         1
     );
     assert_eq!(
@@ -166,10 +170,16 @@ fn cached_read_view_stops_per_lookup_full_audits_and_matches_strict_writer() {
             snapshot,
             &[Predicate::eq("asset.kind", Value::Text("mesh".into()))],
             10
-        ).unwrap().files.len(),
+        )
+        .unwrap()
+        .files
+        .len(),
         1
     );
-    assert_eq!(view.read_snapshot_file(snapshot, "/d/f00").unwrap(), 0_u64.to_le_bytes());
+    assert_eq!(
+        view.read_snapshot_file(snapshot, "/d/f00").unwrap(),
+        0_u64.to_le_bytes()
+    );
     assert_eq!(view.read_file("/d/f00").unwrap(), b"updated!");
     let start = view.physical_read_count().unwrap();
     for _ in 0..48 {
@@ -189,7 +199,10 @@ fn cached_read_view_stops_per_lookup_full_audits_and_matches_strict_writer() {
     assert_eq!(strict.read_at("/d/f01", 0, 8).unwrap(), 1_u64.to_le_bytes());
     assert_eq!(strict.read_file("/d/f00").unwrap(), b"updated!");
     assert_eq!(strict.list_dir("/d").unwrap().len(), 22);
-    assert_eq!(strict.read_snapshot_file(snapshot, "/d/f00").unwrap(), 0_u64.to_le_bytes());
+    assert_eq!(
+        strict.read_snapshot_file(snapshot, "/d/f00").unwrap(),
+        0_u64.to_le_bytes()
+    );
 }
 
 #[test]
@@ -211,10 +224,7 @@ fn torn_range_batch_and_hole_punch_recover_complete_old_or_new_state() {
             let outcome = if hole {
                 tx.punch_hole("/d/f", 2000, 10000)
             } else {
-                tx.write_ranges(
-                    "/d/f",
-                    &[(0, b"A"), (4094, b"cross"), (8192, b"another")],
-                )
+                tx.write_ranges("/d/f", &[(0, b"A"), (4094, b"cross"), (8192, b"another")])
             };
             assert!(matches!(outcome, Err(Error::InjectedCrash)));
             let mut recovered = UnifiedV10::open(tx.into_device().power_loss()).unwrap();
