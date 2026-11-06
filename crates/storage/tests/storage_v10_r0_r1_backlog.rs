@@ -48,13 +48,13 @@ fn ordered_multi_range_write_is_one_atomic_f0_generation() {
         vec![0x53; 3 * 4096]
     );
     // Empty segments are true no-ops, as with single-range write_at.
-    let gen = fs.manifest().generation;
-    assert_eq!(fs.write_ranges("/assets/mesh", &[]).unwrap(), gen);
+    let generation = fs.manifest().generation;
+    assert_eq!(fs.write_ranges("/assets/mesh", &[]).unwrap(), generation);
     assert!(matches!(
         fs.write_ranges("/assets/mesh", &[(u64::MAX, b"x")]),
         Err(Error::TooLarge)
     ));
-    assert_eq!(fs.manifest().generation, gen);
+    assert_eq!(fs.manifest().generation, generation);
     let mut recovered = UnifiedV10::open(fs.into_device().power_loss()).unwrap();
     assert_eq!(recovered.read_file("/assets/mesh").unwrap(), model);
 }
