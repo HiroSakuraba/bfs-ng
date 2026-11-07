@@ -24,10 +24,10 @@ use super::space_index::{
     reserve_free, retire_step_cursor, stage_space_delta, validate_space_pair,
 };
 use super::{
-    BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_FILE_BYTES, Manifest, NamespaceRecord,
-    Page, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter, read_checksum_tree,
-    read_namespace_tree, read_page, read_snapshot_tree, read_verified_block, validate_namespace,
-    validate_namespace_path,
+    BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_UNIFIED_FILE_BYTES, Manifest,
+    NamespaceRecord, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter,
+    file_item_deltas, read_checksum_tree, read_file_tree, read_namespace_tree, read_page,
+    read_snapshot_tree, read_verified_block, validate_namespace, validate_namespace_path,
 };
 use crate::fs::Catalog;
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
@@ -36,6 +36,8 @@ use bfs_ng_attribute_index::{Predicate, QueryResult, Schema, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const STAGING_LIMIT: usize = 512;
+const MAX_WHOLE_READ_BYTES: usize = 4 * 1024 * 1024;
+const STREAM_CHUNK_BYTES: usize = 32 * BLOCK_SIZE;
 // F5.2 metadata pages are never part of their own persistent free tree.
 // This fixed first arena prevents recursive allocator self-ownership.
 const INDEX_ARENA_BLOCKS: u64 = 64;
@@ -176,13 +178,18 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         return Err(Error::CorruptTree);
     }
     let mut file_pages = BTreeSet::new();
+    let mut file_page_owner = BTreeMap::<u64, u64>::new();
     let mut data_owner = BTreeMap::<u64, u64>::new();
     for &(file_root, inode) in all_files.values() {
-        let page = read_page(device, file_root, TreeId::Fs, id, m.generation)?;
-        let file = FileExtents::decode(&page, device.block_count())?;
-        if !file_pages.insert(file_root.address) {
-            return Err(Error::CorruptTree);
+        let scanned = read_file_tree(device, file_root, id, m.generation)?;
+        // Shared snapshot paths for the same inode are valid.
+        for &page in &scanned.metadata_pages {
+            if file_page_owner.insert(page, inode).is_some_and(|other| other != inode) {
+                return Err(Error::CorruptTree);
+            }
         }
+        file_pages.extend(scanned.metadata_pages);
+        let file = scanned.file;
         for (&logical, &reference) in &file.blocks {
             match data_births.insert(reference.physical, reference.birth) {
                 Some(previous) if previous != reference.birth => return Err(Error::CorruptTree),
@@ -848,8 +855,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let id = self.volume.info().volume_id;
         let size = self.volume.inspect(|device| {
             if let Some(root) = entry.file_root {
-                let page = read_page(device, root, TreeId::Fs, id, m.generation)?;
-                Ok(FileExtents::decode(&page, device.block_count())?.size)
+                Ok(read_file_tree(device, root, id, m.generation)?.file.size)
             } else {
                 Ok(0)
             }
@@ -862,6 +868,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
         snapshot: Option<u64>,
         offset: u64,
         length: usize,
+        whole_file: bool,
     ) -> Result<Vec<u8>> {
         validate_namespace_path(path)?;
         let (m, checked, _) = audit(&mut self.volume)?;
@@ -889,11 +896,16 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 return Err(Error::IsDirectory);
             }
             let file = if let Some(root) = entry.file_root {
-                let page = read_page(device, root, TreeId::Fs, id, m.generation)?;
-                FileExtents::decode(&page, device.block_count())?
+                read_file_tree(device, root, id, m.generation)?.file
             } else {
                 FileExtents::default()
             };
+            if whole_file && file.size > MAX_WHOLE_READ_BYTES as u64 {
+                return Err(Error::TooLarge);
+            }
+            if length > MAX_WHOLE_READ_BYTES {
+                return Err(Error::TooLarge);
+            }
             if offset >= file.size || length == 0 {
                 return Ok(Vec::new());
             }
@@ -916,13 +928,13 @@ impl<D: BlockDevice> UnifiedV10<D> {
         })
     }
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        self.read(path, None, 0, MAX_FILE_BYTES as usize)
+        self.read(path, None, 0, MAX_WHOLE_READ_BYTES, true)
     }
     pub fn read_at(&mut self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
-        self.read(path, None, offset, length)
+        self.read(path, None, offset, length, false)
     }
     pub fn read_snapshot_file(&mut self, generation: u64, path: &str) -> Result<Vec<u8>> {
-        self.read(path, Some(generation), 0, MAX_FILE_BYTES as usize)
+        self.read(path, Some(generation), 0, MAX_WHOLE_READ_BYTES, true)
     }
     pub fn snapshots(&mut self) -> Result<Vec<SnapshotDescriptor>> {
         let (_, checked, _) = audit(&mut self.volume)?;
@@ -1011,7 +1023,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
         let end = offset
             .checked_add(bytes.len() as u64)
             .ok_or(Error::TooLarge)?;
-        if end > MAX_FILE_BYTES {
+        if end > MAX_UNIFIED_FILE_BYTES {
             return Err(Error::TooLarge);
         }
         if bytes.is_empty() {
@@ -1030,7 +1042,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
             let end = offset
                 .checked_add(bytes.len() as u64)
                 .ok_or(Error::TooLarge)?;
-            if end > MAX_FILE_BYTES {
+            if end > MAX_UNIFIED_FILE_BYTES {
                 return Err(Error::TooLarge);
             }
             any |= !bytes.is_empty();
@@ -1056,8 +1068,66 @@ impl<D: BlockDevice> UnifiedV10<D> {
         })
     }
 
+
+    /// Stream input with an independent crash-atomic F0 publication per
+    /// fixed 128 KiB chunk. An error may leave an already-published prefix:
+    /// callers should record progress and resume at the committed offset.
+    /// The input buffer is bounded, but metadata/full-audit cost is not yet
+    /// independent of file size.
+    pub fn write_from_reader<R: std::io::Read>(
+        &mut self,
+        path: &str,
+        mut offset: u64,
+        input: &mut R,
+    ) -> Result<u64> {
+        if offset > MAX_UNIFIED_FILE_BYTES {
+            return Err(Error::TooLarge);
+        }
+        let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
+        let mut written = 0_u64;
+        loop {
+            let count = input.read(&mut buffer)?;
+            if count == 0 {
+                return Ok(written);
+            }
+            let end = offset.checked_add(count as u64).ok_or(Error::TooLarge)?;
+            if end > MAX_UNIFIED_FILE_BYTES {
+                return Err(Error::TooLarge);
+            }
+            self.write_at(path, offset, &buffer[..count])?;
+            offset = end;
+            written += count as u64;
+        }
+    }
+
+    /// Bounded-memory read streaming; each chunk verifies the authenticated
+    /// file tree and CRC32C data but still performs the strict root audit.
+    pub fn read_into_writer<W: std::io::Write>(
+        &mut self,
+        path: &str,
+        mut offset: u64,
+        mut length: u64,
+        output: &mut W,
+    ) -> Result<u64> {
+        let mut copied = 0_u64;
+        while length > 0 {
+            let bytes = self.read_at(
+                path,
+                offset,
+                length.min(STREAM_CHUNK_BYTES as u64) as usize,
+            )?;
+            if bytes.is_empty() {
+                break;
+            }
+            output.write_all(&bytes)?;
+            offset = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
+            length -= bytes.len() as u64;
+            copied += bytes.len() as u64;
+        }
+        Ok(copied)
+    }
     pub fn truncate(&mut self, path: &str, size: u64) -> Result<u64> {
-        if size > MAX_FILE_BYTES {
+        if size > MAX_UNIFIED_FILE_BYTES {
             return Err(Error::TooLarge);
         }
         self.commit(Edit::Truncate { path, size })
@@ -1147,8 +1217,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 };
                 let mut file = self.volume.inspect(|device| {
                     if let Some(root) = entry.file_root {
-                        let page = read_page(device, root, TreeId::Fs, id, old.generation)?;
-                        FileExtents::decode(&page, device.block_count())
+                        read_file_tree(device, root, id, old.generation).map(|scan| scan.file)
                     } else {
                         Ok(FileExtents::default())
                     }
@@ -1203,8 +1272,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 }
                 let mut file = self.volume.inspect(|device| {
                     if let Some(root) = entry.file_root {
-                        let page = read_page(device, root, TreeId::Fs, id, old.generation)?;
-                        FileExtents::decode(&page, device.block_count())
+                        read_file_tree(device, root, id, old.generation).map(|scan| scan.file)
                     } else {
                         Ok(FileExtents::default())
                     }
@@ -1255,8 +1323,7 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 }
                 let mut file = self.volume.inspect(|device| {
                     if let Some(root) = entry.file_root {
-                        let page = read_page(device, root, TreeId::Fs, id, old.generation)?;
-                        FileExtents::decode(&page, device.block_count())
+                        read_file_tree(device, root, id, old.generation).map(|scan| scan.file)
                     } else {
                         Ok(FileExtents::default())
                     }
@@ -1419,22 +1486,40 @@ impl<D: BlockDevice> UnifiedV10<D> {
                 staged.push((physical, *bytes));
                 added_crc.insert(physical, crc32c(bytes));
             }
+            let old_root = records.get(&path).ok_or(Error::CorruptTree)?.file_root;
             let file_root = if file.size == 0 {
                 None
             } else {
-                let address = *candidates.get(used).ok_or(Error::NoSpace)?;
-                used += 1;
-                let page = Page {
-                    tree: TreeId::Fs,
-                    level: 0,
-                    address,
-                    birth: generation,
-                    volume_id: id,
-                    items: file.encode_items(generation, total)?,
+                // The planner copies changed leaf paths and reuses immutable
+                // snapshot-held children. No file metadata is edited in place.
+                let previous_items = if let Some(root) = old_root {
+                    self.volume.inspect(|disk| {
+                        read_file_tree(disk, root, id, old.generation).map(|scan| scan.leaf_items)
+                    })?
+                } else {
+                    BTreeMap::new()
                 };
-                let pointer = page.pointer()?;
-                staged.push((address, page.encode()?));
-                Some(pointer)
+                let target_items = file.encode_large_items(generation, total)?;
+                let changes = file_item_deltas(&previous_items, &target_items)?;
+                let planned = self.volume.inspect(|disk| {
+                    let mut overlay = Overlay {
+                        disk,
+                        staged: staged.iter().copied().collect(),
+                    };
+                    stage_space_delta(
+                        &mut overlay,
+                        TreeId::Fs,
+                        old_root,
+                        &changes,
+                        &candidates[used..],
+                        id,
+                        generation,
+                        old.high_water,
+                    )
+                })?;
+                used += planned.consumed_reservations;
+                staged.extend(planned.staged_pages);
+                Some(planned.root.ok_or(Error::CorruptTree)?)
             };
             let inode = records.get(&path).ok_or(Error::CorruptTree)?.inode;
             records.insert(path, NamespaceRecord::file(inode, file_root));
@@ -2023,8 +2108,7 @@ impl<D: BlockDevice> VerifiedReadView<D> {
         let id = self.volume.info().volume_id;
         let size = self.volume.inspect(|disk| {
             if let Some(root) = record.file_root {
-                let page = read_page(disk, root, TreeId::Fs, id, self.manifest.generation)?;
-                Ok(FileExtents::decode(&page, disk.block_count())?.size)
+                Ok(read_file_tree(disk, root, id, self.manifest.generation)?.file.size)
             } else {
                 Ok(0)
             }
@@ -2038,6 +2122,7 @@ impl<D: BlockDevice> VerifiedReadView<D> {
         snapshot: Option<u64>,
         offset: u64,
         length: usize,
+        whole_file: bool,
     ) -> Result<Vec<u8>> {
         validate_namespace_path(path)?;
         let id = self.volume.info().volume_id;
@@ -2069,11 +2154,16 @@ impl<D: BlockDevice> VerifiedReadView<D> {
                 return Err(Error::IsDirectory);
             }
             let file = if let Some(root) = record.file_root {
-                let page = read_page(disk, root, TreeId::Fs, id, manifest.generation)?;
-                FileExtents::decode(&page, disk.block_count())?
+                read_file_tree(disk, root, id, manifest.generation)?.file
             } else {
                 FileExtents::default()
             };
+            if whole_file && file.size > MAX_WHOLE_READ_BYTES as u64 {
+                return Err(Error::TooLarge);
+            }
+            if length > MAX_WHOLE_READ_BYTES {
+                return Err(Error::TooLarge);
+            }
             if offset >= file.size || length == 0 {
                 return Ok(Vec::new());
             }
@@ -2096,17 +2186,44 @@ impl<D: BlockDevice> VerifiedReadView<D> {
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        self.read(path, None, 0, MAX_FILE_BYTES as usize)
+        self.read(path, None, 0, MAX_WHOLE_READ_BYTES, true)
     }
 
     pub fn read_at(&mut self, path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
-        self.read(path, None, offset, length)
+        self.read(path, None, offset, length, false)
     }
 
     pub fn read_snapshot_file(&mut self, generation: u64, path: &str) -> Result<Vec<u8>> {
-        self.read(path, Some(generation), 0, MAX_FILE_BYTES as usize)
+        self.read(path, Some(generation), 0, MAX_WHOLE_READ_BYTES, true)
     }
 
+
+    /// Read a possibly large logical file with a fixed-size byte buffer.
+    /// All data bytes read are checksum-validated against the audited root.
+    pub fn read_into_writer<W: std::io::Write>(
+        &mut self,
+        path: &str,
+        mut offset: u64,
+        mut length: u64,
+        output: &mut W,
+    ) -> Result<u64> {
+        let mut copied = 0_u64;
+        while length > 0 {
+            let bytes = self.read_at(
+                path,
+                offset,
+                length.min(STREAM_CHUNK_BYTES as u64) as usize,
+            )?;
+            if bytes.is_empty() {
+                break;
+            }
+            output.write_all(&bytes)?;
+            offset = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
+            length -= bytes.len() as u64;
+            copied += bytes.len() as u64;
+        }
+        Ok(copied)
+    }
     pub fn snapshots(&self) -> Vec<SnapshotDescriptor> {
         self.checked.reach.snapshots.clone()
     }

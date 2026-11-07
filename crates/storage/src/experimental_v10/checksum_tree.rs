@@ -7,8 +7,8 @@ use crate::volume::{ROOT_PAYLOAD_LAST, crc32c};
 use crate::{BLOCK_SIZE, BlockDevice, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const MAX_CHECKSUM_PAGES: usize = 8192;
-pub const MAX_CHECKSUM_BLOCKS: usize = 131072;
+pub const MAX_CHECKSUM_PAGES: usize = 32768;
+pub const MAX_CHECKSUM_BLOCKS: usize = 524288;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChecksumScan {

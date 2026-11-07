@@ -26,7 +26,10 @@ mod extent_writer;
 mod namespace;
 mod owner_tree;
 mod unified_writer;
-pub use extent_map::{BlockRef, Extent, FileExtents, MAX_FILE_BLOCKS, MAX_FILE_BYTES};
+pub use extent_map::{
+    BlockRef, Extent, FileExtents, FileTreeScan, MAX_FILE_BLOCKS, MAX_FILE_BYTES,
+    MAX_UNIFIED_FILE_BLOCKS, MAX_UNIFIED_FILE_BYTES, file_item_deltas, read_file_tree,
+};
 pub use extent_writer::ExtentDataWriter;
 pub use namespace::{
     MAX_NAMESPACE_PAGES, MAX_NAMESPACE_RECORDS, NamespaceRecord, NamespaceScan,
