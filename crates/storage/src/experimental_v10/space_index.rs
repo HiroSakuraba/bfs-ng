@@ -403,8 +403,10 @@ pub fn stage_space_delta<D: BlockDevice>(
     generation: u64,
     high_water: u64,
 ) -> Result<StagedSpace> {
-    if !matches!(tree, TreeId::Free | TreeId::DeadList | TreeId::Ownership)
-        || id == 0
+    if !matches!(
+        tree,
+        TreeId::Free | TreeId::DeadList | TreeId::Ownership | TreeId::Fs
+    ) || id == 0
         || generation <= 1
         || high_water <= ROOT_PAYLOAD_LAST
         || high_water > device.block_count()
@@ -426,6 +428,9 @@ pub fn stage_space_delta<D: BlockDevice>(
                 }
                 TreeId::Ownership => {
                     super::owner_tree::validate_owner_item(key, value, device.block_count())?;
+                }
+                TreeId::Fs => {
+                    super::extent_map::validate_large_item(key, value, device.block_count())?;
                 }
                 _ => unreachable!(),
             }
