@@ -19,33 +19,40 @@ fn sparse_logical_gib_with_tail_writes_and_bounded_read_streaming() {
     fs.write_at("/data/big", 0, b"first").unwrap();
     fs.truncate("/data/big", MAX_UNIFIED_FILE_BYTES).unwrap();
     let tail = MAX_UNIFIED_FILE_BYTES - 17;
-    fs.write_at("/data/big", tail, b"0123456789ABCDEFG").unwrap();
+    fs.write_at("/data/big", tail, b"0123456789ABCDEFG")
+        .unwrap();
     assert_eq!(fs.stat("/data/big").unwrap().2, MAX_UNIFIED_FILE_BYTES);
     assert!(matches!(fs.read_file("/data/big"), Err(Error::TooLarge)));
-    assert_eq!(fs.read_at("/data/big", 4, 12).unwrap(), vec![0_u8; 12]);
-    assert_eq!(fs.read_at("/data/big", tail, 17).unwrap(), b"0123456789ABCDEFG");
+    assert_eq!(fs.read_at("/data/big", 5, 12).unwrap(), vec![0_u8; 12]);
+    assert_eq!(
+        fs.read_at("/data/big", tail, 17).unwrap(),
+        b"0123456789ABCDEFG"
+    );
     let source = vec![0x5a_u8; 256 * 1024];
-    let count = fs.write_from_reader(
-        "/data/big",
-        8 * 4096,
-        &mut Cursor::new(source.clone()),
-    ).unwrap();
+    let count = fs
+        .write_from_reader("/data/big", 8 * 4096, &mut Cursor::new(source.clone()))
+        .unwrap();
     assert_eq!(count, source.len() as u64);
     let mut out = Vec::new();
     assert_eq!(
-        fs.read_into_writer("/data/big", 8 * 4096, count, &mut out).unwrap(),
+        fs.read_into_writer("/data/big", 8 * 4096, count, &mut out)
+            .unwrap(),
         count
     );
     assert_eq!(out, source);
     let mut view = VerifiedReadView::open(fs.into_device().power_loss()).unwrap();
     let mut streamed = Vec::new();
     assert_eq!(
-        view.read_into_writer("/data/big", 8 * 4096, count, &mut streamed).unwrap(),
+        view.read_into_writer("/data/big", 8 * 4096, count, &mut streamed)
+            .unwrap(),
         count
     );
     assert_eq!(streamed, source);
     assert_eq!(view.stat("/data/big").unwrap().2, MAX_UNIFIED_FILE_BYTES);
-    assert_eq!(view.read_at("/data/big", tail, 17).unwrap(), b"0123456789ABCDEFG");
+    assert_eq!(
+        view.read_at("/data/big", tail, 17).unwrap(),
+        b"0123456789ABCDEFG"
+    );
 }
 
 #[test]
@@ -53,7 +60,9 @@ fn split_file_btree_shares_unchanged_leaves_across_snapshots() {
     let mut fs = indexed(8192);
     fs.mkdir("/d").unwrap();
     let blocks: Vec<Vec<u8>> = (0..160).map(|n| vec![n as u8; 32]).collect();
-    let edits: Vec<(u64, &[u8])> = blocks.iter().enumerate()
+    let edits: Vec<(u64, &[u8])> = blocks
+        .iter()
+        .enumerate()
         .map(|(n, bytes)| ((n as u64) * 8192, bytes.as_slice()))
         .collect();
     let initial = fs.write_ranges("/d/f", &edits).unwrap();
@@ -65,28 +74,37 @@ fn split_file_btree_shares_unchanged_leaves_across_snapshots() {
     let snapshots = fs.snapshots().unwrap();
     let historic = snapshots.iter().find(|x| x.generation == pinned).unwrap();
     let mut disk = fs.into_device().power_loss();
-    let old_ns = read_namespace_tree(
-        &mut disk, historic.fs_root, ID, m.generation, m.next_inode,
-    ).unwrap();
-    let new_ns = read_namespace_tree(
-        &mut disk, m.roots.fs, ID, m.generation, m.next_inode,
-    ).unwrap();
+    let old_ns =
+        read_namespace_tree(&mut disk, historic.fs_root, ID, m.generation, m.next_inode).unwrap();
+    let new_ns =
+        read_namespace_tree(&mut disk, m.roots.fs, ID, m.generation, m.next_inode).unwrap();
     let old_root = old_ns.records["/d/f"].file_root.unwrap();
     let new_root = new_ns.records["/d/f"].file_root.unwrap();
-    assert!(old_root.level >= 1, "160 sparse runs should occupy multiple leaves");
+    assert!(
+        old_root.level >= 1,
+        "160 sparse runs should occupy multiple leaves"
+    );
     assert!(new_root.level >= 1);
     let original = read_file_tree(&mut disk, old_root, ID, m.generation).unwrap();
     let updated = read_file_tree(&mut disk, new_root, ID, m.generation).unwrap();
     assert_eq!(original.file.size, 159 * 8192 + 32);
     assert_eq!(updated.file.size, original.file.size);
-    assert!(original.metadata_pages.intersection(&updated.metadata_pages).next().is_some(),
-        "path-copy must retain at least one untouched leaf across snapshots");
+    assert!(
+        original
+            .metadata_pages
+            .intersection(&updated.metadata_pages)
+            .next()
+            .is_some(),
+        "path-copy must retain at least one untouched leaf across snapshots"
+    );
     assert_ne!(original.metadata_pages, updated.metadata_pages);
     let mut reopened = UnifiedV10::open(disk).unwrap();
-    assert_eq!(reopened.read_at("/d/f", 81 * 8192 + 7, 5).unwrap(), b"PATCH");
     assert_eq!(
-        reopened.read_snapshot_file(pinned, "/d/f").unwrap()
-            [81 * 8192 + 7..81 * 8192 + 12],
+        reopened.read_at("/d/f", 81 * 8192 + 7, 5).unwrap(),
+        b"PATCH"
+    );
+    assert_eq!(
+        reopened.read_snapshot_file(pinned, "/d/f").unwrap()[81 * 8192 + 7..81 * 8192 + 12],
         blocks[81][7..12]
     );
 }
@@ -100,8 +118,13 @@ fn large_file_crc_corruption_fails_closed_on_reopen() {
     let manifest = *fs.manifest();
     let mut disk = fs.into_device().power_loss();
     let ns = read_namespace_tree(
-        &mut disk, manifest.roots.fs, ID, manifest.generation, manifest.next_inode,
-    ).unwrap();
+        &mut disk,
+        manifest.roots.fs,
+        ID,
+        manifest.generation,
+        manifest.next_inode,
+    )
+    .unwrap();
     let root = ns.records["/x/big"].file_root.unwrap();
     let scan = read_file_tree(&mut disk, root, ID, manifest.generation).unwrap();
     let physical = scan.file.blocks[&800].physical as usize;
@@ -117,7 +140,11 @@ fn torn_multilevel_extent_change_recovers_only_old_or_new_bytes() {
         fs.write_at("/d/f", 300 * 4096, b"old").unwrap();
         let previous = fs.manifest().generation;
         let mut disk = fs.into_device().power_loss();
-        disk.inject(Fault { operation, torn_bytes: Some(127) }).unwrap();
+        disk.inject(Fault {
+            operation,
+            torn_bytes: Some(127),
+        })
+        .unwrap();
         let mut tx = UnifiedV10::open(disk).unwrap();
         assert!(matches!(
             tx.write_at("/d/f", 300 * 4096, b"new"),
@@ -158,7 +185,9 @@ fn streaming_input_failure_keeps_durable_committed_prefix() {
     let mut out = Vec::new();
     let prefix = 2 * 32 * 4096;
     assert_eq!(
-        reopened.read_into_writer("/d/f", 0, prefix as u64, &mut out).unwrap(),
+        reopened
+            .read_into_writer("/d/f", 0, prefix as u64, &mut out)
+            .unwrap(),
         prefix as u64
     );
     assert_eq!(out.len(), prefix);

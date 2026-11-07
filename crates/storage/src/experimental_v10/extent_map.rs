@@ -174,7 +174,8 @@ impl FileExtents {
         let mut extents = Vec::new();
         let mut physical_seen = BTreeSet::new();
         for (&logical, &reference) in &self.blocks {
-            if logical >= logical_limit || logical >= limit
+            if logical >= logical_limit
+                || logical >= limit
                 || reference.physical <= ROOT_PAYLOAD_LAST
                 || reference.physical >= total
                 || reference.birth == 0
@@ -220,7 +221,6 @@ impl FileExtents {
     }
 }
 
-
 /// All authenticated metadata pages of a single v10 file extent tree.
 /// The legacy 4 KiB file leaf is a valid one-page instance. A multilevel
 /// root contains separator-max keys and 24-byte checksummed child pointers.
@@ -255,9 +255,13 @@ impl<D: BlockDevice> FileWalker<'_, D> {
             for item in page.items {
                 validate_large_item(&item.key, &item.value, self.disk.block_count())?;
                 if item.key == LENGTH_KEY {
-                    if self.size.replace(u64::from_le_bytes(
-                        item.value[..8].try_into().map_err(|_| Error::CorruptTree)?,
-                    )).is_some() {
+                    if self
+                        .size
+                        .replace(u64::from_le_bytes(
+                            item.value[..8].try_into().map_err(|_| Error::CorruptTree)?,
+                        ))
+                        .is_some()
+                    {
                         return Err(Error::CorruptTree);
                     }
                 } else {
@@ -292,7 +296,10 @@ impl<D: BlockDevice> FileWalker<'_, D> {
                 last = Some(max);
             }
         }
-        Ok((first.ok_or(Error::CorruptTree)?, last.ok_or(Error::CorruptTree)?))
+        Ok((
+            first.ok_or(Error::CorruptTree)?,
+            last.ok_or(Error::CorruptTree)?,
+        ))
     }
 }
 
@@ -301,9 +308,10 @@ impl<D: BlockDevice> FileWalker<'_, D> {
 /// against volume geometry and the independent per-file byte-size record.
 pub(crate) fn validate_large_item(key: &[u8], value: &[u8], total: u64) -> Result<()> {
     if key == LENGTH_KEY {
-        if value.len() != 8 || u64::from_le_bytes(
-            value.try_into().map_err(|_| Error::CorruptTree)?,
-        ) > MAX_UNIFIED_FILE_BYTES {
+        if value.len() != 8
+            || u64::from_le_bytes(value.try_into().map_err(|_| Error::CorruptTree)?)
+                > MAX_UNIFIED_FILE_BYTES
+        {
             return Err(Error::CorruptTree);
         }
     } else {
@@ -343,16 +351,27 @@ pub fn read_file_tree<D: BlockDevice>(
     };
     let mut physically_seen = BTreeSet::new();
     for e in walker.extents {
-        if e.logical.checked_add(u64::from(e.blocks)).is_none_or(|end| end > logical_limit) {
+        if e.logical
+            .checked_add(u64::from(e.blocks))
+            .is_none_or(|end| end > logical_limit)
+        {
             return Err(Error::CorruptTree);
         }
         for delta in 0..u64::from(e.blocks) {
             let logical = e.logical + delta;
             let physical = e.physical + delta;
-            if file.blocks.insert(logical, BlockRef {
-                physical,
-                birth: e.birth,
-            }).is_some() || !physically_seen.insert(physical) {
+            if file
+                .blocks
+                .insert(
+                    logical,
+                    BlockRef {
+                        physical,
+                        birth: e.birth,
+                    },
+                )
+                .is_some()
+                || !physically_seen.insert(physical)
+            {
                 return Err(Error::CorruptTree);
             }
         }
@@ -375,7 +394,10 @@ pub fn file_item_deltas(
 ) -> Result<BTreeMap<Vec<u8>, Option<Vec<u8>>>> {
     let mut target = BTreeMap::new();
     for item in new {
-        if target.insert(item.key.clone(), item.value.clone()).is_some() {
+        if target
+            .insert(item.key.clone(), item.value.clone())
+            .is_some()
+        {
             return Err(Error::CorruptTree);
         }
     }

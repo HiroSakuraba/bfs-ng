@@ -26,8 +26,8 @@ use super::space_index::{
 use super::{
     BlockPointer, BlockRef, CatalogEdit, FileExtents, MAX_UNIFIED_FILE_BYTES, Manifest,
     NamespaceRecord, SnapshotDescriptor, SnapshotState, TreeId, VirginSnapshotWriter,
-    file_item_deltas, read_checksum_tree, read_file_tree, read_namespace_tree, read_page,
-    read_snapshot_tree, read_verified_block, validate_namespace, validate_namespace_path,
+    file_item_deltas, read_checksum_tree, read_file_tree, read_namespace_tree, read_snapshot_tree,
+    read_verified_block, validate_namespace, validate_namespace_path,
 };
 use crate::fs::Catalog;
 use crate::volume::{ROOT_PAYLOAD_LAST, RootInfo, crc32c};
@@ -184,7 +184,10 @@ fn collect<D: BlockDevice>(device: &mut D, id: u128, m: Manifest) -> Result<Reac
         let scanned = read_file_tree(device, file_root, id, m.generation)?;
         // Shared snapshot paths for the same inode are valid.
         for &page in &scanned.metadata_pages {
-            if file_page_owner.insert(page, inode).is_some_and(|other| other != inode) {
+            if file_page_owner
+                .insert(page, inode)
+                .is_some_and(|other| other != inode)
+            {
                 return Err(Error::CorruptTree);
             }
         }
@@ -1068,7 +1071,6 @@ impl<D: BlockDevice> UnifiedV10<D> {
         })
     }
 
-
     /// Stream input with an independent crash-atomic F0 publication per
     /// fixed 128 KiB chunk. An error may leave an already-published prefix:
     /// callers should record progress and resume at the committed offset.
@@ -1111,16 +1113,15 @@ impl<D: BlockDevice> UnifiedV10<D> {
     ) -> Result<u64> {
         let mut copied = 0_u64;
         while length > 0 {
-            let bytes = self.read_at(
-                path,
-                offset,
-                length.min(STREAM_CHUNK_BYTES as u64) as usize,
-            )?;
+            let bytes =
+                self.read_at(path, offset, length.min(STREAM_CHUNK_BYTES as u64) as usize)?;
             if bytes.is_empty() {
                 break;
             }
             output.write_all(&bytes)?;
-            offset = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
+            offset = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or(Error::TooLarge)?;
             length -= bytes.len() as u64;
             copied += bytes.len() as u64;
         }
@@ -2108,7 +2109,9 @@ impl<D: BlockDevice> VerifiedReadView<D> {
         let id = self.volume.info().volume_id;
         let size = self.volume.inspect(|disk| {
             if let Some(root) = record.file_root {
-                Ok(read_file_tree(disk, root, id, self.manifest.generation)?.file.size)
+                Ok(read_file_tree(disk, root, id, self.manifest.generation)?
+                    .file
+                    .size)
             } else {
                 Ok(0)
             }
@@ -2197,7 +2200,6 @@ impl<D: BlockDevice> VerifiedReadView<D> {
         self.read(path, Some(generation), 0, MAX_WHOLE_READ_BYTES, true)
     }
 
-
     /// Read a possibly large logical file with a fixed-size byte buffer.
     /// All data bytes read are checksum-validated against the audited root.
     pub fn read_into_writer<W: std::io::Write>(
@@ -2209,16 +2211,15 @@ impl<D: BlockDevice> VerifiedReadView<D> {
     ) -> Result<u64> {
         let mut copied = 0_u64;
         while length > 0 {
-            let bytes = self.read_at(
-                path,
-                offset,
-                length.min(STREAM_CHUNK_BYTES as u64) as usize,
-            )?;
+            let bytes =
+                self.read_at(path, offset, length.min(STREAM_CHUNK_BYTES as u64) as usize)?;
             if bytes.is_empty() {
                 break;
             }
             output.write_all(&bytes)?;
-            offset = offset.checked_add(bytes.len() as u64).ok_or(Error::TooLarge)?;
+            offset = offset
+                .checked_add(bytes.len() as u64)
+                .ok_or(Error::TooLarge)?;
             length -= bytes.len() as u64;
             copied += bytes.len() as u64;
         }

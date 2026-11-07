@@ -65,11 +65,9 @@ impl NamespaceRecord {
             return Err(Error::CorruptTree);
         }
         if let Some(root) = file_root {
+            // Multilevel file extent trees are valid here; validate()
+            // already bounds the root level by MAX_LEVEL.
             root.validate(total, generation, ROOT_PAYLOAD_LAST + 1)?;
-            if root.level != 0 {
-                // The first integrated format uses one extent leaf per file.
-                return Err(Error::CorruptTree);
-            }
         }
         Ok(Self {
             inode,
